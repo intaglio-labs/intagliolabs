@@ -262,10 +262,12 @@ test('the reader is started, with its config, on the main queue', () => {
   // And it is main-thread-assumed: no lock, mutable isRunning/lastStart/
   // process, and its own retry and termination handling re-dispatched onto
   // .main. acceptLinkedInFiles runs on a background queue, so it hops.
-  assert.match(accept, /DispatchQueue\.main\.async \{ \[weak self\] in self\?\.startReadingSources\(\) \}/u);
+  // `_ =` because the call answers whether the reader came up now, and this
+  // call site is the import's fire-and-forget one.
+  assert.match(accept, /DispatchQueue\.main\.async \{ \[weak self\] in _ = self\?\.startReadingSources\(\) \}/u);
   assert.doesNotMatch(accept, /(?<!\.)\bConnectors\.shared\.start\(\)/u,
     'the bare start() is what skipped the config write');
-  const starter = /private func startReadingSources\(\) -> Bool \{([\s\S]*?)\n {2}\}/u.exec(bridge)?.[1];
+  const starter = /private func startReadingSources\(\) -> \(configWritten: Bool, outcome: Connectors\.StartOutcome\) \{([\s\S]*?)\n {2}\}/u.exec(bridge)?.[1];
   assert.ok(starter, 'startReadingSources() not found');
   assert.match(starter, /dispatchPrecondition\(condition: \.onQueue\(\.main\)\)/u);
   for (const step of ['writeConnectorsConfigIfMissing\\(\\)', 'retireConnectorsAgent\\(\\)',
@@ -273,8 +275,13 @@ test('the reader is started, with its config, on the main queue', () => {
     assert.match(starter, new RegExp(step, 'u'), `startSources does ${step} and so must this`);
   }
   // And the verb the page calls goes through the same function, so the two
-  // cannot drift apart again.
-  assert.match(bridge, /case "startSources":\s*\n\s*reply\(webView, id, \["state": startReadingSources\(\) \? "ok" : "error"\]\)/u);
+  // cannot drift apart again. It reports the START now, not just the config
+  // write: Connectors.start() returns silently on six guards and the settings
+  // panel has a button the owner presses and watches.
+  const verb = /case "startSources":([\s\S]*?)\n\n/u.exec(bridge)?.[1] ?? '';
+  assert.match(verb, /let started = startReadingSources\(\)/u);
+  assert.match(verb, /"state": started\.configWritten \? "ok" : "error"/u);
+  assert.match(verb, /"reading": started\.outcome\.isUp/u);
 });
 
 test('a second run is told what is already on disk, as counts', () => {

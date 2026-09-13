@@ -419,17 +419,33 @@ final class Connectors {
     }
   }
 
+  /// WHY A START DID NOT HAPPEN, because six guards used to swallow that
+  /// question and the settings panel now has a button the owner presses and
+  /// watches. `alreadyRunning` and `started` are both "it is reading"; `queued`
+  /// is the throttle, which means it WILL be. The rest are states the owner can
+  /// do something about only if somebody tells them.
+  enum StartOutcome: String {
+    case started, alreadyRunning, queued
+    case stopping, modelMaintenance, missingRuntime, missingConfig
+    /// Is the reader up, or certain to be in a moment.
+    var isUp: Bool { self == .started || self == .alreadyRunning || self == .queued }
+  }
+
   /// Start the daemon if it is not already up and its config exists. Safe to
   /// call repeatedly — onboarding calls it the moment it writes the config.
-  func start(bypassingThrottle: Bool = false) {
-    guard !isRunning, !stopping, !modelMaintenancePaused else { return }
+  @discardableResult
+  func start(bypassingThrottle: Bool = false) -> StartOutcome {
+    if isRunning { return .alreadyRunning }
+    if stopping { return .stopping }
+    if modelMaintenancePaused { return .modelMaintenance }
     let node = home.appendingPathComponent(".hazlie/bin/node")
     let script = backend.appendingPathComponent("connectors/daemon.mjs")
     let config = home.appendingPathComponent(".hazlie/connectors/config.json")
-    guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path) else { return }
+    guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path)
+    else { return .missingRuntime }
     // No config means the daemon would exit(1) immediately and we would respawn
     // it forever. Onboarding writes it and then calls start().
-    guard fm.fileExists(atPath: config.path) else { return }
+    guard fm.fileExists(atPath: config.path) else { return .missingConfig }
     reassertTreePerms()
 
     let since = Date().timeIntervalSince(lastStart)
@@ -437,7 +453,7 @@ final class Connectors {
       DispatchQueue.main.asyncAfter(deadline: .now() + (throttle - since)) { [weak self] in
         self?.start()
       }
-      return
+      return .queued
     }
     lastStart = Date()
 
@@ -505,8 +521,10 @@ final class Connectors {
       try p.run()
       process = p
       NSLog("Intaglio Labs: connectors running as a child of this app (pid \(p.processIdentifier))")
+      return .started
     } catch {
       NSLog("Intaglio Labs: could not start connectors: \(error.localizedDescription)")
+      return .missingRuntime
     }
   }
 
@@ -599,5 +617,46 @@ final class Connectors {
     stopping = true
     process?.terminate()
     process = nil
+  }
+
+  /// Stop it AND WAIT FOR IT TO BE GONE, up to `timeout`, then SIGKILL and wait
+  /// a little longer. Returns whether the child is actually gone.
+  ///
+  /// WHY THE WAIT EXISTS: the uninstall deletes the app bundle, and the daemon
+  /// is running from `Bundle.main/backend/connectors/daemon.mjs`. stop() is
+  /// SIGTERM and an immediate return, so deleting the bundle on the next line
+  /// unlinks the tree out from under a graceful shutdown that is still doing
+  /// lazy import()s — already-open fds survive an unlink, a module that has not
+  /// been loaded yet does not. What is lost is the shutdown's cursor and lock
+  /// flush into ~/.hazlie, which is the one directory an uninstall deliberately
+  /// keeps for a reinstall.
+  ///
+  /// NEVER ON THE MAIN THREAD: the caller runs this on a background queue.
+  func stopAndWait(timeout: TimeInterval = 5) -> Bool {
+    let child = process
+    stopping = true
+    process = nil
+    guard let child, child.isRunning else { return true }
+    child.terminate()
+    let deadline = Date().addingTimeInterval(timeout)
+    while child.isRunning, Date() < deadline { usleep(100_000) }
+    if child.isRunning {
+      NSLog("Intaglio Labs: the reader did not stop in \(Int(timeout))s; killing it")
+      kill(child.processIdentifier, SIGKILL)
+      let hard = Date().addingTimeInterval(2)
+      while child.isRunning, Date() < hard { usleep(100_000) }
+    }
+    return !child.isRunning
+  }
+
+  /// Let it be started again after a stop() that turned out not to be final.
+  ///
+  /// `stopping` is a one-way latch everywhere else, and correctly so: it is set
+  /// on quit, where nothing should respawn the child on the way out. An
+  /// uninstall that FAILED is the one case where the app keeps running after a
+  /// stop, and without this the reader could never be restarted for the rest of
+  /// the session — the "start it" button would report success and do nothing.
+  func allowRestart() {
+    stopping = false
   }
 }

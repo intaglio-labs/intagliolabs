@@ -41,8 +41,17 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
   opacity: 0.55; margin: 0 0 4px;
 }
 .rc-name { font-size: 17px; font-weight: 650; margin: 2px 0 6px; }
+/* The name as a door to their profile, when the owner's export carried one.
+   Underlined on hover only: the name is the card's headline first and a link
+   second, and a permanently underlined headline reads as a web page. */
+.rc-name-link { color: inherit; text-decoration: none; cursor: pointer; }
+.rc-name-link:hover { text-decoration: underline; }
 .rc-who { font-size: 12.5px; opacity: 0.7; margin: -4px 0 6px; }
 .rc-why { color: var(--accent-soft, #cea); margin-bottom: 8px; }
+/* Hidden on a card whose only tie sentence was the producer's count template —
+   see tieLine(). A class sets display nowhere here, but the rule is written
+   anyway: three rules in this file already exist because [hidden] lost to one. */
+.rc-why[hidden] { display: none; }
 .rc-why-emphasis { font-weight: 600; font-size: 13.5px; }
 .rc-quote {
   margin: 0 0 10px; padding: 4px 0 4px 10px;

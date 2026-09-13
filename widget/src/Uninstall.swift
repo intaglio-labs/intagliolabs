@@ -146,41 +146,93 @@ enum Uninstall {
   /// Do it. Returns what happened rather than logging it and hoping: the page
   /// only quits the app when nothing failed, so a half-uninstall stays on
   /// screen with its reason instead of vanishing with the window.
-  static func run() -> Outcome {
+  ///
+  /// NEVER ON THE MAIN THREAD. Every step here is a `launchctl` invocation with
+  /// a `waitUntilExit`, plus a bounded wait on the reader; with several agents
+  /// and a busy launchd that is seconds of a frozen window with nothing on
+  /// screen saying why. `progress` is called as each step lands so the row the
+  /// owner pressed can narrate it.
+  static func run(progress: @escaping (String) -> Void = { _ in }) -> Outcome {
     var out = Outcome()
-    for label in agentLabels().sorted() {
-      let p = Process()
-      p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-      p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
-      p.standardError = FileHandle.nullDevice
-      p.standardOutput = FileHandle.nullDevice
-      try? p.run()
-      p.waitUntilExit()
-      // A bootout of a job that is not loaded is not a failure — the plist is
-      // what brings it back at login, and removing it is the step that counts.
+
+    // 1. THE READER FIRST, AND ALL THE WAY DOWN. It is this app's own child,
+    //    running from the bundle that is about to be deleted, so it has to be
+    //    gone before step 3 rather than merely signalled.
+    progress("stopping the reader…")
+    if !Connectors.shared.stopAndWait() {
+      out.failures.append("the reader would not stop; nothing else was removed")
+      // The app is still up and the owner may try again, so the latch stop()
+      // set has to come off or every later attempt refuses silently.
+      Connectors.shared.allowRestart()
+      return out
+    }
+
+    // 2. The launch agents. This is the step whose failure the header calls the
+    //    thing this function exists to prevent, so it is CHECKED rather than
+    //    fired and hoped for.
+    let labels = agentLabels().sorted()
+    for (index, label) in labels.enumerated() {
+      progress("stopping \(label) (\(index + 1) of \(labels.count))…")
+      let status = bootout(label)
+      // A job that was not loaded is not a failure: `bootout` answers non-zero
+      // for "no such process" too, and the plist is what brings it back at
+      // login. Ask launchd what is true now instead of reading the code.
+      let stillLoaded = loadedLabels().contains(label)
+      if stillLoaded {
+        out.failures.append("\(label) is still running (launchctl bootout said \(status))")
+        continue
+      }
       let plist = launchAgents.appendingPathComponent("\(label).plist")
       if fm.fileExists(atPath: plist.path) {
         do { try fm.removeItem(at: plist) } catch {
-          out.failures.append("could not remove \(plist.path): \(error.localizedDescription)")
+          out.failures.append("\(label) was stopped but its plist stayed: \(error.localizedDescription)")
           continue
         }
       }
       out.services.append(label)
       NSLog("Intaglio Labs: uninstall removed the \(label) agent")
     }
-    // The reader is this app's own child, so it goes when we do — but it goes
-    // now rather than during termination, so nothing is mid-write while the
-    // bundle underneath it is being deleted.
-    Connectors.shared.stop()
-    for path in appBundles() {
-      do {
-        try fm.removeItem(atPath: path)
-        out.apps.append(path)
-        NSLog("Intaglio Labs: uninstall removed \(path)")
-      } catch {
-        out.failures.append("could not delete \(path): \(error.localizedDescription)")
+
+    // 3. The app. LAST, and only once the two above are settled: a bundle
+    //    deleted while an agent is still running leaves launchd pointing at
+    //    nothing, which is worse than either failure on its own.
+    if out.failures.isEmpty {
+      for path in appBundles() {
+        progress("deleting \(URL(fileURLWithPath: path).lastPathComponent)…")
+        do {
+          try fm.removeItem(atPath: path)
+          out.apps.append(path)
+          NSLog("Intaglio Labs: uninstall removed \(path)")
+        } catch {
+          out.failures.append("could not delete \(path): \(error.localizedDescription)")
+        }
       }
+    } else {
+      out.failures.append("the app itself was left in place because of the above")
+    }
+
+    // A PARTIAL UNINSTALL HAS TO BE A WORKING INSTALL. The app does not quit on
+    // a failure, so it is about to go on running with its reader stopped and
+    // its latch set — a state in which "start it" reports success for ever and
+    // nothing reads. Whatever else is half-done, this much is put back.
+    if !out.failures.isEmpty {
+      Connectors.shared.allowRestart()
+      Connectors.shared.start(bypassingThrottle: true)
     }
     return out
+  }
+
+  /// `launchctl bootout` for one label, returning its exit status. The status
+  /// alone does not decide anything — see the caller, which asks launchd what
+  /// is still loaded — but it is what the owner is shown when a job survives.
+  private static func bootout(_ label: String) -> Int32 {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+    p.standardError = FileHandle.nullDevice
+    p.standardOutput = FileHandle.nullDevice
+    do { try p.run() } catch { return -1 }
+    p.waitUntilExit()
+    return p.terminationStatus
   }
 }

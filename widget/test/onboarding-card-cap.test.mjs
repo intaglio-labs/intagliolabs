@@ -50,7 +50,7 @@ function bodyOf(signature) {
 }
 
 const startReadingSourcesBody = () =>
-  bodyOf('private func startReadingSources() -> Bool {');
+  bodyOf('private func startReadingSources() -> (configWritten: Bool, outcome: Connectors.StartOutcome) {');
 
 test('starting the reader records the daily card settings first', () => {
   const body = startReadingSourcesBody();

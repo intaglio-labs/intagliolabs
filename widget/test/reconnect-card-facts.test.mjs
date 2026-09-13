@@ -38,7 +38,8 @@ function lift(names) {
   // The module constants those functions read. Lifted with them rather than
   // restated here: a copy of MONTHS in the test is a second source of truth
   // that can drift silently past the thing it is testing.
-  for (const decl of [/const MONTHS = \[[\s\S]*?\];/u, /const asText = [^\n]*;/u]) {
+  for (const decl of [/const MONTHS = \[[\s\S]*?\];/u, /const asText = [^\n]*;/u,
+    /const TEMPLATE_TIE =\s*\n[^\n]*;/u]) {
     const found = decl.exec(src)?.[0];
     assert.ok(found, `a constant the lifted functions read was not found: ${decl}`);
     parts.unshift(found);
@@ -51,8 +52,8 @@ function lift(names) {
 }
 
 const fns = lift([
-  'quietPhrase', 'whenPhrase', 'personField', 'whoLine', 'spokeLastLine',
-  'historyLine', 'changedLine', 'sourceCount', 'triggerLine',
+  'quietPhrase', 'whenPhrase', 'personField', 'whoLine', 'linkedSince', 'spokeLastLine',
+  'historyLine', 'changedLine', 'sourceCount', 'triggerLine', 'tieLine',
 ]);
 
 const DAY = 86400000;
@@ -204,6 +205,51 @@ test('a public-web change carries how many sources stand behind it', () => {
   assert.equal(fns.sourceCount({ sources: 'two' }), 0, 'a word is not a count');
   // No sources at all: the claim still shows, the count does not lie.
   assert.equal(fns.changedLine({ changed: { text: 'moved to anthropic' } }), 'moved to anthropic');
+});
+
+test('the counts are not said a third time by the producer’s template', () => {
+  // THE CARD AS IT ACTUALLY RENDERS on a fresh install with no person page:
+  // the trigger says the silence, the history row says the counts, and the tie
+  // sentence between them said both again in different units.
+  const template = 'Quiet 634 days · you two have 21 messages and 1 meeting';
+  assert.equal(fns.tieLine({ kind: 'reconnect', sentence: template }), '',
+    'the producer template is three statements of two numbers; the card keeps two');
+  assert.equal(fns.tieLine({ kind: 'reconnect', sentence: 'Quiet 634 days' }), '',
+    'and the no-counts form of the same template goes with it');
+  assert.equal(fns.tieLine({ kind: 'reconnect', sentence: 'Quiet 1 day · you two have 1 message' }), '',
+    'singulars included');
+  // EVERYTHING ELSE STAYS. These are the three sentences that are not counts:
+  // a page's own prose, the matcher producer's model-written line, and an Owe
+  // card's receipt — none of which the card says anywhere else.
+  const page = 'she asked whether you were still hiring and you never answered';
+  assert.equal(fns.tieLine({ kind: 'reconnect', sentence: page }), page);
+  const model = 'you worked together on the seed round and have not spoken since it closed';
+  assert.equal(fns.tieLine({ kind: 'reconnect', sentence: model }), model);
+  const owe = 'you said you would send the deck';
+  assert.equal(fns.tieLine({ kind: 'owe', sentence: owe }), owe, 'an owe receipt is never a count');
+  // A template that stops looking like itself renders, which is the safe way
+  // for this to fail: a shown sentence is noise, a hidden one is a loss.
+  assert.equal(fns.tieLine({ kind: 'reconnect', sentence: 'Quiet since March · 21 messages' }),
+    'Quiet since March · 21 messages');
+  assert.equal(fns.tieLine({ kind: 'reconnect', sentence: '' }), '');
+});
+
+test('the last three person facts reach the card', () => {
+  // industry, connectedOn and url were computed, shipped and never rendered.
+  assert.equal(fns.whoLine({ person: { title: 'Partner', industry: 'venture capital' } }),
+    'Partner · venture capital', 'industry stands in for a company, never beside one');
+  assert.equal(fns.whoLine({ person: { title: 'Partner', company: 'Sequoia', industry: 'venture capital' } }),
+    'Partner at Sequoia', 'a company it has is better than a category it inferred');
+  assert.equal(fns.whoLine({ person: { industry: 'venture capital' } }), 'venture capital');
+  assert.equal(fns.linkedSince({ person: { connectedOn: Date.parse('2021-06-02T00:00:00Z') } }),
+    'linked since 2021', 'the year, because the day is not a fact anybody holds');
+  // Null is the ordinary case: parseConnectedOn answers null for every
+  // non-English export, so this must print nothing rather than "linked since
+  // 1970" or "linked since NaN".
+  for (const bad of [null, undefined, 0, -1, 'june 2021', NaN]) {
+    assert.equal(fns.linkedSince({ person: { connectedOn: bad } }), '',
+      `${String(bad)} must not become a year`);
+  }
 });
 
 test('the card has somewhere to put the two new lines', () => {

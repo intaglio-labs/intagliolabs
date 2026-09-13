@@ -111,7 +111,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // the owner's verdict, sizes itself, and (the mode picker) asks for a
     // fresh batch under a different mode. Nothing else -- the card page
     // holds no token and can open no other surface.
-    "reconnect": ["relCard", "relEvent", "relRefresh", "relMode", "relDraft", "close", "fitContent"],
+    // `openProfile` is the one door out of this page, and it is a door to one
+    // shape of address: https + linkedin.com + /in/, checked natively. The card
+    // shows a person's own job title now, and the profile it came from is the
+    // obvious next thing to look at.
+    "reconnect": ["relCard", "relEvent", "relRefresh", "relMode", "relDraft", "close", "fitContent",
+                  "openProfile"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -969,20 +974,35 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         reply(webView, id, ["state": "ok", "cancelled": true])
         return
       }
-      let outcome = Uninstall.run()
-      reply(webView, id, [
-        "state": outcome.failures.isEmpty ? "ok" : "partial",
-        "services": outcome.services,
-        "apps": outcome.apps,
-        "failures": outcome.failures,
-        "dataKept": outcome.dataKept,
-      ])
-      // A HALF-UNINSTALL STAYS ON SCREEN. Quitting on a failure takes the
-      // window away along with the only account of what did not happen —
-      // /Applications can refuse a delete, and the owner needs to be told
-      // rather than left with an app that is still there and no explanation.
-      if outcome.failures.isEmpty {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { NSApp.terminate(nil) }
+      // OFF THE MAIN THREAD, AND NARRATED. Every step is a launchctl call with a
+      // waitUntilExit, plus a bounded wait on the reader: on the main thread
+      // that is a frozen window with nothing on screen saying why. The steps
+      // land in the row the owner pressed, through the same one-way push the
+      // model download uses.
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        guard let self else { return }
+        let outcome = Uninstall.run { step in
+          let literal = Bridge.jsString(step)
+          DispatchQueue.main.async {
+            webView.evaluateJavaScript(
+              "window.__hzUninstallStep && window.__hzUninstallStep(\(literal))",
+              completionHandler: nil)
+          }
+        }
+        self.reply(webView, id, [
+          "state": outcome.failures.isEmpty ? "ok" : "partial",
+          "services": outcome.services,
+          "apps": outcome.apps,
+          "failures": outcome.failures,
+          "dataKept": outcome.dataKept,
+        ])
+        // A HALF-UNINSTALL STAYS ON SCREEN. Quitting on a failure takes the
+        // window away along with the only account of what did not happen —
+        // /Applications can refuse a delete, and the owner needs to be told
+        // rather than left with an app that is still there and no explanation.
+        if outcome.failures.isEmpty {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { NSApp.terminate(nil) }
+        }
       }
 
     case "prefs":
@@ -1856,7 +1876,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
 
     case "startSources":
-      reply(webView, id, ["state": startReadingSources() ? "ok" : "error"])
+      // WHETHER IT ACTUALLY CAME UP, not whether a config file exists.
+      // Connectors.start() returns silently on six guards, two of which
+      // (a stop latch, a model download holding the reader) are states the
+      // settings panel's "start it" button can land in — and it used to report
+      // success for every one of them, so the row said "starting…" for ever.
+      let started = startReadingSources()
+      reply(webView, id, [
+        "state": started.configWritten ? "ok" : "error",
+        "reading": started.outcome.isUp,
+        "why": started.outcome.rawValue,
+      ])
 
     case "linkedInState":
       // WHAT IS ALREADY HERE, so a second run of the flow does not ask for a
@@ -1876,7 +1906,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // entry and after a request, which is when somebody is actually going to
       // read the file.
       let permissions = Permissions.all
-      if payload["diagnostic"] as? Bool == true { Permissions.writeDiagnostic(mapped: permissions) }
+      let deepCheck = payload["diagnostic"] as? Bool == true
+      if deepCheck { Permissions.writeDiagnostic(mapped: permissions) }
       // WHICH APP THE GRANT WOULD LAND ON — AND ONLY WHEN THAT IS A REAL
       // QUESTION ON THIS MAC.
       //
@@ -1899,7 +1930,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "permissions": permissions,
         "bundle": Bundle.main.bundleIdentifier ?? "?",
       ]
-      if let stale = Permissions.staleGrantBundle(disk: Permissions.fullDiskStatus(mapped: permissions)) {
+      // ON THE SAME PATH AS THE DIAGNOSTIC, AND FOR THE SAME REASON. The screen
+      // polls while it is up; staleGrantBundle is two directory reads and two
+      // stats, and the machine it runs on is by definition the one where the
+      // poll is already costing tccd denials. The page asks for the deep check
+      // on entry and after a permission request, which is when the answer can
+      // have changed, and `staleChecked` tells it which kind of reply this is
+      // so a poll cannot rub out the line an entry drew.
+      permReply["staleChecked"] = deepCheck
+      if deepCheck,
+         let stale = Permissions.staleGrantBundle(disk: Permissions.fullDiskStatus(mapped: permissions)) {
         permReply["staleBundle"] = stale
       }
       reply(webView, id, permReply)
@@ -2046,6 +2086,28 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } else {
         reply(webView, id, ["state": "error", "error": "url not in allowlist"])
       }
+    case "openProfile":
+      // THE ONE EXTERNAL URL THAT CANNOT BE ON A FIXED ALLOWLIST: a person's own
+      // LinkedIn profile, which came out of the owner's own export and is
+      // different for every card. `openExternal` above is a set of literal
+      // strings and must stay that way — this is a separate, narrower door with
+      // the host pinned instead of the whole string.
+      //
+      // https only, linkedin.com or www.linkedin.com only, and a /in/ path
+      // only: that is the shape graph.mjs stores, and anything else is either a
+      // corrupted row or a page asking for something it was not given.
+      let asked = String((payload["url"] as? String ?? "").prefix(300))
+      guard let profile = URL(string: asked), profile.scheme == "https",
+            let host = profile.host?.lowercased(),
+            host == "linkedin.com" || host == "www.linkedin.com",
+            profile.path.hasPrefix("/in/")
+      else {
+        reply(webView, id, ["state": "error", "error": "not a linkedin profile"])
+        return
+      }
+      NSWorkspace.shared.open(profile)
+      reply(webView, id, ["state": "ok"])
+
     case "openApp":
       let bundleId = String((payload["bundleId"] as? String ?? "").prefix(96))
       guard allowedApps.contains(bundleId),
@@ -2238,6 +2300,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
 
+  /// A JS string literal for a value this app produced. JSONSerialization does
+  /// the escaping, so a path with a quote or a newline in it cannot end the
+  /// literal early — the same helper main.swift keeps for its own pushes.
+  static func jsString(_ s: String) -> String {
+    guard let d = try? JSONSerialization.data(withJSONObject: [s]),
+          let arr = String(data: d, encoding: .utf8) else { return "\"\"" }
+    return "\(arr)[0]"
+  }
+
   private func reply(_ webView: WKWebView, _ id: Int, _ data: [String: Any]) {
     let envelope: [String: Any] = ["id": id, "ok": true, "data": data]
     guard JSONSerialization.isValidJSONObject(envelope),
@@ -2342,7 +2413,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// and every other call site is on main. The LinkedIn import runs its checks
   /// on a background queue, so it hops before it calls this.
   @discardableResult
-  private func startReadingSources() -> Bool {
+  private func startReadingSources() -> (configWritten: Bool, outcome: Connectors.StartOutcome) {
     dispatchPrecondition(condition: .onQueue(.main))
     // There is no list of sources to choose: the daemon runs every connector
     // it has credentials for and each one's needs() gates it, so the local
@@ -2378,7 +2449,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // Started as a CHILD of this app, not bootstrapped into launchd, so the
     // reader inherits this app's permissions instead of needing its own.
     Provision.retireConnectorsAgent()
-    Connectors.shared.start()
+    let outcome = Connectors.shared.start()
     // AND IF IT WAS ALREADY UP, TELL IT SOMETHING CHANGED.
     //
     // start() is idempotent and therefore silent when the daemon is running,
@@ -2392,7 +2463,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // owner finishing. See Connectors.nudge().
     Connectors.shared.nudge()
     Distiller.shared.start()
-    return ok
+    return (ok, outcome)
   }
 
   /// Roughly two minutes of attempts, front-loaded. hermes' own warm-up window
@@ -3279,7 +3350,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // never calls startSources — so on the skip path this whole import landed
     // a file, reported "N connections", and scheduled nothing to read it. The
     // same call startSources makes, on the queue it is allowed to be made on.
-    DispatchQueue.main.async { [weak self] in self?.startReadingSources() }
+    DispatchQueue.main.async { [weak self] in _ = self?.startReadingSources() }
     return [
       "state": "ok", "files": copied, "connections": connections,
       "unknownVintage": unknownVintage,

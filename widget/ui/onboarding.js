@@ -456,6 +456,12 @@ permsEl.addEventListener('click', async (e) => {
 // marks of a pre-rename install. With no mismatch there is nothing to say, and
 // the screen says nothing — which is every ordinary install.
 function paintBundleNote(res) {
+  // A POLL REPLY CARRIES NO ANSWER TO THIS. The probe is two directory reads
+  // and two stats, so native runs it only on the deep check (screen entry, and
+  // after a permission request) and says which kind of reply this is. Treating
+  // an ordinary tick as "no mismatch" would rub out the line entry drew, three
+  // seconds after drawing it.
+  if (res?.staleChecked !== true) return;
   const stale = typeof res?.staleBundle === 'string' ? res.staleBundle : '';
   const mine = typeof res?.bundle === 'string' ? res.bundle : '';
   if (!stale || !mine) {
@@ -1031,12 +1037,21 @@ function setToggle(on) {
   engineToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 
-engineToggle.addEventListener('click', () => {
+// THE SAME SWITCH AS THE SETTINGS ROW, and it needs the same check. hzPost does
+// not reject for a handled verb — Bridge.reply always sends ok:true — and
+// setEngine goes through relHermes, which RESOLVES with {state:'down'} when
+// hermes is restarting and {state:'auth'} when there is no bearer yet. The
+// catch this replaces therefore never ran: on a first launch, where hermes is
+// most likely to still be warming up, the switch stayed where it was pressed
+// and the config was untouched. On this screen that is a false privacy claim,
+// which is the one thing it cannot afford.
+engineToggle.addEventListener('click', async () => {
   const on = !engineToggle.classList.contains('on');
   setToggle(on);
-  hzPost('setEngine', { engine: on ? 'claude-cli' : 'local' }).catch(() => {
-    setToggle(!on); // the write failed; the switch must not claim it landed
-  });
+  const out = await hzPost('setEngine', { engine: on ? 'claude-cli' : 'local' }).catch(() => null);
+  if (out?.state === 'ok' && out?.ok !== false) return;
+  setToggle(!on);
+  engineStatus.textContent = 'that did not save — i may still be starting up. nothing changed.';
 });
 
 function startLocalModel() {

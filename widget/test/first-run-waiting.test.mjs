@@ -97,7 +97,7 @@ test('the app tells the reader to look again instead of restarting it', () => {
 });
 
 test('completing a connect screen nudges the reader that is already running', () => {
-  const start = swiftBody(bridge, 'startReadingSources\\(\\) -> Bool');
+  const start = swiftBody(bridge, 'startReadingSources\\(\\) -> \\(configWritten: Bool, outcome: Connectors\\.StartOutcome\\)');
   const startsIt = start.indexOf('Connectors.shared.start()');
   const nudges = start.indexOf('Connectors.shared.nudge()');
   assert.notEqual(startsIt, -1, 'startReadingSources must still start the daemon');

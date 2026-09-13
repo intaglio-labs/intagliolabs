@@ -734,9 +734,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
         // escaped from scene 1, or the panel closed by any native path. At
         // its own level: below every window, exactly as it lives.
         self?.widgetWindow.orderFrontRegardless()
-        // A finished flow opens People from onboarding.js after this scrim is
-        // gone. Escape still only restores the widget; it does not finish or
-        // open the next scene.
+        // ~~"A finished flow opens People from onboarding.js after this scrim
+        // is gone."~~ It does not, and has not for some time: the flow ends on
+        // the reconnect card (onboarding.js finish() posts openReconnect), and
+        // `openPeople` is in no page's grant that the widget can reach. Left
+        // struck through rather than deleted because this file is the gate that
+        // closes the timeline's last door, and a comment asserting an extra one
+        // is exactly the trap the next reader would fall into.
+        // Escape still only restores the widget; it does not finish or open the
+        // next scene.
       }
       onboardingPanel = p
     }

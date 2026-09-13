@@ -65,13 +65,17 @@ test('uninstall asks natively first, and only quits when nothing failed', () => 
   const body = /case "uninstallApp":([\s\S]*?)\n {4}case "prefs":/u.exec(bridge)?.[1];
   assert.ok(body, 'the uninstallApp case was not found');
   const confirmAt = body.indexOf('Uninstall.confirm');
-  const runAt = body.indexOf('Uninstall.run()');
+  const runAt = body.indexOf('Uninstall.run');
   assert.ok(confirmAt > -1 && runAt > confirmAt,
     'nothing may be removed before the owner has answered a native alert');
   assert.match(body, /reply\(webView, id, \["state": "ok", "cancelled": true\]\)/u,
     'a cancel is an answer the page must be able to tell from a failure');
-  assert.match(body, /if outcome\.failures\.isEmpty \{[\s\S]{0,120}NSApp\.terminate/u,
+  assert.match(body, /if outcome\.failures\.isEmpty \{[\s\S]{0,160}NSApp\.terminate/u,
     'a half-uninstall must stay on screen with its reason rather than quitting');
+  // OFF THE MAIN THREAD, or the window freezes with nothing on screen saying
+  // why: every step is a launchctl call with a waitUntilExit.
+  assert.match(body, /DispatchQueue\.global\(qos: \.userInitiated\)\.async/u);
+  assert.match(body, /__hzUninstallStep/u, 'and each step is narrated into the row that was pressed');
 });
 
 test('uninstall never deletes what it read', () => {
@@ -163,8 +167,10 @@ test('the daily-card row reads the config, and asserts nothing when it cannot', 
   assert.match(row, /bits\.length > 0 \? bits\.join\(' · '\) : '—'/u,
     'nothing known must render as nothing known, never as a default');
   assert.match(row, /three chips at the top/u, 'and it points at where the picker lives');
-  // ONE QUESTION PER OPEN, not one per row.
-  assert.match(connections, /const cardConfig = hzPost\('cardConfig'\)\.catch\(\(\) => null\);/u);
+  // ONE QUESTION PER OPEN, not one per row — and a reply that is not ok
+  // resolves to null, because {state:'down'} is truthy and every reader of this
+  // promise treats a truthy value as a configuration.
+  assert.match(connections, /const cardConfig = hzPost\('cardConfig'\)\s*\n\s*\.then\(\(out\) => \(landed\(out\) \? out : null\)\)/u);
   assert.match(connections, /rows\.push\(cardConfigRow\(cardConfig\)\)/u);
 });
 

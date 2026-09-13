@@ -238,8 +238,53 @@ const asText = (v) => (typeof v === 'string' ? v.trim() : '');
 function whoLine(c) {
   const title = asText(personField(c, 'title'));
   const company = asText(personField(c, 'company'));
+  // `industry` is the third thing the export can carry, and it stands in for
+  // the company rather than joining it: "Partner · venture capital" reads as a
+  // job, "Partner at Sequoia · venture capital" reads as a form. It is null on
+  // every row today — connectionsToRows (connectors/lib/linkedinRows.mjs) has no
+  // industry column to write from — so this is the branch that lights up if that
+  // column ever arrives, and costs a line until then.
+  const industry = asText(personField(c, 'industry'));
   if (title && company) return `${title} at ${company}`;
-  return title || company || '';
+  if (title && industry) return `${title} · ${industry}`;
+  return title || company || industry || '';
+}
+
+// "linked since 2021", from the date on the owner's own export row. The YEAR
+// only: the day you accepted a connection request is not a fact anybody holds,
+// and a full date here reads as precision about a relationship rather than
+// about a row. Null (an unparseable or absent date, which is every non-English
+// export — see parseConnectedOn) prints nothing.
+function linkedSince(c) {
+  const ms = Number(personField(c, 'connectedOn'));
+  if (!Number.isFinite(ms) || ms <= 0 || ms > Date.now() + 86400000) return '';
+  return `linked since ${new Date(ms).getFullYear()}`;
+}
+
+// THE TIE SENTENCE IS THE PRODUCER'S TEMPLATE WHENEVER NOTHING BETTER EXISTS,
+// and that template is exactly the numbers this card already says twice:
+// "Quiet 634 days · you two have 21 messages and 1 meeting" (producer.mjs
+// tieSentence) sits between a trigger line reading "quiet 2 years" and a
+// history row reading "21 messages · met 1×". Three statements of two numbers,
+// in two different units, is the defect finding 17 named — and the dedup that
+// answered it only touched the two rows this app writes.
+//
+// So the sentence is dropped WHEN IT IS THAT TEMPLATE, matched by its own
+// shape, and rendered in every other case: a page's how_left prose, an Owe
+// card's receipt ("you said you would…"), and the matcher producer's
+// model-written why-line are all things the card says nowhere else. Anything
+// the template stops looking like renders too, which is the safe way for this
+// to fail.
+const TEMPLATE_TIE =
+  /^quiet \d+ days?(?: · you two have \d+ (?:messages?|meetings?)(?: and \d+ (?:messages?|meetings?))?)?$/iu;
+
+function tieLine(c) {
+  const sentence = asText(c.sentence);
+  if (!sentence) return '';
+  // An Owe card's sentence is its receipt for one specific overdue thing, and
+  // its trigger line carries no counts to collide with.
+  if (c.kind === 'owe') return sentence;
+  return TEMPLATE_TIE.test(sentence) ? '' : sentence;
 }
 
 // WHO SPOKE LAST, AND WHEN — the single strongest reconnect signal, and the
@@ -315,6 +360,31 @@ function sourceCount(changed) {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
 
+// The name, and the profile behind it when the owner's own export carried one.
+// An <a> rather than a button: it is a link, it should read as one, and the
+// native side pins the host (Bridge openProfile) so the page cannot turn this
+// into a door to anywhere else. textContent throughout — a name never passes
+// through markup, which is this page's oldest rule.
+function renderName(c) {
+  const name = c.name ?? c.personKey;
+  const url = asText(personField(c, 'url'));
+  const host = el('rcName');
+  if (!url) {
+    host.textContent = name;
+    return;
+  }
+  const a = document.createElement('a');
+  a.className = 'rc-name-link';
+  a.href = '#';
+  a.textContent = name;
+  a.title = 'open their profile';
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    hzPost('openProfile', { url }).catch(() => {});
+  });
+  host.replaceChildren(a);
+}
+
 function render(c) {
   card = c;
   el('rcCard').hidden = false;
@@ -343,7 +413,7 @@ function render(c) {
   const trigger = triggerLine(c);
   el('rcTrigger').textContent = trigger;
   el('rcTrigger').hidden = !trigger;
-  el('rcName').textContent = c.name ?? c.personKey;
+  renderName(c);
 
   // Five-slot order stays trigger / who / tie / last contact / actions.
   // Person-subject pages add two things to that: `who` (a plain string,
@@ -356,7 +426,9 @@ function render(c) {
   el('rcWho').textContent = who;
   el('rcWho').hidden = !who;
 
-  el('rcWhy').textContent = c.sentence ?? '';
+  const tie = tieLine(c);
+  el('rcWhy').textContent = tie;
+  el('rcWhy').hidden = !tie;
   el('rcWhy').classList.toggle('rc-why-emphasis', hasPage);
 
   el('rcQuote').textContent = c.quote ? `“${c.quote}”` : '';
@@ -376,8 +448,10 @@ function render(c) {
   // own job, where `role` is this app's bucket for it and `who` is a page's
   // prose about them.
   const titled = whoLine(c);
-  const role = titled
-    || (who ? '' : [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ')).trim();
+  const role = [
+    titled || (who ? '' : [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ')).trim(),
+    linkedSince(c),
+  ].filter(Boolean).join(' · ');
   el('rcRole').textContent = role;
   el('rcRoleRow').hidden = !role;
 
@@ -481,8 +555,11 @@ el('rcDraft').addEventListener('click', async () => {
     // answers {ok:false, reason} on an engine error, unparseable output or
     // nothing usable, and this used to treat all three as success and render
     // an empty list -- silence, with the reason sitting unread on the wire.
-    if (!out || out.ok === false || !Array.isArray(out.drafts) || out.drafts.length === 0) {
-      throw new Error(out?.reason ? String(out.reason) : 'draft failed');
+    if (!out || out.state !== 'ok' || out.ok === false
+        || !Array.isArray(out.drafts) || out.drafts.length === 0) {
+      throw new Error(out?.reason ? String(out.reason)
+        : out?.state === 'down' || out?.state === 'auth' ? 'i could not reach the reader'
+          : 'draft failed');
     }
     renderDrafts(out.drafts);
   } catch (err) {
@@ -497,9 +574,20 @@ el('rcDraft').addEventListener('click', async () => {
   }
 });
 
+// A REPLY IS NOT A CARD, AND IT IS NOT AN EMPTY QUEUE EITHER. hzPost does not
+// reject for a handled verb (Bridge.reply always sends ok:true), and relCard
+// goes through relHermes, which RESOLVES with {state:'down'} when hermes is
+// restarting and {state:'auth'} when there is no bearer yet. Both answers have
+// no `card` on them, so the empty branch below used to render "nothing to
+// review" — a verdict about the owner's queue, from a reader that was never
+// asked. The 'unreachable' line was written for exactly this and lived in a
+// catch that could not fire.
+const reachedHermes = (out) => out?.state === 'ok';
+
 async function pull() {
   try {
     const out = await hzPost('relCard');
+    if (!reachedHermes(out)) { renderEmpty({ reason: 'unreachable' }); return; }
     adoptServerMode(out);
     if (out?.card) {
       render(out.card);
@@ -514,9 +602,8 @@ async function pull() {
       hzPost('relEvent', { snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'opened' }).catch(() => {});
     } else renderEmpty(out);
   } catch {
-    // A THROW IS ITS OWN REASON. Every other path here is hermes answering; this
-    // one is hermes not being there, and rendering "nothing to review" for it
-    // told the owner their queue was empty when nothing had been asked.
+    // Kept for the one failure that IS a throw: a webview torn down mid-message.
+    // The reachable path is the state check above.
     renderEmpty({ reason: 'unreachable' });
   }
 }
@@ -542,7 +629,11 @@ async function verdict(event, extra = {}) {
       ...(event === 'dismissed' ? { reason: extra.reason ?? 'not-useful' } : {}),
       ...(extra.mute_days ? { mute_days: extra.mute_days } : {}),
     });
-    if (!out || out.ok === false) throw new Error('relEvent rejected');
+    // STATE FIRST. `ok === false` is hermes saying no; a transport failure has
+    // no `ok` field at all, so this used to read a verdict that never left the
+    // Mac as one that was recorded — and then pull() moved on to the next card,
+    // losing the owner's judgment silently.
+    if (!out || out.state !== 'ok' || out.ok === false) throw new Error('relEvent rejected');
     await pull(); // next card, or the empty state -- clears the error on success
   } catch {
     setVerdictButtonsDisabled(false);

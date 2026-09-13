@@ -15,7 +15,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const swift = readFileSync(join(ROOT, 'src', 'Connectors.swift'), 'utf8');
 
 test('Connectors.start() reasserts 0700 on ~/.hazlie before spawning the daemon', () => {
-  const start = /func start\(bypassingThrottle: Bool = false\) \{([\s\S]*?)\n  \}/u.exec(swift)?.[1];
+  // The signature returns a StartOutcome now — six guards that used to return
+  // silently, in front of a settings button the owner presses and watches. The
+  // ORDERING this file pins is untouched by that.
+  const start = /func start\(bypassingThrottle: Bool = false\) -> StartOutcome \{([\s\S]*?)\n  \}/u.exec(swift)?.[1];
   assert.ok(start, 'start() not found');
   const guardAt = start.indexOf('guard fm.fileExists(atPath: config.path)');
   // The chmod moved into reassertTreePerms when the fix grew to cover the

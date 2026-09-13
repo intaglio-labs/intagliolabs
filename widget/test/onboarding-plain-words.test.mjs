@@ -34,15 +34,23 @@ test('the bundle identifier appears only when a probe found a grant elsewhere', 
     'a Mac that can read has no mismatch to report, whatever else is installed');
   assert.match(probe, /DefaultsMigration\.previousBundleID/u,
     'the identifier it names is the one the rename left behind, not a literal');
-  // Three independent marks of a pre-rename install, none of which needs the
-  // grant we are missing: TCC.db is itself protected by the thing being probed.
-  assert.match(probe, /UserDefaults\(suiteName: previous\)/u);
+  // Marks a SURVIVING install leaves, none of which needs the grant we are
+  // missing: TCC.db is itself protected by the thing being probed.
   assert.match(probe, /com\.hazlie\./u);
   assert.match(probe, /Hazlie\.app/u);
   assert.doesNotMatch(probe, /TCC\.db/u, 'the one file we cannot read is not the source');
+  // THE OLD DEFAULTS DOMAIN IS NOT EVIDENCE. DefaultsMigration copies and never
+  // deletes, so it outlives the install that wrote it — and the sentence this
+  // probe produces promises a second row in a Settings list, which is only
+  // there for software that is still there.
+  assert.doesNotMatch(probe, /UserDefaults\(suiteName: previous\)/u,
+    'a leftover defaults domain is not a surviving grant');
 
-  assert.match(bridge, /permReply\["staleBundle"\] = stale/u,
-    'the reply carries it only when the probe answered');
+  assert.match(bridge, /if deepCheck,\s*\n\s*let stale = Permissions\.staleGrantBundle/u,
+    'the probe runs on the deep check, never on the poll that ticks every few seconds');
+  assert.match(bridge, /permReply\["staleChecked"\] = deepCheck/u,
+    'and the reply says which kind it is, so a poll cannot rub out what entry drew');
+  assert.match(js, /if \(res\?\.staleChecked !== true\) return;/u);
   const paint = /function paintBundleNote\(res\)([\s\S]*?)\n\}/u.exec(js)?.[1] ?? '';
   assert.match(paint, /if \(!stale \|\| !mine\) \{[\s\S]{0,80}permBundle\.textContent = '';/u,
     'no mismatch, no sentence — and the line is cleared, not left from a prior poll');
@@ -58,8 +66,16 @@ test('the load table is written for a person, not for whoever built it', () => {
       `"${word}" is console vocabulary and must not be a column heading`);
   }
   assert.match(head, />what</u);
-  assert.match(head, />read so far</u);
-  assert.match(head, />where it stands</u);
+  // SHORT AS WELL AS PLAIN. The first pass replaced "rows" with "read so far"
+  // and "status" with "where it stands" — plain English, and materially longer,
+  // in four columns of a fixed-width panel whose cells carry six-figure counts.
+  assert.match(head, />read</u);
+  assert.match(head, />standing</u);
+  const headings = [...head.matchAll(/<th[^>]*>([^<]+)<\/th>/gu)].map((m) => m[1]);
+  assert.equal(headings.length, 4);
+  for (const heading of headings) {
+    assert.ok(heading.length <= 8, `"${heading}" is long for a column in a 312px panel`);
+  }
   // The header used to carry "people who wrote to you", which was wrong for
   // three of the four rows; the per-row qualifier says it instead.
   assert.match(js, /authors: 'who wrote to you'/u,

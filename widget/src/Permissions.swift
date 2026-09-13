@@ -344,33 +344,40 @@ enum Permissions {
   /// on the second screen of a consumer flow for every owner who has no such
   /// problem, which is nearly all of them.
   ///
-  /// So it is a probe now. It returns the PREVIOUS identifier only when both
-  /// halves of that trap are present: this process cannot read, AND this Mac
-  /// carries the marks of an install from before the rename. nil otherwise, and
-  /// the screen says nothing.
+  /// So it is a probe now. It returns the PREVIOUS identifier only when this
+  /// process cannot read AND the old install is STILL ON THIS MAC — because the
+  /// sentence it produces tells the owner they will see two rows in a System
+  /// Settings list, and a row is only there for software that is still there.
+  ///
+  /// ~~A value under the old defaults domain counted as evidence.~~ It does
+  /// not: DefaultsMigration.runIfNeeded copies and never deletes, so the old
+  /// domain keeps HazlieOnboarded and friends for ever. An owner who ran the
+  /// old build once and deleted it would have been sent hunting for a second
+  /// row that does not exist — on the screen this probe was added to de-clutter.
   ///
   /// WHY NOT READ TCC.db: it is itself protected by Full Disk Access, so on the
   /// one machine where the answer matters we are the process that cannot read
-  /// it. The marks below are what is legible without the grant.
+  /// it. "The old build is still installed" is the closest legible thing to
+  /// "the old build still holds the grant", and both marks below are artefacts
+  /// only a surviving install has.
+  ///
+  /// NOT ON THE POLL PATH: two directory reads and two stats, on the denied-FDA
+  /// machine where the permissions screen polls every few seconds. The caller
+  /// asks for it on entry and after a request, like the diagnostic beside it.
   static func staleGrantBundle(disk: Status) -> String? {
     guard disk != .granted else { return nil }
     let previous = DefaultsMigration.previousBundleID
     let fm = FileManager.default
     let home = fm.homeDirectoryForCurrentUser
 
-    // 1. The old defaults domain. UserDefaults is keyed on the bundle id, so a
-    //    value under the old one is an install that ran before the rename.
-    if let old = UserDefaults(suiteName: previous),
-       DefaultsMigration.carried.contains(where: { old.object(forKey: $0) != nil }) {
-      return previous
-    }
-    // 2. A pre-rename launch agent, which the old install is what wrote.
+    // 1. A pre-rename launch agent. Only the old install writes these, and an
+    //    uninstall of it removes them.
     let agents = home.appendingPathComponent("Library/LaunchAgents")
     if let names = try? fm.contentsOfDirectory(atPath: agents.path),
        names.contains(where: { $0.hasPrefix("com.hazlie.") && $0.hasSuffix(".plist") }) {
       return previous
     }
-    // 3. The pre-rename app itself, still installed under its old name.
+    // 2. The pre-rename app itself, still installed under its old name.
     for path in ["\(home.path)/Applications/Hazlie.app", "/Applications/Hazlie.app"]
     where fm.fileExists(atPath: path) {
       return previous

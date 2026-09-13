@@ -291,6 +291,22 @@ function settingRow({ name, note, hint, on, message }) {
 // ONE REQUEST, TWO ROWS. The promise is made once in renderSettings and handed
 // to whoever needs it, so opening settings is one question to the reader and
 // not one per row.
+// A REPLY IS NOT A SUCCESS.
+//
+// Bridge.reply always sends `ok: true` — that envelope says the message was
+// dispatched, not that the verb worked — and bridge.js resolves on it. So
+// hzPost NEVER rejects for a handled verb, and every `.catch` on one of these
+// is decoration. relHermes, which every reader-facing verb goes through,
+// answers `{state:'down'}` when hermes is restarting and `{state:'auth'}` when
+// there is no bearer yet; both RESOLVE, and both mean nothing happened.
+//
+// `ok === false` is the other half: the route answered, and said no.
+//
+// NOT FOR engineProbe. Its states are the PROBE'S vocabulary, where 'auth'
+// means claude is installed but not signed in — a real answer about the world,
+// not a bridge failure. Two different words spelled the same; see paint().
+const landed = (out) => out?.state === 'ok' && out?.ok !== false;
+
 // WHAT THE CONFIG SAYS THE ENGINE IS, from a reply that arrived. 'claude-cli'
 // is the only value that means anything leaves this Mac; every other answer,
 // INCLUDING the absent key the route sends as null, is the loopback model
@@ -389,6 +405,17 @@ function actionRow({ name, note, label, danger = false, onPress }) {
   return el;
 }
 
+// WHY A START DID NOT HAPPEN, in the owner's words. The keys are
+// Connectors.StartOutcome's own cases, so a new guard over there arrives here
+// as `unknown` rather than as silence.
+const START_REFUSED = {
+  stopping: 'it is shutting down. reopen the app and it will start again.',
+  modelMaintenance: 'it is paused while a local model finishes downloading.',
+  missingRuntime: 'the local runtime is missing — this install needs repairing.',
+  missingConfig: 'there is nothing set up for it to read yet. finish setup first.',
+  unknown: 'it did not start, and did not say why.',
+};
+
 // THE ONE SWITCH THAT DECIDES WHETHER ANYTHING LEAVES THIS MAC, and until now
 // it had no home outside the setup flow: `setEngine` was granted to onboarding
 // alone, so once the flow was finished the owner could neither see the answer
@@ -454,13 +481,22 @@ function engineRow(configPromise) {
   sw.addEventListener('click', async () => {
     const next = !sw.classList.contains('on');
     paintSwitch(next);
-    try {
-      await hzPost('setEngine', { engine: next ? 'claude-cli' : 'local' });
-    } catch {
-      // Nothing was written, so the switch must not claim otherwise — this is
-      // the switch where a lie is a privacy claim.
-      paintSwitch(!next);
+    const out = await hzPost('setEngine', { engine: next ? 'claude-cli' : 'local' })
+      .catch(() => null);
+    if (landed(out)) {
+      state.textContent = ENGINE_TIMING;
+      return;
     }
+    // NOTHING WAS WRITTEN, so the switch must not claim otherwise — this is the
+    // switch where a wrong paint is a false privacy claim, and the failure it
+    // has to survive is the ordinary one: hermes mid-restart answers
+    // {state:'down'} and RESOLVES, so the `catch` this replaces caught nothing
+    // and the switch stayed where the owner put it while the config did not.
+    paintSwitch(!next);
+    state.textContent = out?.state === 'auth'
+      ? 'i could not reach the part of me that keeps this. nothing changed.'
+      : 'that did not save — the reader may still be starting up. nothing changed.';
+    fitConnections();
   });
 
   const again = document.createElement('button');
@@ -500,10 +536,27 @@ function engineRow(configPromise) {
     control.replaceChildren(sw);
     fitConnections();
   }
+  // A `busy` PROBE IS A QUEUE, NOT AN ANSWER. EngineProbe returns it when
+  // another probe holds the job — which is exactly what happens while the
+  // onboarding flow is open and probing beside this panel. It clears itself in
+  // seconds, so the row asks again rather than parking on a pill the owner has
+  // to notice and press. Bounded, because a probe that is busy for ever is a
+  // different bug and a page that retries for ever hides it.
+  let busyRetries = 0;
   function probe() {
     state.textContent = 'checking…';
     control.replaceChildren();
-    hzPost('engineProbe').then(paint).catch(() => paint({ state: 'error' }));
+    hzPost('engineProbe')
+      .then((out) => {
+        if (out?.state === 'busy' && busyRetries < 3) {
+          busyRetries += 1;
+          setTimeout(probe, 2000);
+          paint(out);
+          return;
+        }
+        paint(out);
+      })
+      .catch(() => paint({ state: 'error' }));
   }
   probe();
   return el;
@@ -728,10 +781,23 @@ function activityRow() {
         start.className = 'setting-btn';
         start.type = 'button';
         start.textContent = 'start it';
-        start.addEventListener('click', () => {
+        start.addEventListener('click', async () => {
           start.disabled = true;
           idle.textContent = 'starting…';
-          hzPost('startSources').catch(() => {});
+          const out = await hzPost('startSources').catch(() => null);
+          start.disabled = false;
+          // A BUTTON THE OWNER PRESSES AND WATCHES. Native answers whether the
+          // reader actually came up and, when it did not, which of the six
+          // guards refused — two of which are states this button used to sit
+          // in for ever, saying "starting…" and meaning nothing.
+          if (out?.reading === true) {
+            idle.textContent = out.why === 'queued'
+              ? 'starting…'
+              : 'reading now.';
+            return;
+          }
+          idle.textContent = START_REFUSED[out?.why] || START_REFUSED.unknown;
+          fitConnections();
         });
         list.appendChild(start);
       }
@@ -840,7 +906,14 @@ async function renderSettings() {
   // ASKED ONCE, READ TWICE. A rejected promise is an answer too — every reader
   // of it renders "not known" rather than a default — so the catch is here and
   // not at each use.
-  const cardConfig = hzPost('cardConfig').catch(() => null);
+  // NULL FOR ANY REPLY THAT IS NOT OK. `.catch(() => null)` alone could never
+  // produce that null: a down hermes resolves with {state:'down'}, which is
+  // truthy, so every reader of this promise treated "the reader did not answer"
+  // as a configuration — and the daily-card row said "reading on this Mac"
+  // about a config it had not read.
+  const cardConfig = hzPost('cardConfig')
+    .then((out) => (landed(out) ? out : null))
+    .catch(() => null);
   rows.push(engineRow(cardConfig));
   rows.push(cardConfigRow(cardConfig));
   // The motion row only appears when the system setting it overrides is
@@ -918,13 +991,31 @@ async function renderSettings() {
     label: 'uninstall',
     danger: true,
     onPress: async ({ say }) => {
-      const out = await hzPost('uninstallApp');
+      // NATIVE NARRATES IT. The work runs off the main thread and pushes each
+      // step here as it lands, so a launchd that takes seconds per agent is a
+      // row that is saying something rather than a window that has stopped
+      // answering. Cleared when the call settles, whichever way it went.
+      window.__hzUninstallStep = (step) => say(String(step));
+      const out = await hzPost('uninstallApp').finally(() => {
+        window.__hzUninstallStep = null;
+      });
       // Native asks first, with an alert listing what is actually on this Mac.
       // A cancel is an answer, not a failure, and must leave the row as it was.
       if (!out || out.cancelled === true) return;
       if (out.state === 'partial') {
+        // EXACTLY WHAT REMAINS, because the app does not quit on this path and
+        // the owner is left looking at an install that is part gone. Native
+        // puts the reader back before answering, so the thing they are looking
+        // at is a working install and not a shell.
         const failures = Array.isArray(out.failures) ? out.failures : [];
-        say(`some of it could not be removed: ${failures.join('; ')}`);
+        const gone = Array.isArray(out.services) ? out.services.length : 0;
+        const removed = gone > 0 ? `${gone} service${gone === 1 ? '' : 's'} were removed. ` : '';
+        say(`${removed}this was left: ${failures.join('; ')}. `
+          + 'the app is still running and still reading.');
+        return;
+      }
+      if (!landed(out)) {
+        say('that did not go through — nothing was removed.');
         return;
       }
       // The app is quitting behind this line, so it is the last thing the owner

@@ -75,7 +75,10 @@ test('the app reasserts 0700 on exactly the directories the check inspects', () 
 });
 
 test('the reassert runs before the daemon is launched', () => {
-  const body = swiftBody('func start(bypassingThrottle: Bool = false) {');
+  // The signature carries a StartOutcome now — six guards used to return
+  // silently and the settings panel has a button that waits on one of them.
+  // What this file is about is unchanged: the reassert, before the spawn.
+  const body = swiftBody('func start(bypassingThrottle: Bool = false) -> StartOutcome {');
   const reassert = body.indexOf('reassertTreePerms()');
   assert.ok(reassert > 0,
     'start() must reassert the tree permissions; the daemon reads them at startup');
