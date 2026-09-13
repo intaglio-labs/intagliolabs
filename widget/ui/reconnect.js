@@ -267,9 +267,13 @@ function historyLine(c) {
   const ev = c.evidence ?? {};
   const bits = [];
   if (ev.messages) bits.push(`${ev.messages} message${ev.messages === 1 ? '' : 's'}`);
+  // typeof, NOT Number.isFinite(Number(x)). Number(null) is 0, so the obvious
+  // spelling turns "this corpus cannot say when you last met" into "you met
+  // today" — and both of the columns feeding this are nullable by design.
+  // cardFacts.mjs carries the same warning on the server side of the same field.
   const metDays = personField(c, 'lastMeetingDaysAgo') ?? ev.lastMeetingDaysAgo;
-  const metWhen = Number.isFinite(Number(metDays)) && Number(metDays) >= 0
-    ? whenPhrase(Date.now() - Number(metDays) * 86400000)
+  const metWhen = typeof metDays === 'number' && Number.isFinite(metDays) && metDays >= 0
+    ? whenPhrase(Date.now() - metDays * 86400000)
     : null;
   if (ev.meetings) {
     bits.push(`met ${ev.meetings}×${metWhen === null ? '' : `, last ${metWhen}`}`);
@@ -285,8 +289,23 @@ function changedLine(c) {
   const changed = c.changed;
   const text = asText(changed?.text);
   if (!text) return '';
-  const sources = Array.isArray(changed?.sources) ? changed.sources.length : 0;
-  return sources > 0 ? `${text} · ${sources} source${sources === 1 ? '' : 's'}` : text;
+  return sourceCount(changed) > 0
+    ? `${text} · ${sourceCount(changed)} source${sourceCount(changed) === 1 ? '' : 's'}`
+    : text;
+}
+
+// `sources` IS THE COUNT, and the list it used to be is `sourceUrls`
+// (ui/server/relationship/cardFacts.mjs' changedForCard). Both shapes answer
+// here, because the field changed meaning rather than name: reading the new
+// number as an array would silently drop the count off every card served by a
+// current hermes, and reading an old array as a number gives NaN. The array
+// checks come FIRST for that reason — Number([]) is 0 and Number(['a']) is NaN,
+// so a length test written the obvious way is wrong in both directions.
+function sourceCount(changed) {
+  if (Array.isArray(changed?.sources)) return changed.sources.length;
+  if (Array.isArray(changed?.sourceUrls)) return changed.sourceUrls.length;
+  const n = Number(changed?.sources);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
 
 function render(c) {

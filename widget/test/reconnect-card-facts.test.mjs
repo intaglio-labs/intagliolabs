@@ -52,7 +52,7 @@ function lift(names) {
 
 const fns = lift([
   'quietPhrase', 'whenPhrase', 'personField', 'whoLine', 'spokeLastLine',
-  'historyLine', 'changedLine', 'triggerLine',
+  'historyLine', 'changedLine', 'sourceCount', 'triggerLine',
 ]);
 
 const DAY = 86400000;
@@ -144,18 +144,37 @@ test('each number has one home on the card', () => {
   assert.match(fns.historyLine({ evidence: { messages: 1, meetings: 0 } }), /^1 message$/u);
   // A card with nothing to count says nothing rather than printing zeroes.
   assert.equal(fns.historyLine({ evidence: { messages: 0, meetings: 0 } }), '');
+  // THE NULL TRAP, on the exact field cardFacts.mjs warns about: Number(null)
+  // is 0, so a finite-number test written the obvious way turns "we cannot say
+  // when you last met" into "you met today".
+  for (const unknown of [null, undefined, 'never']) {
+    const line = fns.historyLine({ lastMeetingDaysAgo: unknown, evidence: { meetings: 2, messages: 0 } });
+    assert.equal(line, 'met 2×', `${String(unknown)} must not become a date`);
+  }
+  // And the shipping shape: the count is top-level on the card, beside `person`.
+  assert.match(fns.historyLine({ lastMeetingDaysAgo: 700, evidence: { meetings: 1, messages: 0 } }),
+    /met 1×, last 2 years ago/u);
 });
 
 test('a public-web change carries how many sources stand behind it', () => {
+  // THE SHIPPING SHAPE (cardFacts.mjs changedForCard): `sources` is the COUNT,
+  // and the list of urls it used to be is `sourceUrls`.
   assert.equal(
-    fns.changedLine({ changed: { text: 'moved to anthropic in march', sources: ['a', 'b'] } }),
+    fns.changedLine({ changed: { text: 'moved to anthropic in march', sources: 2, sourceUrls: ['a', 'b'] } }),
     'moved to anthropic in march · 2 sources'
   );
-  assert.equal(
-    fns.changedLine({ changed: { text: 'moved to anthropic', sources: ['a'] } }),
-    'moved to anthropic · 1 source'
-  );
-  // No sources listed: the claim still shows, the count does not lie.
+  assert.equal(fns.changedLine({ changed: { text: 'moved to anthropic', sources: 1 } }),
+    'moved to anthropic · 1 source');
+  // The field changed MEANING rather than name, so the older array shape has to
+  // answer too — and the obvious length test is wrong in both directions:
+  // Number([]) is 0 and Number(['a']) is NaN.
+  assert.equal(fns.sourceCount({ sources: ['a', 'b'] }), 2, 'an older list still counts');
+  assert.equal(fns.sourceCount({ sources: 2 }), 2);
+  assert.equal(fns.sourceCount({ sourceUrls: ['a'] }), 1, 'and the list under its new name');
+  assert.equal(fns.sourceCount({ sources: 0 }), 0);
+  assert.equal(fns.sourceCount({}), 0);
+  assert.equal(fns.sourceCount({ sources: 'two' }), 0, 'a word is not a count');
+  // No sources at all: the claim still shows, the count does not lie.
   assert.equal(fns.changedLine({ changed: { text: 'moved to anthropic' } }), 'moved to anthropic');
 });
 
