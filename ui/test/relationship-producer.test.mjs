@@ -417,7 +417,13 @@ test('produceBatch writes a batch + snapshot in the shape hydrateCards reads', a
 
     const cardOut = await (await call('GET', '/admin/relationship/card')).json();
     assert.equal(cardOut.card.name, 'Frank Founder');
-    assert.ok(cardOut.card.sentence.includes('founder'));
+    // THE MODE IS NOT A FACT ABOUT THE PERSON (surface review B finding 5).
+    // The sentence used to read "Quiet 190 days · founder · ...", which on a
+    // live card sat two rows above a "who they are" line saying something
+    // else. The mode still travels -- on `servedMode` and in evidence, both
+    // asserted above -- it just no longer poses as biography.
+    assert.ok(!cardOut.card.sentence.includes('founder'), 'the owner\'s filter is not in the sentence');
+    assert.equal(cardOut.servedMode, 'founder', 'the mode travels as provenance instead');
     assert.equal(cardOut.card.producer_version, PRODUCER_VERSION);
   } finally {
     await server.close();

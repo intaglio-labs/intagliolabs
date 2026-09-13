@@ -271,8 +271,93 @@ export function latestAuthoredContextId(db, personKey) {
   return row ? Number(row.id) : null;
 }
 
-function tieSentence(mode, candidate) {
-  return `Quiet ${candidate.quietDays} days · ${mode} · you two have ${candidate.messages} messages and ${candidate.meetings} meetings`;
+// THE QUOTE FLOOR (surface review C finding 29). Run 3 shipped a card whose
+// entire evidence quote was "Heyo 100%!" -- the newest authored row, with no
+// test of whether it said anything. A one-word quote makes the card look
+// broken, so this walks back through their last QUOTE_LOOKBACK authored
+// direct rows and takes the newest one with substance; when none of them has
+// any, it returns null and the page hides the quote row, which is strictly
+// better than quoting an emoji.
+//
+// Deliberately NOT folded into latestAuthoredContextId: owe.mjs's open-loop
+// candidate asks that function for THE newest authored row precisely so it
+// can test whether the last thing they said was a question left hanging. A
+// substance filter there would walk past a closing "ok" and reopen a loop
+// the "ok" closed.
+const QUOTE_LOOKBACK = 12;
+const QUOTE_MIN_CHARS = 24;
+
+// A bare acknowledgement is not a quote. Matched against the whole message
+// once punctuation, emoji and whitespace are gone, so "ok!!", "ok ok thanks
+// haha 👍" and "Sounds good, thanks!" are all still acknowledgements while
+// "sounds good, i will send the deck on friday" is not.
+const ACK_WORDS = new Set([
+  'ok', 'okay', 'k', 'kk', 'okey', 'okie', 'yes', 'yep', 'yeah', 'yup', 'ya', 'no', 'nope',
+  'thanks', 'thank', 'you', 'thx', 'ty', 'tysm', 'cheers', 'lol', 'lmao', 'haha', 'hah',
+  'hehe', 'hi', 'hey', 'heyo', 'hello', 'yo', 'sup', 'got', 'it', 'sounds', 'good', 'great',
+  'nice', 'cool', 'perfect', 'awesome', 'sure', 'np', 'nvm', 'done', 'same', 'true', 'word',
+  'agreed', 'congrats', 'congratulations', 'wow', 'omg', 'bye', 'gotcha', 'right', 'exactly',
+  'amazing', 'welcome', 'anytime', 'definitely', 'absolutely', 'totally', 'indeed',
+  // Intensifiers and interjections, so a garland of them around an ack
+  // ("THANKS SO MUCH, GOT IT!!!! haha") is still an ack.
+  'so', 'much', 'very', 'really', 'too', 'oh', 'ah', 'aw', 'hmm', 'mm', 'yay', 'ha',
+]);
+
+const URL_RE = /\b(?:https?:\/\/|www\.)\S+/giu;
+const WORD_RE = /[\p{L}\p{N}]+/gu;
+
+export function isSubstantiveQuote(text) {
+  if (typeof text !== 'string') return false;
+  const trimmed = text.trim();
+  if (trimmed.length < QUOTE_MIN_CHARS) return false;
+
+  // A line that is nothing but a link says nothing on a card. Stripping the
+  // urls first also stops a long url from carrying an otherwise empty
+  // message past the length floor above via its own letters.
+  const withoutUrls = trimmed.replace(URL_RE, ' ');
+  const words = withoutUrls.toLowerCase().match(WORD_RE) ?? [];
+  if (words.length === 0) return false; // url-only, or only emoji/punctuation
+
+  return words.some((w) => !ACK_WORDS.has(w));
+}
+
+// The newest authored direct row that clears isSubstantiveQuote, looking
+// back at most QUOTE_LOOKBACK rows. Same "reference, not copied text"
+// discipline as latestAuthoredContextId: the id is what travels, and the
+// text is re-read from the live row at serve time.
+export function substantiveQuoteContextId(db, personKey, { lookback = QUOTE_LOOKBACK } = {}) {
+  const rows = db.prepare(
+    `SELECT c.id AS id, c.text AS text FROM person_event_links pel
+     JOIN context c ON c.id = pel.context_id
+     WHERE pel.person_key = ? AND pel.authored = 1 AND pel.room = 0
+     ORDER BY c.ts DESC LIMIT ?`
+  ).all(personKey, lookback);
+  for (const row of rows) {
+    if (isSubstantiveQuote(row.text)) return Number(row.id);
+  }
+  return null;
+}
+
+// THE TIE SENTENCE (surface review B findings 5 and 6). It used to print the
+// owner's MODE between the two facts -- "Quiet 634 days · investor · ..." --
+// which is the owner's own filter, not a fact about this person, and which
+// contradicted the card's role row two lines below when the two disagreed.
+// It also printed "0 meetings" and "1 meetings". Counts are pluralised and a
+// zero count is left out of the sentence rather than announced: there is
+// nothing to say about a meeting that never happened.
+function countClause(n, singular) {
+  return `${n} ${n === 1 ? singular : `${singular}s`}`;
+}
+
+function tieSentence(candidate) {
+  const parts = [];
+  if (candidate.messages > 0) parts.push(countClause(candidate.messages, 'message'));
+  if (candidate.meetings > 0) parts.push(countClause(candidate.meetings, 'meeting'));
+  const quiet = `Quiet ${countClause(candidate.quietDays, 'day')}`;
+  // Both counts zero is reachable (the pool admits a meetings-only person,
+  // and met_in_person can disagree with the calendar join): say the one true
+  // thing rather than "you two have 0 messages".
+  return parts.length === 0 ? quiet : `${quiet} · you two have ${parts.join(' and ')}`;
 }
 
 // Writes rm_candidate_batch + rm_candidate_snapshot in exactly the shape
@@ -297,8 +382,8 @@ export function produceBatch(db, { mode = 'any', now = Date.now(), limit = 5, in
 
   const cards = [];
   for (const candidate of chosen) {
-    const quoteContextId = latestAuthoredContextId(db, candidate.personKey);
-    const summary = tieSentence(mode, candidate);
+    const quoteContextId = substantiveQuoteContextId(db, candidate.personKey);
+    const summary = tieSentence(candidate);
     const evidence = {
       quote_context_id: quoteContextId,
       role: candidate.role,
