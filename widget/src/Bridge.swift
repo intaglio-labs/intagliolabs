@@ -125,6 +125,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // an LSUIElement app with no menu bar, and uninstall was a
                     // shell script in a repo the owner will never find.
                     "quitApp", "uninstallApp",
+                    // The export card's file picker. The shelf's hint used to
+                    // tell the owner to put Connections.csv in a dotfile path
+                    // by hand, while onboarding screen 4 did the same job with
+                    // this panel. One way to do it now, and it is this one.
+                    "importLinkedIn",
                     "activity",
                     "openFullDiskAccess", "startSources",
                     // In-panel API-key walkthroughs and Google OAuth.
@@ -1533,7 +1538,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       if let label = Distiller.shared.activity {
         items.append(["kind": "index", "label": label])
       }
-      var activity: [String: Any] = ["state": "ok", "items": items]
+      // WHETHER THE THING THAT DOES THE WORK IS EVEN UP. An empty item list
+      // means "nothing in flight", which is the same picture for a reader that
+      // has finished, one that has not started and one that died — and the
+      // panel had no way to tell the owner which. The onboarding screen has
+      // always known (it reads the run log); settings gets the fact directly
+      // from the child process this app owns.
+      var activity: [String: Any] = [
+        "state": "ok", "items": items, "reading": Connectors.shared.isRunning,
+      ]
       if let estimate = Connectors.shared.activityEstimate {
         activity["estimate"] = estimate
       }

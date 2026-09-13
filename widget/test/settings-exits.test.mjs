@@ -146,3 +146,36 @@ test('the new rows have a control shape to render into', () => {
   assert.match(palette, /^\.setting-btn-danger \{/mu);
   assert.match(palette, /^\.setting-control \{/mu);
 });
+
+test('the shelf offers the LinkedIn picker instead of a dotfile path', () => {
+  // Two contradictory instructions for one job: this hint told the owner to put
+  // Connections.csv in ~/.hazlie/imports/linkedin by hand, while onboarding
+  // screen 4 did it with a native picker. One way now, and it is the picker.
+  const hint = /'linkedin-export': \{([\s\S]*?)\n {2}\},/u.exec(connections)?.[1] ?? '';
+  assert.ok(hint, 'the export hint was not found');
+  assert.doesNotMatch(hint.replace(/\/\/[^\n]*/gu, ''), /~\/\.hazlie/u,
+    'a raw dotfile path in a tooltip is an invitation to go editing one by hand');
+  assert.ok(connectionsGrants.has('importLinkedIn'), 'the page must be allowed to ask');
+  assert.match(connections, /pickLinkedInExport\(pick, tip\)/u);
+  // Every branch native can answer with is said, including the two that have a
+  // remedy in them. A picker that only knows "ok" leaves a French export or a
+  // zip looking like the button did nothing.
+  const picker = /const pickLinkedInExport = \(button, tip\) => \{([\s\S]*?)\n {2}\};/u.exec(connections)?.[1] ?? '';
+  for (const reason of ['zip', 'columns', 'newer', 'duplicate']) {
+    assert.match(picker, new RegExp(`out\\.reason === '${reason}'`, 'u'),
+      `the card must answer a ${reason} result`);
+  }
+  assert.match(picker, /out\.state === 'cancelled'/u, 'and a cancel must say nothing at all');
+});
+
+test('an idle activity row says which kind of idle it is', () => {
+  // One sentence covered three states: finished, never started, and stopped.
+  // Only the first is fine, and the other two are the owner's to fix.
+  assert.match(bridge, /"reading": Connectors\.shared\.isRunning/u,
+    'the reply must carry whether the thing that does the work is up');
+  const paint = /if \(!items\.length\) \{([\s\S]*?)\n {4}\} else \{/u.exec(connections)?.[1] ?? '';
+  assert.match(paint, /reading === false\s*\n?\s*\? 'nothing is running\.'/u);
+  assert.match(paint, /everything it can see is read/u);
+  assert.match(paint, /hzPost\('startSources'\)/u,
+    'a stopped reader needs the same "start it" the onboarding banner offers');
+});

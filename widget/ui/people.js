@@ -151,7 +151,11 @@ function openSearchDetails() {
     // frontier handoff can send reviewed text to a cloud model — the map and
     // its rows still never leave).
     'the map is built and kept on this mac',
-    'builds your private people-map; searching it for specifics comes next',
+    // ~~'builds your private people-map; searching it for specifics comes
+    // next'~~ — a promise about unbuilt work, shown twice on the owner's own
+    // screen (the other was under "your people-map is ready"). What this page
+    // does is above; what it might do one day is not a feature of it.
+    'builds your private people-map',
   ]) {
     const li = document.createElement('li');
     li.textContent = line;
@@ -315,14 +319,14 @@ function renderDone() {
   l2.textContent = rDecided > 0
     ? `${rDecided} merge${rDecided === 1 ? '' : 's'} you confirmed.`
     : 'nothing needed merging.';
-  const l3 = document.createElement('p');
-  l3.className = 'rv-next';
-  l3.textContent = 'searching it for specifics comes next.';
+  // ~~"searching it for specifics comes next."~~ went with its twin in the
+  // what-this-does list: the same promise about unbuilt work, on the screen
+  // that reports a finished job.
   const btn = document.createElement('button');
   btn.className = 'p-init';
   btn.textContent = 'done';
   btn.addEventListener('click', showSetup);
-  done.append(h, l1, l2, l3, btn);
+  done.append(h, l1, l2, btn);
   preview.replaceChildren(done);
   fitPeople();
 }

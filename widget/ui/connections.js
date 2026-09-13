@@ -648,10 +648,34 @@ function activityRow() {
     const items = [...active, ...queued];
     list.replaceChildren();
     if (!items.length) {
+      // ~~"nothing processing right now"~~ WAS THE SAME SENTENCE for three
+      // different states: the reader has finished what it can see, the reader
+      // has never started, and the reader is not running any more. The first is
+      // fine and the other two are the owner's problem to fix — and the panel
+      // was telling them apart for nobody. `reading` is the app's own child
+      // process, which is the thing that would be doing the work.
       const idle = document.createElement('span');
       idle.className = 'activity-idle';
-      idle.textContent = 'nothing processing right now';
+      const reading = data && data.reading;
+      idle.textContent = reading === false
+        ? 'nothing is running.'
+        : 'nothing to do right now — everything it can see is read.';
       list.appendChild(idle);
+      if (reading === false) {
+        // The same idempotent call onboarding's banner offers, and the same
+        // one the permission screens make: native guards a daemon that is
+        // already up, so pressing it twice costs nothing.
+        const start = document.createElement('button');
+        start.className = 'setting-btn';
+        start.type = 'button';
+        start.textContent = 'start it';
+        start.addEventListener('click', () => {
+          start.disabled = true;
+          idle.textContent = 'starting…';
+          hzPost('startSources').catch(() => {});
+        });
+        list.appendChild(start);
+      }
     } else {
       for (const item of items) {
         const row = document.createElement('div');
@@ -952,9 +976,15 @@ const HINTS = {
   // path IS the instruction: nothing else on the shelf can name it, because no
   // other tile is waiting on a file the owner has to put there by hand.
   'linkedin-export': {
+    // ~~"put Connections.csv in ~/.hazlie/imports/linkedin"~~ — a raw dotfile
+    // path in a tooltip, and an instruction that CONTRADICTED onboarding screen
+    // 4, which does the same job with a native file picker. Two ways to do one
+    // thing, and the one written here was the one that asks the owner to go
+    // digging in a hidden folder. The card carries the picker now (see
+    // `pickLinkedInExport` below); the sentence is only how you get the file.
     text: 'On LinkedIn: Settings → Data privacy → Get a copy of your data → tick "Connections" → '
-      + 'Request archive. When the email lands, unzip it and put Connections.csv in '
-      + '~/.hazlie/imports/linkedin.',
+      + 'Request archive. It arrives by email, usually in ten minutes — unzip it and choose '
+      + 'Connections.csv here.',
     url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
     link: 'linkedin.com · get a copy of your data',
     // One export folder per Mac, so no "+ add account" once it is imported.
@@ -1483,6 +1513,61 @@ function card(src, keep) {
   // connectors reach it by different routes now: granola through the plain
   // hint, telegram from inside its bridge branch (its api keys must exist
   // before its bot can be spoken to at all).
+  // The LinkedIn export's own picker, shaped like onboarding's: one press, a
+  // native file panel, and the answer said in the card the press came from.
+  // Every branch native can return is answered — a cancel is silence, a zip and
+  // an unrecognised header both have their own remedy, and "imported" without a
+  // count would leave the owner wondering whether anything was read.
+  const pickLinkedInExport = (button, tip) => {
+    const previous = button.textContent;
+    button.disabled = true;
+    button.textContent = 'opening…';
+    const say = (line) => {
+      let out = tip.querySelector('.setup-result');
+      if (!out) {
+        out = document.createElement('span');
+        out.className = 'setup setup-result';
+        tip.appendChild(out);
+      }
+      out.textContent = line;
+      fitConnections();
+    };
+    hzPost('importLinkedIn')
+      .then((out) => {
+        if (!out || out.state === 'cancelled') return;
+        if (out.state === 'ok') {
+          const n = Number(out.connections || 0);
+          say(n > 0 ? `${n.toLocaleString()} connections imported.` : 'imported.');
+          button.textContent = 'replace';
+          return;
+        }
+        if (out.reason === 'zip') {
+          say("that's the zip — unzip it and choose Connections.csv from inside it.");
+          return;
+        }
+        if (out.reason === 'columns') {
+          say(`i don't recognise this file's columns — the first one is "${out.firstColumn}". `
+            + 'i can only read the english export today.');
+          return;
+        }
+        if (out.reason === 'newer') {
+          say(`you already have a newer ${out.file} — i kept the one you have.`);
+          return;
+        }
+        if (out.reason === 'duplicate') {
+          const [first, second] = out.files || [];
+          say(`"${first}" and "${second}" are both ${out.file} — choose one.`);
+          return;
+        }
+        say("i couldn't read that file.");
+      })
+      .catch(() => say("i couldn't read that file."))
+      .finally(() => {
+        button.disabled = false;
+        if (button.textContent === 'opening…') button.textContent = previous;
+      });
+  };
+
   const walkthrough = (hint) => {
     // lives right here — open the site, make a key, paste it — instead of
   // handing the owner to the connect page. hint.url is the door;
@@ -1682,6 +1767,18 @@ function card(src, keep) {
         soon.className = 'setup';
         soon.textContent = 'coming soon. help us build it :)';
         tip.appendChild(soon);
+      } else if (src.id === LINKEDIN_EXPORT_ID) {
+        // THE SAME PICKER ONBOARDING USES. Native opens the file panel, checks
+        // the anchor column before copying, and answers with what it found —
+        // so the outcomes here are onboarding's outcomes, said in one line.
+        const pick = document.createElement('button');
+        pick.className = 'hold-ok';
+        pick.textContent = 'choose the file';
+        pick.addEventListener('click', (e) => {
+          e.stopPropagation();
+          pickLinkedInExport(pick, tip);
+        });
+        tip.appendChild(pick);
       } else if (CONNECT_PAGE.has(kindOf(src.id))) {
         const open = document.createElement('button');
         open.className = 'hold-ok';
