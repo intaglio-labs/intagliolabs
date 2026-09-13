@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1364,4 +1364,92 @@ test('a pool that could not be counted is not remembered as an empty one', () =>
     { mode: 0, any: 1 },
     'the next request counts again rather than being served the failure back');
   assert.ok(rel.modeCounts, 'a real reading IS remembered, which is what the memo is for');
+});
+
+// --- GET /admin/config/card: what the owner actually chose -----------------
+//
+// Settings could not show the owner a single thing the card is configured to
+// do: the mode picker lives on the card itself, the cap has no control at all
+// (surface review E finding 24), and the engine switch -- the one that decides
+// whether excerpts leave this Mac -- is reachable only inside the onboarding
+// flow, so once that flow is done it is gone (finding 22).
+//
+// The fixture is built so a wrong implementation fails rather than merely
+// being unchecked: the SERVER IS STARTED WITH OVERRIDES that disagree with the
+// file (relationshipCap {max:5}, producer 'matcher', mode 'any'), and the file
+// is empty. A route answering through relationshipCap/relationshipProducerConfig
+// -- the obvious spelling, and the one every other branch of the card route
+// uses -- would report capPerDay 5, producer 'matcher', mode 'any' here. This
+// route answers what is on disk, so all four are null: an override belongs to
+// a test harness, and a fallback belongs to whatever has to run a batch, but
+// neither is a choice the owner made and a settings page must not show either
+// back to them as one.
+test('GET /admin/config/card reports the owner\'s own four keys, and null for the ones nobody set', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-routes-config-'));
+  const configPath = join(dir, 'config.json');
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'matcher', mode: 'any' },
+    ownerConfigPath: configPath,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    // A fresh install: no config file at all.
+    assert.deepEqual(await (await call('GET', '/admin/config/card')).json(),
+      { mode: null, capPerDay: null, producer: null, engine: null },
+      'nobody has chosen -- which is a different row from having chosen zero');
+
+    // Now the owner chooses, through the three routes that own those writes.
+    await call('POST', '/admin/config/card', { capPerDay: 3, producer: 'eligibility' });
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    await call('POST', '/admin/config/engine', { engine: 'claude-cli' });
+
+    assert.deepEqual(await (await call('GET', '/admin/config/card')).json(),
+      { mode: 'founder', capPerDay: 3, producer: 'eligibility', engine: 'claude-cli' },
+      'read back through the same seam the writes went through');
+
+    // 'local' DELETES relationshipMemory.engine rather than writing a string
+    // (absent-means-loopback is engines.mjs's contract), so the read has to
+    // answer null for it and leave the other three standing.
+    await call('POST', '/admin/config/engine', { engine: 'local' });
+    assert.deepEqual(await (await call('GET', '/admin/config/card')).json(),
+      { mode: 'founder', capPerDay: 3, producer: 'eligibility', engine: null });
+
+    // A read and only a read: no batch, no snapshot, no cap bookkeeping.
+    await call('GET', '/admin/config/card');
+    assert.equal(Number(server.db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n), 0);
+    assert.equal(Number(server.db.prepare('SELECT COUNT(*) AS n FROM rm_card_event').get().n), 0);
+
+    // No body, so no media type asked of it -- and still bearer-only.
+    assert.equal((await fetch(`${base}/admin/config/card`)).status, 401);
+    assert.equal((await fetch(`${base}/admin/config/card`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    })).status, 200, 'a GET with no content-type is served');
+  } finally { await server.close(); }
+});
+
+// A relationshipMemory section that is not an object, or holds values of the
+// wrong type, is a hand-edited config -- the read answers null rather than
+// handing the page a number where it expects a name (or the reverse).
+test('GET /admin/config/card answers null for a malformed config rather than echoing it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-routes-config-bad-'));
+  const configPath = join(dir, 'config.json');
+  writeFileSync(configPath, JSON.stringify({
+    relationshipMemory: { mode: 7, capPerDay: '3', producer: '', engine: { name: 'claude-cli' } },
+  }));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipCap: CAP, ownerConfigPath: configPath,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/admin/config/card`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    assert.deepEqual(await res.json(), { mode: null, capPerDay: null, producer: null, engine: null });
+  } finally { await server.close(); }
 });

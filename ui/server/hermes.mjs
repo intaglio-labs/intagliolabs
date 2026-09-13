@@ -3805,6 +3805,44 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
+  // AND THE READ SIDE OF THE SAME FOUR KEYS. Settings has no way to show the
+  // owner what the card is actually configured to do -- the mode picker lives
+  // on the card, the cap has no control at all, and the engine switch (the one
+  // that decides whether excerpts leave this Mac) exists only inside the
+  // onboarding flow, so once that flow is done nobody can see it again.
+  //
+  // WHAT IS ON DISK, NOT WHAT THIS PROCESS IS RUNNING. Every value here comes
+  // from readOwnerConfig through the ownerConfigPath seam, so a start()-time
+  // override (policy.relationshipCap, policy.relationshipProducerConfig,
+  // policy.relationshipMemoryEngine -- the test seams) is deliberately NOT
+  // reflected: this route answers "what did the owner choose", and a test
+  // harness's override is not the owner. A settings page that showed an
+  // override back to the owner as their own setting would be lying about a
+  // file they can hold us to.
+  //
+  // ABSENT IS null, NOT A DEFAULT. relationshipProducerConfig reads an absent
+  // producer as 'matcher' and an absent mode as 'any' because it must answer
+  // SOMETHING to run a batch; a settings row must not turn that fallback into
+  // a claim that the owner picked it. Same for the cap, whose absence is the
+  // whole of finding 8's dead end ("the daily card is switched off in your
+  // config"): null means nobody has chosen, which is a different row from a
+  // chosen 0.
+  //
+  // A read, and only a read: no producer run, no refill, no cap bookkeeping,
+  // nothing recorded. Bearer-only like every route under handleAdmin, and no
+  // media type asked of a GET that carries no body.
+  if (req.method === 'GET' && url.pathname === '/admin/config/card') {
+    const chosen = readOwnerConfig(policy)?.relationshipMemory;
+    const named = (value) => (typeof value === 'string' && value.length > 0 ? value : null);
+    send(res, 200, {
+      mode: named(chosen?.mode),
+      capPerDay: Number.isInteger(chosen?.capPerDay) ? chosen.capPerDay : null,
+      producer: named(chosen?.producer),
+      engine: named(chosen?.engine),
+    }, cors);
+    return;
+  }
+
   // ONBOARDING'S FIRST-LOAD TABLE. Counts, and the state of the thing that
   // turns counts into people. No row text, no names, no identifiers.
   //
