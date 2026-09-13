@@ -51,6 +51,12 @@ function decide(take) {
       if (out.result === 'ok') {
         const n = Number(out.connections || 0);
         done(n > 0 ? `${n.toLocaleString()} connections imported.` : 'imported.');
+        // IT WORKED, SO IT GOES AWAY. Long enough to read the count, and no
+        // longer: an offer the owner has answered is a panel in the way. Only
+        // on this branch — the failure below is the one place they can read why
+        // their press did nothing, and a panel that closes itself over that is
+        // the bug this whole panel exists to stop repeating.
+        setTimeout(() => hzPost('close').catch(() => {}), 3000);
         return;
       }
       // NOT CLOSED ON A FAILURE. The owner pressed import and something did not

@@ -396,8 +396,75 @@ test('an import nobody started here still repaints the surfaces that show it', (
   assert.match(code(mainSwift), /window\.__hzLinkedInChanged/u);
   assert.match(connectionsJs, /window\.__hzLinkedInChanged = \(\)/u);
   assert.match(onboardingJs, /window\.__hzLinkedInChanged = \(\)/u);
-  assert.match(onboardingJs, /if \(currentScreen !== '4'\) return;/u,
-    'and the onboarding page only acts on it while that screen is up');
+  // The onboarding page acts on it per SCREEN: 4 re-reads what is installed, 6
+  // asks for a card again, and nothing else in the flow cares. Pinned in full
+  // by "screen 6 asks again too", above.
+  assert.match(onboardingJs, /if \(currentScreen === '4'\) \{/u);
+  assert.match(onboardingJs, /if \(currentScreen !== '6'\) return;/u);
+});
+
+// AN IMPORT THAT LANDED IS NEWS TO EVERY SURFACE, NOT JUST THE ONE THAT ASKED.
+//
+// Live on run 8: "import it" succeeded in the offer panel, the hold lifted on
+// the server within seconds, and the reconnect card went on saying "investor
+// cards start when your linkedin export lands" until its next poll -- a sentence
+// about a file that had just arrived, on the surface the owner was looking at.
+//
+// The fix is one call from one place. It used to be fired by the watcher and the
+// drop only: the PICKER -- screen 4's "i have it", the settings row, the
+// connector card -- went through the same import and told nobody, so the two
+// surfaces that render this state were stale after the commonest path of all.
+test('every import that lands says so, from one place', () => {
+  const accept = /private func acceptLinkedInFiles\(_ urls: \[URL\]\) -> \[String: Any\] \{([\s\S]*?)\n  \}/u
+    .exec(bridge)?.[1] ?? '';
+  assert.match(code(accept), /linkedInExportChanged\(\)/u,
+    'the import itself is the one place every caller passes through');
+  // ...and it is not ALSO fired by one of the callers, or the surfaces repaint
+  // twice for one import and the second one races the first.
+  assert.equal((code(bridge).match(/delegate\?\.linkedInExportChanged\(\)/gu) ?? []).length, 1,
+    'one import, one announcement');
+  // Fired where the success is known, after the swap rather than beside it.
+  const okAt = code(accept).indexOf('"state": "ok"');
+  const tellAt = code(accept).indexOf('linkedInExportChanged()');
+  assert.ok(tellAt > -1 && okAt > tellAt, 'it is announced on the success path only');
+});
+
+test('the card drops the hold line as soon as the file lands', () => {
+  // The line is about a file that has now arrived. Waiting for the next poll
+  // leaves it contradicting the owner's own last action.
+  assert.match(code(mainSwift), /__hzReconnectShow/u);
+  const changed = /func linkedInExportChanged\(\) \{([\s\S]*?)\n  \}/u.exec(mainSwift)?.[1] ?? '';
+  assert.match(code(changed), /reconnectPanel/u,
+    'the card page has to be poked, not only the two that show the file itself');
+  // __hzReconnectShow IS pull(), so the re-fetch clears the line and can bring
+  // the standing pick's own card with it.
+  assert.match(reconnectJs, /window\.__hzReconnectShow = pull;/u);
+});
+
+test('screen 6 asks again too, if the flow is still open', () => {
+  const hook = /window\.__hzLinkedInChanged = \(\) => \{([\s\S]*?)\n\};/u
+    .exec(onboardingJs)?.[1] ?? '';
+  assert.ok(hook, 'the onboarding change hook is gone');
+  assert.match(hook, /currentScreen === '4'/u, 'screen 4 re-reads what is installed');
+  assert.match(hook, /currentScreen !== '6'/u);
+  assert.match(hook, /relCardPeek/u, 'and screen 6 asks for a card again');
+  // The owner's own import is not charged to the poll throttle -- the same rule
+  // the "just this once" button follows.
+  assert.match(hook, /lastPeekAt = Date\.now\(\)/u);
+});
+
+test('the offer panel lets go of itself once it has worked', () => {
+  const js = read('widget/ui/export.js');
+  assert.match(js, /setTimeout\(\(\) => hzPost\('close'\)/u);
+  // ONLY ON SUCCESS. A failure sentence is the only place the owner can read
+  // why their press did nothing, and a panel that closes itself over one is the
+  // bug this whole panel exists to stop repeating.
+  const decide = /function decide\(take\) \{([\s\S]*?)\n\}/u.exec(js)?.[1] ?? '';
+  const okAt = decide.indexOf("out.result === 'ok'");
+  const timerAt = decide.indexOf('setTimeout');
+  assert.ok(okAt > -1 && timerAt > okAt, 'the timer belongs to the success branch');
+  const failAt = decide.indexOf('RESULTS[out.reason]');
+  assert.ok(failAt > timerAt, 'and the failure branch comes after it, with no timer of its own');
 });
 
 // -------------------------------------------------- (4) the mode fallback

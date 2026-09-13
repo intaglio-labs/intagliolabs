@@ -1573,6 +1573,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
          "window.__hzLinkedInChanged && window.__hzLinkedInChanged()")
     eval(onboardingPanel?.contentView as? WKWebView,
          "window.__hzLinkedInChanged && window.__hzLinkedInChanged()")
+    // AND THE CARD, WHICH IS SHOWING A SENTENCE ABOUT THIS FILE.
+    //
+    // The mode hold lifts on the server within seconds of an export landing,
+    // and the card page only finds out on its next pull -- so on run 8 the
+    // import succeeded and "investor cards start when your linkedin export
+    // lands" stayed on screen, contradicting the owner's own last action.
+    // __hzReconnectShow is pull(), so this both clears the line and can bring
+    // the standing pick's first real card with it.
+    eval(reconnectPanel?.contentView as? WKWebView,
+         "window.__hzReconnectShow && window.__hzReconnectShow()")
   }
 
   // ...and back on top when the owner comes back. Guarded on the flag so this

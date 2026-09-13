@@ -368,7 +368,12 @@ test('the reader is started, with its config, on the main queue', () => {
   // .main. acceptLinkedInFiles runs on a background queue, so it hops.
   // `_ =` because the call answers whether the reader came up now, and this
   // call site is the import's fire-and-forget one.
-  assert.match(accept, /DispatchQueue\.main\.async \{ \[weak self\] in _ = self\?\.startReadingSources\(\) \}/u);
+  // ONE HOP, TWO ERRANDS. The announcement to the surfaces joined it here
+  // rather than taking a second dispatch: both are main-thread work owed at
+  // exactly the same moment, and splitting them would let a repaint run before
+  // the reader it is repainting about had been asked to start.
+  assert.match(accept,
+    /DispatchQueue\.main\.async \{ \[weak self\] in\n\s*_ = self\?\.startReadingSources\(\)/u);
   assert.doesNotMatch(accept, /(?<!\.)\bConnectors\.shared\.start\(\)/u,
     'the bare start() is what skipped the config write');
   const starter = /private func startReadingSources\(\) -> \(configWritten: Bool, outcome: Connectors\.StartOutcome\) \{([\s\S]*?)\n {2}\}/u.exec(bridge)?.[1];

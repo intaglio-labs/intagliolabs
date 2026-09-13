@@ -1017,8 +1017,21 @@ function enterLinkedIn() {
 // already installed. Guarded on `present`, like the entry read, so a poke that
 // arrives for some other reason claims nothing.
 window.__hzLinkedInChanged = () => {
-  if (currentScreen !== '4') return;
-  hzPost('linkedInState').then(paintLinkedInExisting).catch(() => {});
+  if (currentScreen === '4') {
+    hzPost('linkedInState').then(paintLinkedInExisting).catch(() => {});
+    return;
+  }
+  // AND SCREEN 6 IS SHOWING A SENTENCE ABOUT THIS FILE. The mode hold lifts on
+  // the server within seconds of an export landing, and this screen would
+  // otherwise go on saying "investor cards start when your linkedin export
+  // lands" until its next poll — about a file that has just arrived, on the
+  // screen the owner is looking at. Asking again can also bring the standing
+  // pick's first real card, which is what the whole flow is waiting for.
+  if (currentScreen !== '6') return;
+  // NOT CHARGED TO THE THROTTLE. The owner's own import is not the page polling
+  // on its own account — the same rule "just this once" follows.
+  lastPeekAt = Date.now();
+  hzPost('relCardPeek').then(peekCard).catch(() => {});
 };
 
 // ASKING IS NOT HAVING, and this button is the "asking" half.

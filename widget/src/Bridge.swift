@@ -3618,14 +3618,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     guard !urls.isEmpty else { done(["state": "cancelled"]); return }
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       guard let self else { done(["state": "cancelled"]); return }
-      let out = self.acceptLinkedInFiles(urls)
-      // The two pages that render this file's state repaint themselves; an
-      // import the owner did not start must not leave screen 4 still saying
-      // "waiting" about a file that has landed.
-      if out["state"] as? String == "ok" {
-        DispatchQueue.main.async { self.delegate?.linkedInExportChanged() }
-      }
-      done(out)
+      // ~~The repaint was announced here~~ and is announced by
+      // acceptLinkedInFiles itself now: this was the watcher's and the drop's
+      // way in, and the picker -- the commonest path of all -- went through the
+      // same import and told nobody. One import, one announcement.
+      done(self.acceptLinkedInFiles(urls))
     }
   }
 
@@ -3960,7 +3957,23 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // never calls startSources — so on the skip path this whole import landed
     // a file, reported "N connections", and scheduled nothing to read it. The
     // same call startSources makes, on the queue it is allowed to be made on.
-    DispatchQueue.main.async { [weak self] in _ = self?.startReadingSources() }
+    // AND EVERY SURFACE THAT RENDERS THIS FACT IS TOLD, FROM HERE.
+    //
+    // ~~Announced by importLinkedIn(files:)~~, which is the watcher's and the
+    // drop's way in and NOT the picker's -- so screen 4's "i have it", the
+    // settings row and the connector card all landed a file and told nobody.
+    // Live on run 8 with the offer panel: the import succeeded, the server
+    // lifted the hold within seconds, and the reconnect card went on saying
+    // "investor cards start when your linkedin export lands" until its next
+    // poll, which is a sentence about a file the owner had just handed over.
+    //
+    // This function is the one place all three callers pass through, and it is
+    // the line after which the file is really on disk, so it is where the
+    // announcement belongs.
+    DispatchQueue.main.async { [weak self] in
+      _ = self?.startReadingSources()
+      self?.delegate?.linkedInExportChanged()
+    }
     return [
       "state": "ok", "files": copied, "connections": connections,
       "unknownVintage": unknownVintage,
