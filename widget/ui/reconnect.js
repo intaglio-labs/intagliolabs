@@ -68,6 +68,33 @@ function showOneOff(out) {
   line.textContent = show ? `shown once from ${served}` : '';
 }
 
+// WHY THE LIT CHIP IS NOT THE CARD YOU GOT.
+//
+// founder and investor are decided from the LinkedIn export's job titles, so on
+// a Mac with no export there is nobody to BE either -- hermes serves from `any`
+// instead and says so with `modeFallback: 'linkedin-pending'`. Without a word
+// here that reads as the picker lying: the investor chip is lit, the card is
+// somebody's cousin, and the obvious conclusion is that the chips do nothing.
+//
+// THE STANDING CHIP STAYS SELECTED. The owner's pick has not changed and is not
+// being overridden -- it is waiting on a file, which is what this line says.
+// adoptServerMode is untouched for the same reason: a fallback is not a choice,
+// any more than a one-off look is.
+//
+// Same sentence as onboarding screen 6 (paintModeShortfall), because it is the
+// same fact, and two wordings for one cause is two explanations.
+//
+// Cleared on every answer, like showOneOff: it describes one reply and must
+// never outlive it.
+function showModeFallback(out) {
+  const line = el('rcFallback');
+  if (!line) return;
+  const mode = typeof out?.mode === 'string' ? out.mode : '';
+  const show = out?.modeFallback === 'linkedin-pending' && mode !== '' && mode !== 'any';
+  line.hidden = !show;
+  line.textContent = show ? `${mode} cards start when your linkedin export lands` : '';
+}
+
 function renderModes() {
   el('rcModeAny').classList.toggle('rc-mode-active', currentMode === 'any');
   el('rcModeFounder').classList.toggle('rc-mode-active', currentMode === 'founder');
@@ -127,6 +154,10 @@ const EMPTY_DEFAULT = 'nothing to review — the orb will light up when there is
 
 function renderEmpty(out) {
   card = null;
+  // Again here, because the two `unreachable` paths reach this function without
+  // going past pull()'s call — and a line about the owner's chips must not
+  // survive a reply that says we could not reach the reader at all.
+  showModeFallback(out);
   el('rcCard').hidden = true;
   el('rcEmpty').hidden = false;
   el('rcEmptyMsg').textContent = out?.refreshing
@@ -620,6 +651,9 @@ async function pull() {
     const out = await hzPost('relCard');
     if (!reachedHermes(out)) { renderEmpty({ reason: 'unreachable' }); return; }
     adoptServerMode(out);
+    // Before either branch: this line is about the CHIPS, so it is equally true
+    // of a fallback card and of an empty answer under the same standing pick.
+    showModeFallback(out);
     if (out?.card) {
       render(out.card);
       // SAY WHERE IT CAME FROM. A one-off card was served under a mode the owner

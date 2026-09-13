@@ -14,6 +14,17 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .rc-close { background: none; border: 0; color: inherit; opacity: 0.55; cursor: pointer; font-size: 13px; }
 .rc-close:hover { opacity: 1; }
 .rc-modes { display: flex; gap: 5px; margin: 0 0 10px; flex: 0 0 auto; }
+/* One line under the chips, for when the chip that is lit cannot be served yet.
+   Quiet on purpose: this is not a failure and there is nothing to press — the
+   export is coming or it is not, and either way the card below is a real card.
+   It pulls up into .rc-modes' bottom margin so the two read as one block.
+   The [hidden] companion is the rule the block below explains: a class with an
+   explicit `display` out-specifies the attribute unless it is answered. */
+.rc-fallback {
+  font-size: 12px; line-height: 1.4; opacity: 0.6;
+  margin: -6px 0 10px; flex: 0 0 auto;
+}
+.rc-fallback[hidden] { display: none; }
 /* #rcCard fills whatever the win column has left after the head/modes rows.
    rc-body is the ONLY thing that scrolls: min-height:0 lets a flex item
    shrink below its content size (the default is content-based and would

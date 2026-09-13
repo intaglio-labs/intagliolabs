@@ -23,6 +23,13 @@
       <button class="rc-mode" id="rcModeFounder" data-mode="founder">founder</button>
       <button class="rc-mode" id="rcModeInvestor" data-mode="investor">investor</button>
     </div>
+    <!-- WHY THE CHIP ABOVE IS LIT AND THE CARD BELOW IS NOT FROM IT. founder and
+         investor are decided from the LinkedIn export's job titles, so with no
+         export there is nobody to be either — the server serves from `any`
+         instead and says so with modeFallback. Under the chips because it is
+         about the chips, and outside #rcCard because it is true of the empty
+         state too. See reconnect.js showModeFallback. -->
+    <p class="rc-fallback" id="rcFallback" hidden></p>
     <div id="rcCard">
       <div class="rc-body" id="rcBody">
         <div class="rc-trigger" id="rcTrigger"></div>
