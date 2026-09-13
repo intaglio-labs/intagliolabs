@@ -41,20 +41,47 @@ export const PULLS_PER_DAY = 3;
 // The frequency cap keeps its own rolling window (it is configured as one, in
 // the owner's config), so the two really are different clocks. That is
 // deliberate and is the smaller surprise: the cap is a rate limit, the pull
-// budget is a daily allowance.
-export function startOfLocalDay(now = Date.now()) {
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+// budget is a daily allowance. The visible cost is a late-evening session:
+// pulls taken at 23:55 and pulls taken at 00:05 are two days' worth inside ten
+// minutes. Recorded rather than fixed -- moving the reset off the calendar
+// would make "come back tomorrow" a sentence about nothing the owner can read
+// off a clock.
+//
+// THE FIRST INSTANT THAT IS ACTUALLY ON TODAY'S DATE, which is not always
+// 00:00. A zone that shifts AT midnight (America/Santiago, Asia/Beirut,
+// America/Havana) makes that local time either non-existent or repeated, and
+// what an engine returns for such a time is not something to lean on: resolved
+// backwards it names yesterday, and for a repeated midnight the LATER of the
+// two is an hour after the date actually changed. Either way the day's own
+// rows fall on the wrong side of the count. So the calendar is asked rather
+// than trusted: step forward until the date is today's, then back while the
+// hour before is still today's.
+//
+// Whole hours, bounded at three: every zone that shifts at midnight shifts by
+// a whole hour. A half-hour midnight shift (none exists) would leave the
+// boundary thirty minutes early, one day a year.
+function localDayStart(when) {
+  const wanted = when.getDate();
+  const candidate = new Date(when.getTime());
+  candidate.setHours(0, 0, 0, 0);
+  let t = candidate.getTime();
+  for (let i = 0; i < 3 && new Date(t).getDate() !== wanted; i++) t += 3_600_000;
+  for (let i = 0; i < 3 && new Date(t - 3_600_000).getDate() === wanted; i++) t -= 3_600_000;
+  return t;
 }
 
-// How long until the budget resets, for the route's retryAfterMs. setHours(24)
-// on a local Date lands on the next local midnight through a DST change, which
-// adding 86_400_000 does not.
+export function startOfLocalDay(now = Date.now()) {
+  return localDayStart(new Date(now));
+}
+
+// How long until the budget resets, for the route's retryAfterMs. The NEXT
+// local day's start, through the same calendar walk -- 25 hours past today's
+// start is inside tomorrow whichever way the clocks moved, and localDayStart
+// takes it back to the boundary. Adding 86_400_000 would miss it by an hour
+// twice a year, and setHours(24) inherits midnight's own ambiguity.
 export function msUntilLocalMidnight(now = Date.now()) {
-  const d = new Date(now);
-  d.setHours(24, 0, 0, 0);
-  return Math.max(0, d.getTime() - now);
+  const tomorrow = localDayStart(new Date(startOfLocalDay(now) + 25 * 3_600_000));
+  return Math.max(0, tomorrow - now);
 }
 
 // Local time band, deterministic from the machine's own clock zone. These are
@@ -210,10 +237,53 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     // the card exists for: once it has happened there is nothing left to offer
     // today, and offering anyway would turn a day that WORKED into a feed. A
     // rejection buys another look precisely because it produced nothing.
+    //
+    // OF A CARD, which is the `snapshot_id IS NOT NULL` clause: rm_card_event
+    // also carries review-only verdicts that name no snapshot (this log is
+    // reached by more than the card route), and an accept nobody was
+    // interrupted for is not the day's outcome.
+    //
+    // OF ANY KIND, which is the clause that is NOT here and is deliberate.
+    // Every other gate in this file is kind-scoped -- isMuted, dismiss, the
+    // pool's judged-exclusion -- because those are about a PERSON under a
+    // producer. This one is about the owner's day, and Owe and reconnect share
+    // it: one queue, one alternation, one cap. Scoping it to reconnect would
+    // mean accepting the day's reconnect card and then pulling an Owe card out
+    // of the same panel one poll later, which is the sentence "that's enough
+    // for today" contradicting itself rather than a feature being halved.
     acceptedToday({ now = Date.now() } = {}) {
       return db.prepare(
-        "SELECT 1 FROM rm_card_event WHERE event = 'accepted' AND created_at >= ? LIMIT 1"
+        "SELECT 1 FROM rm_card_event WHERE event = 'accepted' AND snapshot_id IS NOT NULL "
+        + 'AND created_at >= ? LIMIT 1'
       ).get(startOfLocalDay(now)) !== undefined;
+    },
+
+    // DID THE OWNER ACTUALLY REJECT THE CARD THEY WERE HOLDING -- the fact a
+    // pull is supposed to be BOUGHT with, asked of the log rather than taken on
+    // the caller's word.
+    //
+    // `?pull=1` is a query parameter on a loopback route; the widget only draws
+    // the button after a verdict lands, but nothing stopped another client (or
+    // a retried URL) from sending it on an ordinary poll and taking a card off
+    // a budget nothing earned -- recorded `pulled`, and so uncounted by the cap
+    // for ever after.
+    //
+    // THE MOST RECENT CARD, not "any rejection today": one rejection must buy
+    // one look, not three. The card in hand is the last 'shown' row, and the
+    // question is whether it carries a verdict that produced nothing --
+    // 'dismissed' (all four of the card's reject taps land here, including
+    // never-this-person and not-this-kind) or 'muted'. An accept is not a
+    // rejection, and an unjudged card is not one either: judge the card you
+    // are holding, or keep it.
+    lastCardRejected({ now = Date.now() } = {}) {
+      const last = db.prepare(
+        "SELECT snapshot_id FROM rm_card_event WHERE event = 'shown' AND created_at >= ? "
+        + 'ORDER BY created_at DESC, id DESC LIMIT 1'
+      ).get(startOfLocalDay(now));
+      if (last === undefined || last.snapshot_id === null) return false;
+      return db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('dismissed','muted') LIMIT 1"
+      ).get(last.snapshot_id) !== undefined;
     },
 
     // HOW MANY MORE TIMES "show me another" CAN BE ANSWERED TODAY. Zero once an
@@ -241,9 +311,18 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     serveAllowance({ cap, pull = false, now = Date.now() } = {}) {
       if (this.underGlobalCap({ ...cap, now })) return { allowed: true, pulled: false };
       if (!pull) return { allowed: false, reason: 'cap' };
+      // THE DAY BEING OVER OUTRANKS THE ASK BEING UNEARNED, because it is the
+      // more useful thing to say and it carries the clock: an owner who has
+      // accepted, or spent three, is told when the budget returns rather than
+      // being told what an ordinary poll is told.
       if (this.pullsLeft({ now }) === 0) {
         return { allowed: false, reason: 'pulls-exhausted', retryAfterMs: msUntilLocalMidnight(now) };
       }
+      // A PULL THAT NO REJECTION BOUGHT IS NOT A PULL. Answered as the ordinary
+      // cap refusal rather than as 'pulls-exhausted', because nothing was
+      // exhausted -- the budget is sitting there untouched. This request is a
+      // poll that called itself something else, and it gets what a poll gets.
+      if (!this.lastCardRejected({ now })) return { allowed: false, reason: 'cap' };
       return { allowed: true, pulled: true };
     },
 
@@ -292,6 +371,18 @@ function kindStats(db, kind, sinceTs) {
   ).get(...args(event)).n);
 
   const shown = countEvent('shown');
+  // AND THE TWO KINDS OF SHOWN, because since 2026-09-13 they are different
+  // events and this is the one place the project reads numbers out of this log.
+  // `shown` stays the total handed over -- the field has a wire contract and a
+  // history of readings behind it -- but a day that used to contribute one row
+  // can now contribute four, three of them guaranteed to have been preceded by
+  // a rejection, so every rate below silently changed denominator the day the
+  // pull shipped. The split is what lets a reader recompute either way, and
+  // notice the discontinuity rather than read across it.
+  const shownPulled = Number(db.prepare(
+    `SELECT COUNT(*) AS n FROM rm_card_event WHERE kind = ? AND event = 'shown' AND pulled = 1${clause}`
+  ).get(...(sinceTs === null ? [kind] : [kind, sinceTs])).n);
+  const shownInterrupt = shown - shownPulled;
   const opened = countEvent('opened');
   const accepted = countEvent('accepted');
   const dismissed = countEvent('dismissed');
@@ -300,7 +391,9 @@ function kindStats(db, kind, sinceTs) {
 
   // Distinct LOCAL calendar dates a card of this kind was shown -- the
   // machine's own clock zone, same local-time discipline timeBand uses
-  // above, via SQLite's own 'localtime' modifier.
+  // above, via SQLite's own 'localtime' modifier. Pulled rows count: a day a
+  // card was handed over is a day this kind was served, however the owner came
+  // to be holding it.
   const daysServed = Number(db.prepare(
     `SELECT COUNT(DISTINCT date(created_at / 1000, 'unixepoch', 'localtime')) AS n
      FROM rm_card_event WHERE kind = ? AND event = 'shown'${clause}`
@@ -318,10 +411,18 @@ function kindStats(db, kind, sinceTs) {
   }
 
   return {
-    shown, opened, accepted, dismissed, muted, suppressed, daysServed,
+    shown, shownInterrupt, shownPulled, opened, accepted, dismissed, muted, suppressed, daysServed,
     // null (never a bare 0) when there was nothing to compute a rate over --
     // a 0% acceptance rate and "we haven't shown this kind yet" are different
     // facts, and collapsing them would misread as "shown, but never accepted".
+    //
+    // OVER EVERY CARD HANDED OVER, pulls included, which is the same
+    // denominator these had before pulls existed and a different POPULATION.
+    // Deliberately not re-based on shownInterrupt: a pulled card that was
+    // accepted would then be a numerator with no denominator and the rate could
+    // pass 1. Nothing here decides which reading is the right one -- that is
+    // the sealed gates artifact's job, and it now has both counts to do it
+    // with.
     acceptRate: shown > 0 ? accepted / shown : null,
     openRate: shown > 0 ? opened / shown : null,
     dismissReasons,

@@ -457,7 +457,8 @@ test('/stats carries a cards key with the expected per-kind shape', async () => 
       for (const kind of ['owe', 'reconnect']) {
         const k = scope[kind];
         assert.ok(k, `${kind} present`);
-        for (const field of ['shown', 'opened', 'accepted', 'dismissed', 'muted', 'suppressed', 'daysServed']) {
+        for (const field of ['shown', 'shownInterrupt', 'shownPulled', 'opened', 'accepted',
+          'dismissed', 'muted', 'suppressed', 'daysServed']) {
           assert.equal(typeof k[field], 'number');
         }
         assert.ok(k.dismissReasons && typeof k.dismissReasons === 'object');
@@ -467,6 +468,8 @@ test('/stats carries a cards key with the expected per-kind shape', async () => 
     // The stub matcher's cards all carry kind='reconnect' (see STUB_CARDS
     // above); this test's own accept lands there, not under 'owe'.
     assert.equal(stats.cards.allTime.reconnect.shown, 1);
+    assert.equal(stats.cards.allTime.reconnect.shownInterrupt, 1, 'the day\'s card interrupted the owner');
+    assert.equal(stats.cards.allTime.reconnect.shownPulled, 0, 'nobody asked for another');
     assert.equal(stats.cards.allTime.reconnect.accepted, 1);
     assert.equal(stats.cards.allTime.reconnect.acceptRate, 1);
     assert.equal(stats.cards.allTime.owe.shown, 0);

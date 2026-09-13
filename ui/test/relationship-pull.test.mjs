@@ -26,9 +26,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { openDb, start } from '../server/hermes.mjs';
-import { PULLS_PER_DAY, createControls, startOfLocalDay } from '../server/relationship/controls.mjs';
+import {
+  PULLS_PER_DAY, cardStats, createControls, msUntilLocalMidnight, startOfLocalDay,
+} from '../server/relationship/controls.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 const TOKEN = 'e'.repeat(64);
 const ONE_A_DAY = { max: 1, windowMs: 86_400_000 };
@@ -233,6 +240,168 @@ test('anything but pull=1 is not a pull', async () => {
       assert.equal(out.reason, 'cap');
     }
   });
+});
+
+// --- WHAT A PULL HAS TO BE BOUGHT WITH -------------------------------------
+
+test('a pull nothing rejected is a poll that called itself something else', () => {
+  // `?pull=1` is a query parameter on a loopback route, and serveAllowance used
+  // to take the caller's word for it: any client sending it past a spent cap
+  // got a card off a budget nothing earned, recorded `pulled`, and so uncounted
+  // by the cap for ever after. The fixture is the reachable version of that --
+  // the day's card was served, never judged, and then suppressed from the
+  // settings surface, so it leaves the queue without a verdict and the next
+  // candidate is at the head.
+  return withCardServer(async ({ get, db }) => {
+    const first = await get('/admin/relationship/card');
+    assert.equal(first.card.personKey, 'name:alpha');
+    db.prepare('INSERT INTO rm_suppression(person_key, created_at) VALUES (?, ?)')
+      .run('name:alpha', Date.now());
+
+    const asked = await get('/admin/relationship/card?pull=1');
+    assert.equal(asked.card, null, 'bravo is queued and servable; what is missing is the rejection');
+    assert.equal(asked.reason, 'cap', 'nothing was exhausted -- this is the ordinary cap answer');
+    assert.equal(asked.pullsLeft, PULLS_PER_DAY, 'and the budget is untouched');
+    assert.deepEqual(shownRows(db), [{ personKey: 'name:alpha', pulled: 0 }]);
+  });
+});
+
+test('a mute is a rejection, and buys a pull like any other', async () => {
+  // All four of the card's reject taps land as 'dismissed'; the card's own
+  // "mute 30d" lands as 'muted'. Both are verdicts that produced nothing.
+  await withCardServer(async ({ call, get, db }) => {
+    const first = await get('/admin/relationship/card');
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: first.card.snapshot_id, person_key: first.card.personKey,
+      event: 'muted', mute_days: 30,
+    });
+    const pulled = await get('/admin/relationship/card?pull=1');
+    assert.equal(pulled.card?.personKey, 'name:bravo', `served (reason: ${pulled.reason})`);
+    assert.deepEqual(shownRows(db), [
+      { personKey: 'name:alpha', pulled: 0 },
+      { personKey: 'name:bravo', pulled: 1 },
+    ]);
+  });
+});
+
+test("an accept nobody was interrupted for does not end the owner's day", async () => {
+  // rm_card_event is reached by more than the card route: a review-only verdict
+  // names no snapshot. Counting one as "the day had its outcome" silently
+  // halved the feature on any install where something else writes an accept.
+  await withCardServer(async ({ get, db, reject }) => {
+    db.prepare(
+      'INSERT INTO rm_card_event(person_key, kind, event, reason, note, rule_version, snapshot_id, pulled, time_band, created_at) '
+      + "VALUES ('name:elsewhere', 'reconnect', 'accepted', NULL, NULL, 'rm-match-v13', NULL, 0, 'morning', ?)"
+    ).run(Date.now());
+
+    const first = await get('/admin/relationship/card');
+    assert.equal(first.pullsLeft, PULLS_PER_DAY, 'a card was never offered for that row');
+    await reject(first.card);
+    const pulled = await get('/admin/relationship/card?pull=1');
+    assert.equal(pulled.card?.personKey, 'name:bravo', `served (reason: ${pulled.reason})`);
+  });
+});
+
+// --- THE CLOCK THE REFUSAL COUNTS DOWN TO ----------------------------------
+
+test('retryAfterMs lands on the boundary the budget itself uses', async () => {
+  await withCardServer(async ({ get, reject }) => {
+    const first = await get('/admin/relationship/card');
+    await reject(first.card);
+    for (let i = 0; i < PULLS_PER_DAY; i++) {
+      const out = await get('/admin/relationship/card?pull=1');
+      await reject(out.card);
+    }
+    const refused = await get('/admin/relationship/card?pull=1');
+    assert.equal(refused.reason, 'pulls-exhausted');
+
+    // The same instant reads the same boundary: a reply counting down to a
+    // 24h-from-now that the day's own count does not use would tell the owner
+    // to come back at an hour when nothing changes.
+    const at = Date.now();
+    assert.ok(Math.abs(refused.retryAfterMs - msUntilLocalMidnight(at)) < 2000,
+      `${refused.retryAfterMs} should be the wait to local midnight (${msUntilLocalMidnight(at)})`);
+    assert.ok(startOfLocalDay(at + refused.retryAfterMs) > startOfLocalDay(at),
+      'and it lands in the next local day, not 24 hours out');
+  });
+});
+
+test('the local day starts when the date changes, even where midnight does not exist', () => {
+  // America/Santiago moves its clocks AT midnight: on 2026-09-06 the local
+  // times 00:00-00:59 never happen, so the first instant of that date is 01:00.
+  // A boundary computed by arithmetic (or by trusting what an engine returns
+  // for a local time that does not exist) puts that hour's rows on the wrong
+  // side of the count.
+  const previous = process.env.TZ;
+  process.env.TZ = 'America/Santiago';
+  try {
+    const noon = new Date(2026, 8, 6, 12, 0, 0, 0).getTime();
+    const start = startOfLocalDay(noon);
+    assert.equal(new Date(start).getDate(), 6, 'the boundary is on the day it belongs to');
+    assert.equal(new Date(start).getHours(), 1, 'which begins at 01:00 on this one day');
+    assert.equal(new Date(start - 1).getDate(), 5, 'and the millisecond before it is yesterday');
+    assert.equal(msUntilLocalMidnight(noon), new Date(2026, 8, 7, 0, 0, 0, 0).getTime() - noon,
+      'the next boundary is the next date change, 12 hours on');
+
+    const ordinary = new Date(2026, 8, 13, 12, 0, 0, 0).getTime();
+    assert.equal(new Date(startOfLocalDay(ordinary)).getHours(), 0, 'every other day is plain midnight');
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
+
+// --- THE NUMBERS THE PROJECT READS OUT OF THE LOG --------------------------
+
+test('cardStats tells an interruption from a pull', async () => {
+  // The whole point of the column is that the two are different events, and
+  // this is the one place the project reads numbers out of this log. A day that
+  // used to contribute one 'shown' row can now contribute four.
+  await withCardServer(async ({ get, db, reject }) => {
+    const first = await get('/admin/relationship/card');
+    await reject(first.card);
+    const second = await get('/admin/relationship/card?pull=1');
+    assert.ok(second.card);
+
+    const { allTime } = cardStats(db, { now: Date.now() });
+    assert.equal(allTime.reconnect.shown, 2, 'two cards were handed over');
+    assert.equal(allTime.reconnect.shownInterrupt, 1, 'one of them interrupted the owner');
+    assert.equal(allTime.reconnect.shownPulled, 1, 'the other one they asked for');
+    assert.equal(allTime.owe.shown, 0);
+    assert.equal(allTime.owe.shownInterrupt, 0);
+    assert.equal(allTime.owe.shownPulled, 0);
+  });
+});
+
+// --- THE ORDER THE SLOT IS SPENT IN ----------------------------------------
+//
+// A pull used to be recorded before the three gates that can still drop a card
+// at serve time -- quote row deleted, claim deleted, claim rejected between
+// produce and serve -- so a button press could spend the slot, start the
+// person's seven-day cooldown, and answer "that's enough for today" having
+// shown nothing.
+//
+// IT CANNOT BE REACHED FROM OUTSIDE, and that is why this test reads the source
+// rather than the wire: cardBlockReason (which filters the queue moments
+// earlier, in the same synchronous request) asks those three questions of the
+// same three rows, so nothing but a concurrent writer can make the two answers
+// differ, and this route never yields. The order is the invariant; assert the
+// order.
+test('the shown row is written after the receipt resolves, not before', () => {
+  const source = readFileSync(join(here, '..', 'server', 'hermes.mjs'), 'utf8');
+  const start = source.indexOf("url.pathname === '/admin/relationship/card'");
+  const end = source.indexOf("url.pathname === '/admin/relationship/event'");
+  assert.ok(start > 0 && end > start, 'found the card route');
+  const route = source.slice(start, end);
+
+  const gate = route.indexOf('serveAllowance({');
+  const quote = route.indexOf('SELECT text FROM context WHERE id = ?');
+  const claim = route.indexOf('SELECT action FROM claim_decision');
+  const recorded = route.indexOf("event: 'shown'");
+  assert.ok(gate > 0 && quote > 0 && claim > 0 && recorded > 0, 'found all four');
+  assert.ok(gate < quote, 'the gate is asked before the work, so nothing is resolved for a card that cannot be served');
+  assert.ok(quote < recorded && claim < recorded,
+    'and the slot is spent only once the card has a receipt to show');
 });
 
 // --- WHAT THE VERDICT ITSELF SAYS ------------------------------------------

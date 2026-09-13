@@ -1786,10 +1786,43 @@ function healCardEventColumns(db) {
     // way to ask for another card before this column existed. Contrast
     // person_lookup_change.contradicts_anchor_unknown, whose default WOULD
     // have asserted a check nobody ran.
-    db.exec(
-      'ALTER TABLE rm_card_event ADD COLUMN pulled INTEGER NOT NULL DEFAULT 0 ' +
-      'CHECK (pulled IN (0,1))'
-    );
+    //
+    // A LOCKED DATABASE IS NOT A REASON TO FAIL THE OPEN -- but this ALTER is
+    // NOT where such an open fails, and the difference was measured rather than
+    // reasoned (contrarian review finding 12, corrected).
+    //
+    // MEASURED 2026-09-13, a second connection holding BEGIN EXCLUSIVE: openDb
+    // throws 'database is locked' after the 5s busy_timeout at `PRAGMA
+    // journal_mode = DELETE`, before SCHEMA and long before migrate() -- on a
+    // database that already HAS this column, so the failure predates the column
+    // and is not this branch's. Even `PRAGMA user_version` throws there. An
+    // open landing inside /admin/maintain's VACUUM therefore fails whatever
+    // this function does, and claiming the guard below prevents that would be
+    // asserting something the measurement refuses.
+    //
+    // What the guard does cover is the narrow real window: a writer taking the
+    // lock between the statements above and this one. Two attempts, each
+    // waiting out the busy timeout on its own, then the reason is LOGGED (type
+    // only -- no path, no rows) and the open continues WITHOUT the column,
+    // because a dead server is worse than a missing one: the next open heals
+    // it, and until then the only thing that fails is serving a card. Anything
+    // that is not contention is re-thrown -- a refused ALTER that is not a lock
+    // is a broken database, and swallowing it would hide it.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        db.exec(
+          'ALTER TABLE rm_card_event ADD COLUMN pulled INTEGER NOT NULL DEFAULT 0 ' +
+          'CHECK (pulled IN (0,1))'
+        );
+        break;
+      } catch (error) {
+        if (!/\b(?:busy|locked)\b/iu.test(String(error?.message ?? ''))) throw error;
+        if (attempt >= 2) {
+          console.warn('rm_card_event.pulled not added (database busy); retried on the next open');
+          break;
+        }
+      }
+    }
   }
 }
 
@@ -4400,8 +4433,17 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     //
     // IT CHANGES THE GATE, NOT THE RECORDING, which is what keeps it
     // orthogonal to ?peek=1: a peek with pull=1 asks "would another one be
-    // served", spends nothing and records nothing, so the panel can offer the
-    // button honestly instead of finding out by pressing it.
+    // served", spends nothing and records nothing.
+    //
+    // NOTHING SENDS THAT COMBINATION TODAY (contrarian review finding 10, said
+    // here rather than implied). Bridge's relCardPeek builds ?peek=1 and an
+    // optional mode; the pull flag rides the serve alone. It is kept because it
+    // is the peek answering the same question the serve does -- a gate that
+    // ignored `pull` would have the orb's poll and the panel's button disagree
+    // about whether anything is left -- and because an empty state that wants
+    // to draw the button without spending a pull has exactly one honest way to
+    // ask. One clause, and a peek that lies is what the peek/serve split exists
+    // to prevent.
     //
     // NOT A CAPABILITY, the same way `expect` is not one: it cannot reach a
     // card this request would not otherwise be allowed to serve (the mute, the
@@ -4677,6 +4719,14 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const eligibilityReconnect = producerConfig.producer === 'eligibility';
     const liveCards = [];
     const blockedReasons = [];
+    // ONE INSTANT FOR THE WHOLE SERVE DECISION (contrarian review finding 7).
+    // Freshness, the cap window, the pull budget's local-day boundary, the
+    // 'shown' row's own created_at and the pullsLeft on every reply below all
+    // read this one clock. Separate Date.now() calls put a request that starts
+    // at 23:59:59.9 on both sides of local midnight: the gate refusing against
+    // yesterday's spent budget while the reply beside it reports today's full
+    // one, and a retryAfterMs counting down to a boundary the refusal did not
+    // use.
     const nowForLive = Date.now();
     const snapshotLive = (card) => !isSnapshotConsumed(db, card.snapshot_id)
       && ((card.kind !== 'owe' && !eligibilityReconnect)
@@ -4765,30 +4815,24 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       const alreadyShown = db.prepare(
         "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'shown' LIMIT 1"
       ).get(card.snapshot_id);
+      //
+      // ASKED HERE, PAID FOR BELOW (contrarian review finding 3). Suppression
+      // and mute were already settled by cardBlockReason above; what is left
+      // for the cap-bearing gate to say is whether this window has an
+      // interruption left, and whether this serve is one. A PEEK asks it (an
+      // orb that lights for a card the cap will refuse is a lie) but never
+      // spends it, and records no 'shown'.
+      //
+      // serveAllowance owns the whole of that decision (controls.mjs): inside
+      // the cap it is an interruption; past the cap it is a pull if a rejection
+      // bought one and today's budget is not spent; otherwise nothing is
+      // served. Asked per candidate rather than once per request, because a
+      // card can still be dropped below and the next one must face the gate as
+      // it then stands.
+      let allow = null;
       if (!alreadyShown) {
-        // Suppression and mute were already settled by cardBlockReason
-        // above; what is left for the cap-bearing gate to say is whether
-        // this window has an interruption left. A PEEK checks it (an orb
-        // that lights for a card the cap will refuse is a lie) but never
-        // spends it, and records no 'shown'.
-        //
-        // AND WHETHER THIS ONE IS AN INTERRUPTION OR A PULL. serveAllowance
-        // owns the whole of that decision (controls.mjs): inside the cap it is
-        // an interruption; past the cap it is a pull if the owner asked for
-        // one and today's rejections have not already bought three; otherwise
-        // nothing is served. Asked per candidate rather than once per request
-        // because a card can still be skipped below after its slot is spent,
-        // and the next one must face the cap as it now stands.
-        const allow = rel.service.controls.serveAllowance({ cap, pull });
+        allow = rel.service.controls.serveAllowance({ cap, pull, now: nowForLive });
         if (!allow.allowed) { gateBlocked = allow; break; }
-        if (!peek) {
-          rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
-            event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id,
-            // The whole of the pull's durable record. Without it the next
-            // request counts this serve as an interruption and the budget is
-            // the cap again.
-            pulled: allow.pulled });
-        }
       }
       if (peek) {
         // The tease only: who and why-in-numbers, never the receipt. The
@@ -4865,6 +4909,26 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         if (decision?.action === 'reject') continue;
         left = claimRow.text;
         leftTone = 'bad';
+      }
+      // THE CARD IS NOW THE ONE BEING SERVED, so this is where it is paid for
+      // (contrarian review finding 3). The three `continue`s above drop a card
+      // whose receipt has gone -- quote row deleted, claim deleted, claim
+      // rejected between produce and serve -- and recording before them spent
+      // the slot on a card nobody saw: the cap slot, the person's seven-day
+      // cooldown, the producers' turn, and, once pulls existed, a pull the
+      // owner had just pressed a button for. The refusal that followed named a
+      // budget the owner had never been shown anything from.
+      //
+      // A card that was already shown pays nothing and re-serves (see
+      // alreadyShown above): the cap limits distinct interruptions, not
+      // fetches. The peek returned before this; a tease is not a serve.
+      if (allow !== null) {
+        rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
+          event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id,
+          // The whole of the pull's durable record. Without it the next request
+          // counts this serve as an interruption and the budget is the cap
+          // again.
+          pulled: allow.pulled, now: nowForLive });
       }
       // The person page, when one has been built (accepted+pending items;
       // readPersonPage already omits rejected ones). how_left is the freshest
