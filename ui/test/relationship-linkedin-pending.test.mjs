@@ -340,6 +340,32 @@ test('switching between sub-role picks is the same wait, because the export is w
 
 // --- THE RELAY --------------------------------------------------------------
 
+test('the setup screen reads the clock and never starts or stops it', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:investor one', 'Investor One', now, ['investor']);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    // ONE WRITER, AND IT IS THE CARD ROUTE. Two routes both starting and
+    // stopping one row is one row with two opinions — and they derive the
+    // owner's pick differently, so a mode that failed to persist would have the
+    // card route holding while this route deleted the clock under it, resetting
+    // the very number the seven-day sentence waits on.
+    const beforeAnyCard = await (await call('GET', '/admin/onboarding/progress')).json();
+    assert.equal(beforeAnyCard.modeFallback, 'linkedin-pending', 'it still reports the hold');
+    assert.equal(beforeAnyCard.heldSince, undefined, 'and says nothing about a clock nobody started');
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_mode_hold').get().n), 0,
+      'reading the setup screen must not start the wait');
+
+    const card = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(Number.isInteger(card.heldSince), 'the route that decides the hold is the one that dates it');
+    const after = await (await call('GET', '/admin/onboarding/progress')).json();
+    assert.equal(after.heldSince, card.heldSince, 'and from then on the screen reports that same number');
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_mode_hold').get().n), 1,
+      'still one row: polling the screen neither restarts nor clears it');
+  });
+});
+
 test('the setup screen relays the hold rather than deciding it a second time', async () => {
   await withServer(async ({ call, db }) => {
     const now = Date.now();

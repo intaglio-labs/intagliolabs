@@ -3513,6 +3513,16 @@ function linkedinHasPeople(db) {
 // THE CLOCK ON THE HOLD (review finding 14). Returns when this stretch of
 // holding began, or null when it cannot be said.
 //
+// ONE WRITER, AND IT IS THE CARD ROUTE (closing review's open question). Two
+// routes both starting and stopping one row is one row with two opinions: the
+// card route reads the owner's pick off the running relationship state, the
+// progress route off whatever has been built plus the persisted config, and
+// those agree -- until a mode POST fails to persist, after which the card route
+// holds while the progress route deletes the clock on its next poll and the
+// seven-day sentence can never come due. The route that DECIDES the hold owns
+// the record of it; every other caller reads (`record: false`) and takes null
+// for an answer.
+//
 // `start` false is the ordinary case -- most installs are not held -- so the
 // read comes first and the DELETE only runs when there is something to delete.
 // A held request reads one row and writes nothing after the first.
@@ -3520,9 +3530,10 @@ function linkedinHasPeople(db) {
 // A clock that cannot be read is not a clock of zero: null means the reply
 // simply carries no heldSince, and the surfaces say the sentence they said
 // before it existed. Absence of a claim is not a claim.
-function modeHoldSince(db, { start, now }) {
+function modeHoldSince(db, { start, now, record }) {
   try {
     const row = cachedStatement(db, 'SELECT since FROM rm_mode_hold WHERE id = 1').get();
+    if (!record) return start && row !== undefined ? Number(row.since) : null;
     if (!start) {
       if (row !== undefined) db.prepare('DELETE FROM rm_mode_hold WHERE id = 1').run();
       return null;
@@ -3562,12 +3573,13 @@ function modeHoldSince(db, { start, now }) {
 // one place that starts and stops the clock, for the same reason.
 //
 // `{ reason, since }` while the pick is held, else null. `since` may itself be
-// null -- see modeHoldSince.
-function linkedinPendingFallback(db, policy, pick, now = Date.now()) {
+// null -- see modeHoldSince, which also says why `record` is the card route's
+// alone.
+function linkedinPendingFallback(db, policy, pick, { now = Date.now(), record = false } = {}) {
   const held = (pick === 'investor' || pick === 'founder')
     && relationshipProducerConfig(policy).producer === 'eligibility'
     && !linkedinHasPeople(db);
-  const since = modeHoldSince(db, { start: held, now });
+  const since = modeHoldSince(db, { start: held, now, record });
   return held ? { reason: 'linkedin-pending', since } : null;
 }
 
@@ -4075,6 +4087,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // config answers otherwise -- which is exactly what relationshipMode does
     // with a holder in hand, and exactly what it falls back to without one.
     const built = (policy.relationshipHolder ?? policy).__relationship ?? {};
+    // READ ONLY. The card route is the single writer of the hold clock; this
+    // one reports what it finds and says nothing when it finds nothing.
     const held = linkedinPendingFallback(db, policy, relationshipMode(built, policy));
     send(res, 200, {
       ...cachedOnboardingProgress(db, policy),
@@ -4234,7 +4248,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // request's decision, and `oneOff` is how the reply says so.
     const producerConfig = relationshipProducerConfig(policy);
     const pick = relationshipMode(rel, policy);
-    const held = askedMode === null ? linkedinPendingFallback(db, policy, pick) : null;
+    const held = askedMode === null
+      ? linkedinPendingFallback(db, policy, pick, { record: true })
+      : null;
     const modeFallback = held?.reason ?? null;
     // WHAT EVERY BRANCH BELOW CARRIES BESIDE `mode`. `heldSince` is how long
     // this stretch of holding has run (review finding 14): the surfaces say
