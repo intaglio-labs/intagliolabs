@@ -108,7 +108,7 @@ test('uninstall covers both launch-agent namespaces and removes the plist', () =
 });
 
 test('settings carries the engine switch, and the same words onboarding used', () => {
-  assert.match(connections, /rows\.push\(engineRow\(\)\)/u);
+  assert.match(connections, /rows\.push\(engineRow\(cardConfig\)\)/u);
   // ONE PRIVACY PROMISE, NOT TWO. The sentence under the switch decides what
   // the owner believes about where their messages go; two wordings for one
   // switch is two promises and only one of them was read.
@@ -119,23 +119,46 @@ test('settings carries the engine switch, and the same words onboarding used', (
   // The switch is offered only when the probe actually worked: "you have it"
   // and "it works" are different questions, and only the second may put a
   // switch on screen that sends message excerpts off this Mac.
-  const row = /function engineRow\(\)([\s\S]*?)\n\}/u.exec(connections)?.[1] ?? '';
-  assert.match(row, /if \(st === 'ok'\) \{[\s\S]{0,200}control\.replaceChildren\(sw\)/u,
-    'no probe, no switch');
-  assert.match(row, /control\.replaceChildren\(again\)/u,
-    'and a failed probe offers a way to ask again instead');
+  const row = /function engineRow\(configPromise\)([\s\S]*?)\n\}/u.exec(connections)?.[1] ?? '';
+  assert.match(row, /if \(st !== 'ok'\) \{[\s\S]{0,200}control\.replaceChildren\(again\)/u,
+    'no probe, no switch — a failed probe offers a way to ask again instead');
+  assert.match(row, /control\.replaceChildren\(sw\)/u, 'and a working one offers the switch');
+  // A MISSING `engine` IS NOT AN OPT-OUT. Reading an absent field as false on
+  // this switch is a privacy answer nobody gave, one tap from being written
+  // back as the real one.
+  assert.doesNotMatch(row, /paintSwitch\(out\.engine === 'claude-cli'\)/u,
+    'the switch must not read a missing field as off');
+  assert.match(row, /const engine = fromProbe \?\? \(await configPromise\)\?\.engine \?\? null;/u,
+    'the config reply answers when the probe does not');
+  assert.match(row, /if \(engine !== 'claude-cli' && engine !== 'local'\) \{/u,
+    'and with neither able to say, there is no switch at all');
   assert.doesNotMatch(row, /lastError|String\(err/u,
     'a raw engine error must never reach this row');
 });
 
-test('settings says the product has modes without guessing which one is on', () => {
-  const call = /rows\.push\(factRow\(\{([\s\S]*?)\}\)\);/u.exec(connections)?.[1] ?? '';
-  assert.match(call, /who it looks for/u);
-  assert.match(call, /reconnect card/u, 'the row must point at where the picker lives');
-  // Nothing native knows the standing mode without asking the reader for a
-  // card, so the row must not claim one.
-  assert.doesNotMatch(call, /founders only|investor'|'any'/u,
-    'the row must not assert a mode it cannot read');
+test('the daily-card row reads the config, and asserts nothing when it cannot', () => {
+  // A READ, NOT A RUN. The card peek would answer the same question and spend a
+  // cap slot, start a person's cooldown and flip the producers' turn — for a
+  // panel nobody asked a card from. GET /admin/config/card touches none of it.
+  assert.ok(connectionsGrants.has('cardConfig'), 'settings must be allowed to ask');
+  const verb = /case "cardConfig":([\s\S]*?)\n\n/u.exec(bridge)?.[1] ?? '';
+  assert.match(verb, /relHermes\("GET", "admin\/config\/card", json: nil\)/u,
+    'a GET with no body: the page cannot write a setting through this door');
+  const row = /function cardConfigRow\(configPromise\)([\s\S]*?)\n\}/u.exec(connections)?.[1] ?? '';
+  assert.ok(row, 'the daily-card row was not found');
+  assert.match(row, /cfg\?\.mode/u);
+  assert.match(row, /Number\.isInteger\(cfg\?\.capPerDay\)/u,
+    'a cap that is not a whole number is not a cap');
+  assert.match(row, /n === 1 \? 'one card a day'/u, 'and "1 cards a day" never ships');
+  assert.match(row, /cfg\?\.engine === 'claude-cli'/u,
+    'the row says which way the engine is set, for an owner who cannot see the switch');
+  // A reader that is still starting up must not be reported as a setting.
+  assert.match(row, /bits\.length > 0 \? bits\.join\(' · '\) : '—'/u,
+    'nothing known must render as nothing known, never as a default');
+  assert.match(row, /three chips at the top/u, 'and it points at where the picker lives');
+  // ONE QUESTION PER OPEN, not one per row.
+  assert.match(connections, /const cardConfig = hzPost\('cardConfig'\)\.catch\(\(\) => null\);/u);
+  assert.match(connections, /rows\.push\(cardConfigRow\(cardConfig\)\)/u);
 });
 
 test('the new rows have a control shape to render into', () => {

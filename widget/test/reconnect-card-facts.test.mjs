@@ -92,8 +92,23 @@ test('a missing or impossible timestamp prints nothing at all', () => {
 });
 
 test('the fields are read whether hermes nests them or not', () => {
-  // The card reply is being grown on the server side at the same time. Both
-  // shapes answer, so a version skew is a missing line rather than a blank card.
+  // THE CONFIRMED SHAPE: `card.person = { title, company, industry, connectedOn,
+  // url }`, and lastFromThem / lastFromOwner / lastSeen / lastMeetingDaysAgo
+  // top-level on the card. The fallback read of the other position is kept for
+  // a card built by an older hermes, so a version skew is a missing line rather
+  // than a blank card.
+  const wire = {
+    person: { title: 'Partner', company: 'Sequoia', industry: 'venture capital', connectedOn: 1600000000000, url: 'u' },
+    lastFromThem: NOW - 240 * DAY,
+    lastFromOwner: NOW - 400 * DAY,
+    lastSeen: NOW - 240 * DAY,
+    lastMeetingDaysAgo: 700,
+    evidence: { messages: 21, dormancyDays: 240, meetings: 1 },
+  };
+  assert.equal(fns.whoLine(wire), 'Partner at Sequoia');
+  assert.match(fns.spokeLastLine(wire), /^they wrote last, /u);
+  assert.match(fns.historyLine(wire), /^21 messages · met 1×, last 2 years ago$/u);
+  assert.equal(fns.triggerLine({ ...wire, kind: 'reconnect' }), 'quiet 8 months');
   assert.equal(fns.personField({ person: { title: 'Partner' } }, 'title'), 'Partner');
   assert.equal(fns.personField({ title: 'Partner' }, 'title'), 'Partner');
   assert.equal(fns.personField({ person: {} }, 'title'), null);
@@ -157,14 +172,27 @@ test('each number has one home on the card', () => {
 });
 
 test('a public-web change carries how many sources stand behind it', () => {
-  // THE SHIPPING SHAPE (cardFacts.mjs changedForCard): `sources` is the COUNT,
-  // and the list of urls it used to be is `sourceUrls`.
+  // THE SHIPPING SHAPE (cardFacts.mjs changedForCard): { text, at, sources: a
+  // COUNT, sourceUrls: the list it used to be, url, kind, quote, date,
+  // corroboration } — or null.
   assert.equal(
-    fns.changedLine({ changed: { text: 'moved to anthropic in march', sources: 2, sourceUrls: ['a', 'b'] } }),
-    'moved to anthropic in march · 2 sources'
+    fns.changedLine({ changed: { text: 'moved to anthropic', sources: 2, sourceUrls: ['a', 'b'], date: 'march 2026' } }),
+    'moved to anthropic · 2 sources · march 2026'
   );
   assert.equal(fns.changedLine({ changed: { text: 'moved to anthropic', sources: 1 } }),
     'moved to anthropic · 1 source');
+  // `date` is when the change happened; `at` is when this Mac looked it up. The
+  // lookup time may stand in when the change carries no date of its own, and
+  // must never displace one that does.
+  const lookedUpAt = Date.parse('2026-03-04T09:00:00Z');
+  assert.equal(
+    fns.changedLine({ changed: { text: 'moved to anthropic', sources: 2, at: lookedUpAt, date: 'january 2026' } }),
+    'moved to anthropic · 2 sources · january 2026'
+  );
+  assert.match(
+    fns.changedLine({ changed: { text: 'moved to anthropic', sources: 2, at: lookedUpAt } }),
+    /moved to anthropic · 2 sources · (in march|\d+ (months|years) ago)$/u
+  );
   // The field changed MEANING rather than name, so the older array shape has to
   // answer too — and the obvious length test is wrong in both directions:
   // Number([]) is 0 and Number(['a']) is NaN.

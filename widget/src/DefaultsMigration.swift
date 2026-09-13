@@ -61,6 +61,23 @@ enum DefaultsMigration {
     // never appears. False on a fresh domain, which is the correct reading for
     // an install that has nothing pending.
     "HazlieCardDefaultsPending",
+    // THE SAME RULE, FOR THE OTHER UNDELIVERED CHOICE. The mode the owner
+    // picked on screen 1 is written here the moment the button is pressed and
+    // cleared only when hermes answers persisted:true, so a rename that drops
+    // it strands exactly the owner whose hermes was down that session: the
+    // retry ladder has nothing left to re-deliver and their pick is silently
+    // 'any' for ever. The launch counter travels with it, because carrying the
+    // request without its ceiling restarts the eight-launch budget — a value
+    // hermes has already refused seven times would get eight more tries on the
+    // strength of an upgrade.
+    "HazlieCardModePending",
+    "HazlieCardModeLaunches",
+    // An import whose vintage could not be stamped, remembered so a date this
+    // app does not know is never used as grounds to refuse the owner's own
+    // later export. Losing it on the rename makes installedVintage answer "now"
+    // again, and the next import of a genuinely newer file is turned away with
+    // no way past it but deleting a file by hand.
+    "HazlieUnstampedImports",
     "NSWindow Frame HazlieWidget",
   ]
 

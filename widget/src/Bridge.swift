@@ -125,6 +125,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // an LSUIElement app with no menu bar, and uninstall was a
                     // shell script in a repo the owner will never find.
                     "quitApp", "uninstallApp",
+                    // What the daily card is set to, read straight from the
+                    // owner config. A READ, not a run: GET /admin/config/card
+                    // answers mode/capPerDay/producer/engine without touching
+                    // the producers, which is why settings may ask for it on
+                    // every render and the card peek stays out of this panel.
+                    "cardConfig",
                     // The export card's file picker. The shelf's hint used to
                     // tell the owner to put Connections.csv in a dotfile path
                     // by hand, while onboarding screen 4 did the same job with
@@ -1675,6 +1681,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         let blockers = Connectors.shared.treePermsBlockers
         if !blockers.isEmpty { body["treePermsBlockers"] = blockers }
         self?.reply(webView, id, body)
+      }
+
+    case "cardConfig":
+      // The settings panel's one question for the reader: what is the daily
+      // card set to. Bearer-only and read-only on the hermes side; nothing here
+      // sends a body, so the page cannot write a setting through this door.
+      relHermes("GET", "admin/config/card", json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
       }
 
     case "setEngine":

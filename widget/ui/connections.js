@@ -282,29 +282,55 @@ function settingRow({ name, note, hint, on, message }) {
   return el;
 }
 
-// A setting that is a STATEMENT rather than a control: a name and the fact,
-// with no switch beside it. Used for something the owner sets somewhere else —
-// the row's job is to stop settings from reading as though the product has no
-// such thing, and to say where it actually lives.
-function factRow({ name, value, note }) {
+// WHAT THE DAILY CARD IS SET TO, read from the owner config rather than
+// guessed. GET /admin/config/card (bridge verb `cardConfig`) answers mode,
+// capPerDay, producer and engine WITHOUT running the producers — which is what
+// makes it safe to ask on every settings render, where a card peek would spend
+// a cap slot and flip the producers' turn for a panel nobody asked a card from.
+//
+// ONE REQUEST, TWO ROWS. The promise is made once in renderSettings and handed
+// to whoever needs it, so opening settings is one question to the reader and
+// not one per row.
+function cardConfigRow(configPromise) {
   const el = document.createElement('div');
   el.className = 'setting';
   const text = document.createElement('div');
   text.className = 'setting-text';
   const label = document.createElement('span');
   label.className = 'setting-name';
-  label.textContent = name;
-  text.appendChild(label);
-  if (note) {
-    const sub = document.createElement('span');
-    sub.className = 'setting-note';
-    sub.textContent = note;
-    text.appendChild(sub);
-  }
+  label.textContent = 'the daily card';
+  const note = document.createElement('span');
+  note.className = 'setting-note';
+  // The picker is NOT duplicated here, deliberately: it lives on the card,
+  // which is where you change your mind about it. This row exists because a new
+  // owner reading settings saw no sign the product had modes at all.
+  note.textContent = 'change who it looks for on the card itself — the three chips at the top.';
+  text.append(label, note);
   const said = document.createElement('span');
   said.className = 'setting-value setting-said';
-  said.textContent = value;
+  // EMPTY UNTIL THE READER ANSWERS. A placeholder here would be a busy label
+  // for a question that is usually answered in the same frame, and this panel
+  // keeps one busy word per idea rather than one per row
+  // (connect-affordances.test.mjs).
+  said.textContent = '';
   el.append(text, said);
+
+  const cap = (n) => (n === 1 ? 'one card a day' : `${n} cards a day`);
+  configPromise.then((cfg) => {
+    const bits = [];
+    if (typeof cfg?.mode === 'string' && cfg.mode) bits.push(cfg.mode);
+    if (Number.isInteger(cfg?.capPerDay) && cfg.capPerDay > 0) bits.push(cap(cfg.capPerDay));
+    // The engine in words, because this row is where an owner who cannot see
+    // the switch below (no claude on this Mac, or a probe that failed) finds
+    // out which way it is set.
+    if (cfg?.engine === 'claude-cli') bits.push('reading with claude');
+    else if (cfg?.engine === 'local') bits.push('reading on this Mac');
+    // NOTHING IS ASSERTED WHEN NOTHING ANSWERED. A reader that is still
+    // starting up must not be reported as a setting: an em dash says "not
+    // known", where a default would say "investor" to somebody on 'any'.
+    said.textContent = bits.length > 0 ? bits.join(' · ') : '—';
+    fitConnections();
+  });
   return el;
 }
 
@@ -370,7 +396,7 @@ const ENGINE_STATE_COPY = {
   error: 'claude is here but it did not answer the way i expected.',
 };
 
-function engineRow() {
+function engineRow(configPromise) {
   const el = document.createElement('div');
   el.className = 'setting';
   const text = document.createElement('div');
@@ -429,16 +455,32 @@ function engineRow() {
   // THE SWITCH IS OFFERED ONLY WHEN THE PROBE WORKED. "you have it" and "it
   // works" are different questions, and only the second one may put a switch on
   // screen that sends message excerpts off this Mac — onboarding's own rule.
-  function paint(out) {
+  //
+  // AND ONLY WHEN ITS POSITION IS KNOWN. `paintSwitch(out.engine ===
+  // 'claude-cli')` reads a MISSING field as off, which on this particular
+  // switch is a silent implied opt-out nobody made — one tap from being written
+  // back as the real answer. The probe carries the configured engine and so
+  // does GET /admin/config/card, so the second answers when the first does not;
+  // with neither able to say, there is no switch, exactly as with no probe.
+  async function paint(out) {
     const st = out && out.state;
-    if (st === 'ok') {
-      state.textContent = ENGINE_TIMING;
-      paintSwitch(out.engine === 'claude-cli');
-      control.replaceChildren(sw);
-    } else {
+    if (st !== 'ok') {
       state.textContent = ENGINE_STATE_COPY[st] || ENGINE_STATE_COPY.error;
       control.replaceChildren(again);
+      fitConnections();
+      return;
     }
+    const fromProbe = typeof out.engine === 'string' ? out.engine : null;
+    const engine = fromProbe ?? (await configPromise)?.engine ?? null;
+    if (engine !== 'claude-cli' && engine !== 'local') {
+      state.textContent = 'claude is here, but i cannot tell how this is set right now.';
+      control.replaceChildren(again);
+      fitConnections();
+      return;
+    }
+    state.textContent = ENGINE_TIMING;
+    paintSwitch(engine === 'claude-cli');
+    control.replaceChildren(sw);
     fitConnections();
   }
   function probe() {
@@ -778,18 +820,12 @@ async function renderSettings() {
   // below it is about how the app behaves; this one is about where the words
   // go. It paints itself asynchronously — a probe runs the claude binary and
   // can take seconds, and settings must not wait on it to draw.
-  rows.push(engineRow());
-  // The mode picker is NOT duplicated here, deliberately: it lives on the card,
-  // which is where you change your mind about it. But a new owner reading
-  // settings saw no sign the product had modes at all, so the row says it does
-  // and says where. Read-only text and no value asserted: nothing native knows
-  // the standing mode without asking the reader for a card, and a settings row
-  // that guesses which mode is on would be worse than one that does not say.
-  rows.push(factRow({
-    name: 'who it looks for',
-    value: 'on the card',
-    note: 'anyone, founders or investors — the three chips at the top of the reconnect card.',
-  }));
+  // ASKED ONCE, READ TWICE. A rejected promise is an answer too — every reader
+  // of it renders "not known" rather than a default — so the catch is here and
+  // not at each use.
+  const cardConfig = hzPost('cardConfig').catch(() => null);
+  rows.push(engineRow(cardConfig));
+  rows.push(cardConfigRow(cardConfig));
   // The motion row only appears when the system setting it overrides is
   // actually on. With Reduce Motion off it would do nothing, and a control
   // that does nothing is worse than no control.

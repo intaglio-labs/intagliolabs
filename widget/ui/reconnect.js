@@ -289,9 +289,16 @@ function changedLine(c) {
   const changed = c.changed;
   const text = asText(changed?.text);
   if (!text) return '';
-  return sourceCount(changed) > 0
-    ? `${text} · ${sourceCount(changed)} source${sourceCount(changed) === 1 ? '' : 's'}`
-    : text;
+  const parts = [text];
+  const sources = sourceCount(changed);
+  if (sources > 0) parts.push(`${sources} source${sources === 1 ? '' : 's'}`);
+  // WHEN THE CHANGE WAS, and `date` before `at`: `date` is the date the change
+  // itself carries ("March 2026" — when she moved), where `at` is when this Mac
+  // looked it up. A lookup timestamp presented as the date of the change would
+  // be a card saying she moved on the day it happened to read about it.
+  const when = asText(changed.date) || whenPhrase(changed.at) || '';
+  if (when) parts.push(when);
+  return parts.join(' · ');
 }
 
 // `sources` IS THE COUNT, and the list it used to be is `sourceUrls`
