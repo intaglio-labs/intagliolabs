@@ -463,7 +463,10 @@ test('an unrecognised connector is left alone by the page, as it is by the daemo
 test('the LinkedIn export has a tile of its own, on either side of the bridges flag', () => {
   assert.match(connectStatus, /export const LINKEDIN_EXPORT_ID = 'linkedin-export';/u);
   assert.match(connectStatus, /function linkedinExportRow\(home\)/u);
-  assert.match(connectStatus, /'imports', 'linkedin', 'Connections\.csv'/u);
+  // The export's location is decided in one place, connectors/lib/linkedinExport.mjs,
+  // and the tile asks that helper rather than joining the path itself.
+  assert.match(connectStatus, /import \{ exportInstalled, exportReadyAt \} from '\.\.\/\.\.\/connectors\/lib\/linkedinExport\.mjs'/u);
+  assert.match(connectStatus, /const ok = exportInstalled\(home\);/u);
   assert.match(connectStatus, /linkedinExportRow\(home\),/u, 'and it must be in fullStatus');
   // The page's half: its own visibility rule, its own hint, its own place in
   // the scan order, and the drop path spelled out where the owner can read it.
