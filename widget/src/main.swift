@@ -323,6 +323,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // offer, but the daemon just started above does need respawning. See
       // FullDiskWatch for why that is the only thing that happens.
       DispatchQueue.main.async { FullDiskWatch.begin() }
+      // And notice the LinkedIn export arriving. It lands in ~/Downloads
+      // minutes or hours after the owner asked LinkedIn for it, long after the
+      // setup flow that asked has closed — so the app watches for it rather
+      // than waiting to be reopened. It does nothing on a Mac that already has
+      // an export, including asking for the Downloads-folder grant.
+      // See ExportWatch.
+      DispatchQueue.main.async { ExportWatch.shared.begin(bridge: self.bridge) }
     }
 
     // THE DISPLAY CHANGING IS AN EVENT, and until now nothing treated it as one.
@@ -1039,6 +1046,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // connection is visible without scrolling — the owner's constraints.
       connectionsPanel = makePanel(page: "connections", size: capped(Self.scaled(Self.connectionsBase, Bridge.scale)))
       connectionsPanel!.hasShadow = false
+      // "drop it here" on the LinkedIn settings row. A page cannot see a
+      // dropped file's PATH — WebKit gives JavaScript bytes and a name and
+      // nothing else — so the drop is taken natively and handed to the same
+      // import the picker uses. Installed on this panel only; every other
+      // webview leaves WebKit's own drag handling alone.
+      // See ClickThroughWebView.onFileDrop.
+      (connectionsPanel?.contentView as? ClickThroughWebView)?.onFileDrop = { [weak self] urls in
+        guard let self else { return false }
+        // Only files this import could possibly want. Anything else falls
+        // through to WebKit, which is what a drag onto a page normally means.
+        let wanted = urls.filter { ExportWatch.looksLikeExport($0.lastPathComponent) }
+        guard !wanted.isEmpty else { return false }
+        self.bridge.importLinkedIn(files: wanted) { _ in }
+        return true
+      }
     }
     present(connectionsPanel!)
     // Tell the page whether this open is the guided one. On the panel's very
@@ -1465,6 +1487,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     onboardingYieldedToBrowser = true
     p.level = .normal
     p.orderBack(nil)
+  }
+
+  // AN EXPORT LANDED WITHOUT ANYBODY PRESSING ANYTHING ON A PAGE -- the
+  // Downloads watcher found one and the owner said yes to a notification, or a
+  // file was dropped on the settings panel. Both surfaces that render the
+  // export's state read it once, on entry, so without this the settings row
+  // goes on offering a picker and onboarding screen 4 goes on saying "waiting
+  // for your file" about a file that is installed.
+  //
+  // Guarded probes rather than pushes into a known page: either panel may not
+  // exist, and the onboarding page in particular is often a loaded webview
+  // sitting behind a closed scrim.
+  func linkedInExportChanged() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    eval(connectionsPanel?.contentView as? WKWebView,
+         "window.__hzLinkedInChanged && window.__hzLinkedInChanged()")
+    eval(onboardingPanel?.contentView as? WKWebView,
+         "window.__hzLinkedInChanged && window.__hzLinkedInChanged()")
   }
 
   // ...and back on top when the owner comes back. Guarded on the flag so this

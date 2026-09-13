@@ -948,9 +948,20 @@ function paintLinkedIn(out) {
       + 'i can only read the english export today.';
     return;
   }
-  if (out.reason === 'zip') {
+  // ~~"that's the zip — unzip it and choose Connections.csv from inside it."~~
+  // The zip IS the file LinkedIn sends, and telling the owner to go and unpack
+  // it by hand was the app refusing the only thing it had actually asked for.
+  // Native takes Connections.csv out of the archive now (Bridge
+  // extractConnections), so the two zip answers left are the two real failures,
+  // and only one of them has a remedy in it.
+  if (out.reason === 'zip-connections') {
     linkedInStatus.textContent =
-      "that's the zip — unzip it and choose Connections.csv from inside it.";
+      `there is no Connections.csv in ${out.file || 'that zip'} — ask linkedin for `
+      + '"connections" and it will be in the next one.';
+    return;
+  }
+  if (out.reason === 'zip') {
+    linkedInStatus.textContent = "i couldn't open that zip.";
     return;
   }
   if (out.reason === 'newer') {
@@ -997,6 +1008,55 @@ function paintLinkedInExisting(out) {
 function enterLinkedIn() {
   hzPost('linkedInState').then(paintLinkedInExisting).catch(() => {});
 }
+
+// AN EXPORT THAT LANDED WHILE THIS SCREEN WAS UP. The owner presses "request a
+// copy", goes to the browser, comes back — and the archive may arrive at any
+// point after that, including while they are still looking at this screen (the
+// Downloads watcher notices it and the notification imports it). Native pokes
+// this; without it the screen would go on saying "waiting" about a file that is
+// already installed. Guarded on `present`, like the entry read, so a poke that
+// arrives for some other reason claims nothing.
+window.__hzLinkedInChanged = () => {
+  if (currentScreen !== '4') return;
+  hzPost('linkedInState').then(paintLinkedInExisting).catch(() => {});
+};
+
+// ASKING IS NOT HAVING, and this button is the "asking" half.
+//
+// It opens LinkedIn's own data-download page in the owner's browser through a
+// door that takes no URL from this page at all (Bridge `openLinkedInExport`),
+// and native drops the scrim out of the browser's way exactly as the Google
+// sign-in does — the panel is full-screen at .floating and a browser window is
+// an ordinary one, so without that the page the owner was just sent to opens
+// underneath a scrim that swallows every click on it.
+//
+// NOTHING IS WAITED FOR. There is no poll here and no gate: the file arrives by
+// email in ten minutes or tomorrow, and the flow is not going to sit on this
+// screen for either. The status line says what was opened and `later` still
+// goes on.
+const linkedInRequest = document.getElementById('linkedInRequest');
+linkedInRequest.addEventListener('click', () => {
+  linkedInStatus.classList.remove('ok', 'warn', 'bad');
+  linkedInStatus.textContent = 'opening linkedin in your browser…';
+  hzPost('openLinkedInExport')
+    .then((out) => {
+      if (!out || out.opened !== true) {
+        linkedInStatus.classList.add('bad');
+        linkedInStatus.textContent = "i couldn't open linkedin — the page is "
+          + 'linkedin.com → settings → data privacy → get a copy of your data.';
+        return;
+      }
+      // A PROMISE THIS SCREEN CAN KEEP. The watcher is what makes it true: the
+      // archive is noticed in ~/Downloads whenever it lands, and one press on
+      // the notification imports it. See ExportWatch.
+      linkedInStatus.textContent =
+        "when it arrives, leave it in your downloads and i'll offer to take it.";
+    })
+    .catch(() => {
+      linkedInStatus.classList.add('bad');
+      linkedInStatus.textContent = "i couldn't open linkedin just now.";
+    });
+});
 
 linkedInPick.addEventListener('click', () => {
   hzPost('importLinkedIn').then(paintLinkedIn).catch(() => {});
@@ -1248,7 +1308,35 @@ function sprintSentence() {
   return `reading ${named} so i can tell who has gone quiet`;
 }
 
+// THE GROUP IS EMPTY FOR A REASON THE OWNER CAN FIX, AND IT IS NOT "more
+// history".
+//
+// founder and investor are decided from the LinkedIn export's job titles, so on
+// a Mac with no export there are no rows to be a founder or an investor IN —
+// hermes says so with `modeFallback: 'linkedin-pending'` rather than letting
+// the screen blame the reader. "nobody quiet who is an investor yet" is true and
+// sends the owner off to wait for a corpus that will never produce one.
+//
+// Same sentence here and on the card (reconnect.js), because it is the same
+// fact: two wordings for one cause is two explanations, and the owner only gets
+// to believe one.
+const linkedInPendingLine = (mode) =>
+  `${mode} cards start when your linkedin export lands`;
+const linkedInPending = (out) =>
+  out?.modeFallback === 'linkedin-pending'
+  && typeof out?.mode === 'string' && out.mode.length > 0
+  && out.mode !== 'any';
+
 function paintModeShortfall(out) {
+  if (linkedInPending(out)) {
+    loadMode.textContent = linkedInPendingLine(out.mode);
+    loadMode.hidden = false;
+    // The widening still stands: it is a one-off peek under `any`, which is the
+    // one group that does not need the export at all, and it is the only thing
+    // on this screen the owner can press about it.
+    loadAnyMode.hidden = false;
+    return;
+  }
   const mode = typeof out.mode === 'string' && out.mode.length > 0 ? out.mode : null;
   const inAll = Number(out.counts?.any) > 0
     ? ` — ${Number(out.counts.any).toLocaleString()} `

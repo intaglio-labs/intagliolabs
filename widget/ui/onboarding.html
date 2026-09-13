@@ -125,17 +125,40 @@
     </div>
   </div>
 
-  <!-- ============================ 4. who you know ========================= -->
+  <!-- ============================ 4. who you know =========================
+       ASK NOW, HAND IT OVER LATER. This screen used to be one button — "choose
+       the file" — for a file nobody has yet. LinkedIn does not GIVE you an
+       export, it emails you one: minutes later for the basic archive, up to a
+       day for the full one. So the screen that asked for it was a wall for
+       every owner meeting it for the first time, and the only way past it was
+       skip.
+
+       Two things now. "request a copy" opens LinkedIn's own download page in
+       the browser and the flow carries on underneath it; "i have it" is the
+       picker, which now also takes the zip LinkedIn sends. Neither blocks:
+       `later` goes on, and the file is taken whenever it turns up — see
+       ExportWatch, which notices the archive landing in ~/Downloads long after
+       this screen has closed. -->
   <div class="ob-screen" id="screenLinkedIn" hidden>
     <h1 class="ob-title">who you know professionally</h1>
     <p class="ob-tagline">linkedin will not let anything read your connections, so you ask them
-      for a copy and drop it here.</p>
-    <p class="ob-tagline ob-quiet">settings → data privacy → get a copy of your data →
-      &#8220;connections&#8221; → request. it arrives by email, usually in ten minutes.</p>
+      for a copy. asking takes a minute; the file comes by email, and i will take it
+      whenever it arrives.</p>
+    <!-- NUMBERED, BECAUSE ORDER IS LOAD-BEARING here the way it is on the Full
+         Disk Access screen: ticking the wrong thing on LinkedIn's page is the
+         difference between a file in ten minutes and a file tomorrow, and it
+         cannot be fixed afterwards — you request again. -->
+    <ol class="ob-steps" id="linkedInSteps">
+      <li><span class="ob-step-n">1</span>tick <b>connections</b>, and nothing else</li>
+      <li><span class="ob-step-n">2</span>press request</li>
+      <li><span class="ob-step-n">3</span>linkedin emails you a link, usually in about ten
+        minutes &#8212; the whole archive can take a day</li>
+    </ol>
     <p class="ob-status" id="linkedInStatus"></p>
     <div class="ob-actions">
-      <button class="ob-ghost" id="linkedInSkip">skip</button>
-      <button class="ob-cta ob-cta-sm" id="linkedInPick">choose the file</button>
+      <button class="ob-ghost" id="linkedInSkip">later</button>
+      <button class="ob-cta ob-cta-sm" id="linkedInRequest">request a copy</button>
+      <button class="ob-cta ob-cta-sm" id="linkedInPick">i have it</button>
       <button class="ob-cta ob-cta-sm" id="linkedInNext" hidden>next</button>
     </div>
   </div>

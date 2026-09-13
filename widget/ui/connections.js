@@ -354,6 +354,113 @@ function cardConfigRow(configPromise) {
   return el;
 }
 
+// THE ONE SOURCE THIS APP CANNOT FETCH FOR ITSELF.
+//
+// Everything else on this panel is a switch or a login. LinkedIn is a FILE the
+// owner asks LinkedIn for and then hands over, which gives it a state no other
+// row has: asked for, not here yet. Until this row existed that state was
+// invisible — settings showed no sign the export was a thing at all, and the
+// only places to hand the file over were a connector card on the shelf above
+// and a setup flow the owner had already finished.
+//
+// ONE LINE, LIKE EVERY ROW HERE (owner, 2026-09-13: "so much fucking text??").
+// The value carries the state AND is the control: press it for the picker, or
+// drop the file on this panel, which native takes and imports through the same
+// path (ClickThroughWebView.onFileDrop). Every explanation, refusals included,
+// is the row's hover.
+const LINKEDIN_HELP = 'linkedin will not let anything read your connections, so you ask '
+  + 'them for a copy and hand the file over. it is what tells a founder from an investor.';
+const LINKEDIN_WAITING = 'waiting for your file · drop it here';
+// WHAT WENT WRONG, TWICE OVER: a few words on the line, the whole sentence on
+// the hover. The row may not grow to hold a remedy, and a remedy nobody can
+// read is not one — so the short form says which failure it was and the hover
+// says what to do about it.
+const LINKEDIN_REFUSALS = {
+  'zip-connections': ['no connections in that zip',
+    'ask linkedin for "connections" when you request the export and it will be in the next one.'],
+  zip: ["couldn't open that zip", 'that file is not an archive i can read.'],
+  columns: ["columns i don't recognise", 'i can only read the english export today.'],
+  newer: ['yours is older — kept', 'the export already here is newer than the file you chose.'],
+  duplicate: ['two of those — choose one',
+    'you chose two files that are both the same export. pick one of them.'],
+};
+const LINKEDIN_REFUSAL_DEFAULT = ["couldn't read that file", "i couldn't read that file."];
+
+// Set when the row is built, so an import nobody started here — the Downloads
+// watcher's notification, a file dropped on this panel — can repaint it.
+// Native calls __hzLinkedInChanged; see main.swift linkedInExportChanged.
+let repaintLinkedIn = null;
+
+function linkedInRow() {
+  const row = document.createElement('div');
+  row.className = 'setting';
+  const label = document.createElement('span');
+  label.className = 'setting-name';
+  label.textContent = 'linkedin';
+  // A BUTTON, NOT A SPAN. It is the control as well as the read-out, and a span
+  // would lose the keyboard and the focus ring on the only door into the picker
+  // this panel has.
+  const said = document.createElement('button');
+  said.type = 'button';
+  said.className = 'setting-said setting-said-press';
+  row.append(label, said);
+
+  const say = (line, hover) => {
+    said.textContent = line;
+    row.title = hover;
+    // The row owns the hover, so the control carries the whole line for anyone
+    // reading it aloud — same split as settingRow.
+    said.setAttribute('aria-label', `linkedin — ${line}`);
+  };
+
+  say(LINKEDIN_WAITING, LINKEDIN_HELP);
+
+  // COUNTS AND A DATE. Nothing else ever crosses the bridge from that file —
+  // see linkedInState in Bridge.swift. `present: false` is the ordinary
+  // first-run answer and leaves the line exactly where it is.
+  const paintState = (out) => {
+    if (!out || out.present !== true) { say(LINKEDIN_WAITING, LINKEDIN_HELP); return; }
+    const n = Number(out.connections || 0);
+    const when = Number(out.modifiedTs);
+    const dated = Number.isFinite(when) ? ` · ${new Date(when).toLocaleDateString()}` : '';
+    say(n > 0 ? `${n.toLocaleString()} connections${dated}` : `an export is here${dated}`,
+      `${LINKEDIN_HELP} press to replace it.`);
+  };
+
+  const ask = () => hzPost('linkedInState').then(paintState).catch(() => {});
+  repaintLinkedIn = ask;
+  ask();
+
+  said.addEventListener('click', () => {
+    said.disabled = true;
+    const previous = said.textContent;
+    const previousHover = row.title;
+    said.textContent = 'opening…';
+    hzPost('importLinkedIn')
+      .then((out) => {
+        // A cancel is an answer, not a failure: the row goes back to saying
+        // whatever it said before the panel opened.
+        if (!out || out.state === 'cancelled') { say(previous, previousHover); return; }
+        if (out.state === 'ok') {
+          // Read back rather than rendered from the reply. The reply says what
+          // this pick imported; this row's job is to say what is INSTALLED, and
+          // a pick that lands two files would make those different answers.
+          ask();
+          return;
+        }
+        const [short, why] = LINKEDIN_REFUSALS[out.reason] ?? LINKEDIN_REFUSAL_DEFAULT;
+        say(short, `${why} ${LINKEDIN_HELP}`);
+      })
+      .catch(() => {
+        const [short, why] = LINKEDIN_REFUSAL_DEFAULT;
+        say(short, `${why} ${LINKEDIN_HELP}`);
+      })
+      .finally(() => { said.disabled = false; fitConnections(); });
+  });
+
+  return row;
+}
+
 // A setting whose control is a BUTTON, because what it does happens once
 // instead of being on or off. The press is awaited and the button is dead while
 // it runs: both of these reach native, and one of them is deleting things.
@@ -917,6 +1024,10 @@ async function renderSettings() {
     message: 'setKeepAwake',
   }));
   rows.push(performanceRow(p && p.performance));
+  // Above the behaviour rows would put a file-handover between two switches;
+  // below them, next to activity, is where the rows about what the app HAS
+  // rather than how it behaves belong.
+  rows.push(linkedInRow());
   // The size slider was yeeted (owner, 2026-08-24): everything runs at 100%.
   // Native's setScale plumbing survives untouched, so a stored non-1 scale
   // from the slider era is snapped back to 1 here — without the control, a
@@ -1010,6 +1121,13 @@ async function renderSettings() {
   settings.replaceChildren(...rows);
 }
 renderSettings();
+
+// AN EXPORT THAT LANDED WITHOUT ANYBODY PRESSING ANYTHING HERE — the Downloads
+// watcher's notification, or a file dropped on this panel, which native takes
+// because a page never sees a dropped file's path. The row reads its state once
+// when it is built, so without this it would go on saying "waiting for your
+// file" about a file that is installed. See main.swift linkedInExportChanged.
+window.__hzLinkedInChanged = () => { if (repaintLinkedIn) repaintLinkedIn(); };
 
 // ---------------- the connectors intro (yeeted) ----------------
 // There WAS a guided first visit here: a banner above the shelf ("first --
@@ -1668,8 +1786,19 @@ function card(src, keep) {
           button.textContent = 'replace';
           return;
         }
+        // ~~"that's the zip — unzip it and choose Connections.csv from inside
+        // it."~~ The zip IS what LinkedIn sends, and sending the owner off to
+        // unpack it by hand was the app refusing the only file it had asked
+        // for. Native takes Connections.csv out of the archive now (Bridge
+        // extractConnections); the two answers left are the two real failures,
+        // and only one of them has a remedy in it.
+        if (out.reason === 'zip-connections') {
+          say(`there is no Connections.csv in ${out.file || 'that zip'} — ask linkedin for `
+            + '"connections" and it will be in the next one.');
+          return;
+        }
         if (out.reason === 'zip') {
-          say("that's the zip — unzip it and choose Connections.csv from inside it.");
+          say("i couldn't open that zip.");
           return;
         }
         if (out.reason === 'columns') {

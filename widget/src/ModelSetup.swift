@@ -140,13 +140,26 @@ enum ModelSetup {
   /// Requested lazily, at the moment there is something worth saying, rather
   /// than at launch: an app that asks to send notifications before it has ever
   /// had news is asking on spec.
-  static func notify(title: String, body: String) {
+  /// ONE NOTIFIER FOR THE APP, not one per feature. `category` and `userInfo`
+  /// were added for the Downloads watcher (ExportWatch), which needs a
+  /// notification the owner can PRESS — "found your LinkedIn export, import
+  /// it?" is only worth sending if the answer can be given from the banner.
+  /// Every existing caller passes neither and behaves exactly as before.
+  ///
+  /// The category has to be registered with the centre before a notification
+  /// naming it is sent, and the delegate has to be in place before the press
+  /// can be delivered; both are ExportWatch's job, at launch.
+  static func notify(title: String, body: String,
+                     category: String? = nil,
+                     userInfo: [String: Any] = [:]) {
     let center = UNUserNotificationCenter.current()
     center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
       guard granted else { return }
       let content = UNMutableNotificationContent()
       content.title = title
       content.body = body
+      if let category { content.categoryIdentifier = category }
+      if !userInfo.isEmpty { content.userInfo = userInfo }
       let req = UNNotificationRequest(
         identifier: "hazlie.model.\(UUID().uuidString)", content: content, trigger: nil)
       center.add(req, withCompletionHandler: nil)

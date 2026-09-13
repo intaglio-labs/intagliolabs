@@ -79,9 +79,14 @@ test('the named exception is still true', () => {
 // linkedInState is a read in the strict sense the list means: it reports
 // whether an export is already on disk, when it landed and how many records it
 // holds. Counts and a date -- no names, no companies, no row content.
+// openLinkedInExport is here for the same reason openFullDiskAccess is: it opens
+// something the owner asked to be sent to — LinkedIn's data-download page, in
+// their own browser — and writes nothing. It is also the narrowest door of the
+// three: it takes NO url from the page at all, so unlike openExternal it cannot
+// be talked into being a door to somewhere else.
 const READS = ['permissionState', 'setupState', 'engineProbe', 'googleProbe',
                'onboardingProgress', 'relCardPeek', 'widgetSpot', 'openFullDiskAccess',
-               'openReconnect', 'close', 'linkedInState'];
+               'openLinkedInExport', 'openReconnect', 'close', 'linkedInState'];
 
 test('the page can only reach the six checks it is supposed to', () => {
   // The verbs that write something, named one by one, so adding a write to

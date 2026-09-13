@@ -70,6 +70,12 @@ protocol BridgeDelegate: AnyObject {
   /// happens in another application and nothing calls back -- so this one
   /// takes no argument and the way back is the owner returning to the app.
   func yieldOnboardingToBrowser()
+  /// A LinkedIn export landed without anyone pressing a button on a page: the
+  /// Downloads watcher found one, or a file was dropped on the settings panel.
+  /// The two surfaces that render its state repaint themselves — without this,
+  /// screen 4 goes on saying "waiting for your file" about a file that is
+  /// already installed.
+  func linkedInExportChanged()
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -141,6 +147,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // by hand, while onboarding screen 4 did the same job with
                     // this panel. One way to do it now, and it is this one.
                     "importLinkedIn",
+                    // ...and what is already installed, so the settings row can
+                    // read "2,970 connections · <date>" rather than offering a
+                    // picker for a file the owner handed over last month.
+                    // Counts and a date; no row content. See linkedInState().
+                    "linkedInState",
                     "activity",
                     "openFullDiskAccess", "startSources",
                     // In-panel API-key walkthroughs and Google OAuth.
@@ -161,9 +172,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                    "permissionState", "requestPermission",
                    // Screen 3: the grant, and the live read that proves it.
                    "googleAuth", "googleProbe",
-                   // Screen 4: the export, picked and checked natively, and
-                   // what is already on disk from a previous run.
-                   "importLinkedIn", "linkedInState",
+                   // Screen 4: ASK FOR THE FILE, then take it whenever it turns
+                   // up. `openLinkedInExport` opens LinkedIn's download page in
+                   // the owner's browser -- one fixed address, no URL from the
+                   // page. `importLinkedIn` is the picker, which now also takes
+                   // the zip LinkedIn sends. `linkedInState` is what is already
+                   // on disk from a previous run.
+                   "openLinkedInExport", "importLinkedIn", "linkedInState",
                    // Screen 5: whether the installed claude actually works,
                    // the opt-in it may then offer, and the local model for a
                    // Mac that has no claude on it.
@@ -724,7 +739,37 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
     "https://docs.mau.fi/bridges/go/slack/authentication.html",
+    // LinkedIn's own "get a copy of your data" page, which is where BOTH doors
+    // to the export lead: the settings shelf's export card (the linkedin-export
+    // hint in connections.js) through openExternal, and onboarding screen 4's
+    // "request a copy" through openLinkedInExport.
+    //
+    // NO SQUARE BRACKETS IN THIS BLOCK, in a comment or anywhere else.
+    // openExternal.test.mjs reads the declaration up to its first closing
+    // bracket, so a comment spelling a JS subscript truncates the allowlist the
+    // test is scanning and every real URL below it then reads as missing. Cost
+    // two rounds here to find, once for the subscript and once for the sentence
+    // warning about the subscript.
+    //
+    // IT WAS MISSING, and the symptom is the one this allowlist's test exists to
+    // catch: connections.js has sent this string since the export card came
+    // back, nothing allowed it, openExternal answered "url not in allowlist",
+    // and the only link on that card did nothing.
+    // connectors/test/openExternal.test.mjs was already failing on it.
+    //
+    // Written out rather than interpolated from linkedInExportPage below,
+    // because that test reads STRING LITERALS out of this declaration and an
+    // identifier would read as an empty allowlist. The two are pinned to each
+    // other by the guard in openLinkedInExport, and by
+    // widget/test/linkedin-export-handoff.test.mjs.
+    "https://www.linkedin.com/mypreferences/d/download-my-data",
   ]
+
+  /// Where "request a copy" sends the owner. ONE fixed address, so the page
+  /// passes no URL at all and this constant is what gets opened — see the
+  /// `openLinkedInExport` case for why that is a different door from
+  /// `openProfile`, which pins a host because its path is per-person.
+  static let linkedInExportPage = "https://www.linkedin.com/mypreferences/d/download-my-data"
 
   // Refuse every redirect: a redirect is how a compromised loopback response
   // would move the bearer token somewhere else.
@@ -1236,6 +1281,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // one": LinkedIn puts a Notes: paragraph above the real header and
       // csvObjects handles that fine, so a line-one check would reject files
       // that parse perfectly.
+      //
+      // AND THE FILE LINKEDIN ACTUALLY SENDS IS A ZIP. This used to refuse one
+      // with a sentence telling the owner to unzip it themselves; it now takes
+      // Connections.csv out of the archive and checks THAT, by exactly the same
+      // rule. See extractConnections.
       importLinkedIn { [weak self] out in
         self?.reply(webView, id, out)
       }
@@ -2126,6 +2176,39 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       NSWorkspace.shared.open(profile)
       reply(webView, id, ["state": "ok"])
+
+    case "openLinkedInExport":
+      // "REQUEST A COPY" — AND THE PAGE DOES NOT GET TO SAY WHERE.
+      //
+      // Onboarding screen 4 sends the owner to LinkedIn's data-download page.
+      // Unlike openProfile there is nothing per-person about that address, so
+      // the payload carries no url at all and this case reads the constant:
+      // openProfile pins a HOST because its path comes out of the owner's own
+      // export, and this pins the whole STRING because there is only ever one.
+      //
+      // openExternal would do the same job and is deliberately not used. It is
+      // granted to connections and people, and giving onboarding a verb that
+      // opens anything on a shared allowlist widens the surface of the one page
+      // that runs before the owner has agreed to anything. This door opens one
+      // page, and the guard below is what keeps it the page in the allowlist.
+      guard allowedExternal.contains(Bridge.linkedInExportPage),
+            let exportPage = URL(string: Bridge.linkedInExportPage)
+      else {
+        reply(webView, id, ["state": "error", "error": "no linkedin export page"])
+        return
+      }
+      let openedExport = NSWorkspace.shared.open(exportPage)
+      // AND THE SCRIM GETS OUT OF THE BROWSER'S WAY, exactly as googleAuth does
+      // and for exactly the same reason: the onboarding panel is full-screen at
+      // .floating, a browser window is an ordinary one, and without this the
+      // page the owner was just sent to opens UNDERNEATH a scrim that swallows
+      // every click on it. See yieldOnboardingToBrowser.
+      //
+      // Gated on the launch macOS accepted. Lowering the scrim for a browser
+      // that never opened would leave the flow sitting behind every other window
+      // with nothing to come back from.
+      if openedExport { delegate?.yieldOnboardingToBrowser() }
+      reply(webView, id, ["state": openedExport ? "ok" : "error", "opened": openedExport])
 
     case "openApp":
       let bundleId = String((payload["bundleId"] as? String ?? "").prefix(96))
@@ -3065,9 +3148,149 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     return rows
   }
 
-  private var linkedInDirectory: URL {
+  /// Where the installed export lives — the directory
+  /// connectors/sources/linkedin.mjs polls.
+  ///
+  /// A TYPE PROPERTY, because the Downloads watcher asks whether an export is
+  /// already here before there is any reason to hold a Bridge. See ExportWatch.
+  static var linkedInDirectory: URL {
     FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".hazlie/imports/linkedin", isDirectory: true)
+  }
+
+  /// Whether an export is installed AND still parses — the Downloads watcher's
+  /// only question, and the condition that stops it watching.
+  ///
+  /// The same rule the import applies, not `fileExists`: a truncated or
+  /// hand-dropped file that the connector cannot read is not an export the
+  /// owner has, and a watcher that fell silent on one would be waiting for a
+  /// file that had already been "found".
+  static var linkedInExportInstalled: Bool {
+    let destination = Bridge.linkedInDirectory.appendingPathComponent("Connections.csv")
+    guard FileManager.default.fileExists(atPath: destination.path),
+          let head = readHead(of: destination, bytes: 4096),
+          let kind = linkedInKind(of: head)
+    else { return false }
+    return kind.name == "Connections.csv"
+  }
+
+  /// THE FILE LINKEDIN ACTUALLY SENDS.
+  ///
+  /// "Get a copy of your data" arrives as `Complete_LinkedInDataExport_*.zip`
+  /// or `Basic_LinkedInDataExport_*.zip` — never as a bare CSV — so the picker
+  /// used to greet the owner's own download with "that's the zip, unzip it
+  /// yourself". The comment that justified it said extraction would mean a
+  /// subprocess and every check in this flow runs in this process; that was
+  /// true and it was the wrong trade. One `/usr/bin/unzip` beats asking the
+  /// owner to do the work by hand on the screen that is about handing a file
+  /// over. (Foundation has no archive API at all, so there is no third option.)
+  ///
+  /// ONE ENTRY, BY NAME, AND NOTHING ELSE. The pattern is the literal
+  /// `Connections.csv` with no wildcard in it, so unzip can match at most the
+  /// one root entry: a `dir/Connections.csv` does NOT match, and neither does
+  /// anything else in the archive. The export holds Profile.csv and
+  /// Contacts.csv, both of which carry an exact `First Name` column and both of
+  /// which would destroy a good import if they landed at the destination —
+  /// linkedInKind's second column is the check that catches that, and refusing
+  /// by name here means it never has to.
+  ///
+  /// The zip's own modification date is stamped onto the extracted copy. Every
+  /// caller downstream reads that date — PASS ONE refuses an older export than
+  /// the installed one, and the swap records it as the vintage — and a freshly
+  /// extracted file is dated `now`, which would make last year's archive look
+  /// like today's export.
+  ///
+  /// Returns nil for an archive that could not be read at all, and
+  /// `.notFound` for one that opened and has no Connections.csv in it: those
+  /// are different sentences on the screen, and only the second has a remedy.
+  enum ZipExtraction {
+    case extracted(URL)
+    /// The archive opened; there is no root `Connections.csv` in it.
+    case notFound
+    /// Could not be read as an archive at all.
+    case unreadable
+  }
+
+  /// A cap on what comes out of the archive. A 30k-connection Connections.csv
+  /// is 8-10 MB; this is three orders of magnitude of headroom and still stops
+  /// a hostile archive filling the owner's disk. Exceeding it kills unzip and
+  /// reports the archive as unreadable, which is what it is.
+  private static let zipExtractionCap = 512 * 1024 * 1024
+
+  static func extractConnections(fromZipAt zip: URL) -> ZipExtraction {
+    let fm = FileManager.default
+    let out = fm.temporaryDirectory
+      .appendingPathComponent("hazlie-linkedin-\(UUID().uuidString)")
+      .appendingPathComponent("Connections.csv")
+    do {
+      try fm.createDirectory(at: out.deletingLastPathComponent(),
+                             withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+    } catch { return .unreadable }
+    let discard = { try? fm.removeItem(at: out.deletingLastPathComponent()) }
+
+    // NO SHELL, and an absolute path. `arguments` goes to execve directly, so
+    // nothing in the file name is interpreted — and a file URL's `path` always
+    // begins with "/", so unzip can never read the archive's own name as one of
+    // its flags.
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+    task.arguments = ["-p", zip.path, "Connections.csv"]
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    // unzip's own chatter is not for the owner; the reply says what happened.
+    task.standardError = FileHandle.nullDevice
+    guard (try? task.run()) != nil else { discard(); return .unreadable }
+
+    guard fm.createFile(atPath: out.path, contents: nil,
+                        attributes: [.posixPermissions: 0o600]) else {
+      task.terminate()
+      discard()
+      return .unreadable
+    }
+    guard let sink = try? FileHandle(forWritingTo: out) else {
+      task.terminate(); discard(); return .unreadable
+    }
+    var written = 0
+    var overflowed = false
+    while true {
+      let chunk = pipe.fileHandleForReading.availableData
+      if chunk.isEmpty { break }
+      written += chunk.count
+      if written > zipExtractionCap {
+        overflowed = true
+        // Killed rather than left to fill the disk behind us — and the pipe is
+        // drained afterwards, because a terminate() with a full pipe can leave
+        // the child blocked in write().
+        task.terminate()
+        break
+      }
+      sink.write(chunk)
+    }
+    if overflowed { while !pipe.fileHandleForReading.availableData.isEmpty {} }
+    try? sink.close()
+    task.waitUntilExit()
+
+    if overflowed { discard(); return .unreadable }
+    // unzip answers 11 for "no matching files", which is the archive opening
+    // fine and holding no Connections.csv — the one failure with a remedy in it.
+    if task.terminationStatus == 11 { discard(); return .notFound }
+    guard task.terminationStatus == 0, written > 0 else {
+      discard()
+      // A zero-byte success is an empty entry, which is not an export either.
+      return task.terminationStatus == 0 ? .notFound : .unreadable
+    }
+
+    // THE ARCHIVE'S OWN DATE, or the vintage is "now" and PASS ONE below cannot
+    // tell last year's download from today's.
+    if let vintage = try? zip.resourceValues(forKeys: [.contentModificationDateKey])
+      .contentModificationDate {
+      var dated = out
+      var values = URLResourceValues()
+      values.contentModificationDate = vintage
+      try? dated.setResourceValues(values)
+    }
+    return .extracted(out)
   }
 
   private func importLinkedIn(_ done: @escaping ([String: Any]) -> Void) {
@@ -3077,12 +3300,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       panel.allowsMultipleSelection = true
       panel.canChooseDirectories = false
       panel.canChooseFiles = true
-      panel.message = "choose Connections.csv from your LinkedIn export"
+      // THE ZIP IS THE ORDINARY CASE, so it is named first. LinkedIn mails a
+      // link to an archive; a bare Connections.csv only exists once somebody has
+      // already unzipped one.
+      panel.message = "choose the zip LinkedIn sent you, or Connections.csv from inside it"
       panel.prompt = "import"
-      // .zip is offered so the file the owner just downloaded is SELECTABLE
+      // ~~".zip is offered so the file the owner just downloaded is SELECTABLE
       // rather than greyed out with no explanation. It is refused below with a
       // sentence rather than extracted: unzipping would mean a subprocess, and
-      // every check in this flow runs in this process.
+      // every check in this flow runs in this process."~~ Still offered, no
+      // longer refused: extractConnections takes Connections.csv out of it and
+      // the checks below run on that, unchanged. The subprocess is real and is
+      // the smaller cost — see extractConnections.
       var types: [UTType] = [.commaSeparatedText]
       if let zip = UTType("public.zip-archive") { types.append(zip) }
       panel.allowedContentTypes = types
@@ -3099,6 +3328,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           done(self.acceptLinkedInFiles(panel.urls))
         }
       }
+    }
+  }
+
+  /// The same import, for files nobody picked in a panel: the Downloads watcher
+  /// noticing an export land, and a file dropped onto the settings panel. Same
+  /// check, same copy, same reply shape — acceptLinkedInFiles is the whole
+  /// import and neither caller gets a shortcut through it.
+  func importLinkedIn(files urls: [URL], _ done: @escaping ([String: Any]) -> Void) {
+    guard !urls.isEmpty else { done(["state": "cancelled"]); return }
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let self else { done(["state": "cancelled"]); return }
+      let out = self.acceptLinkedInFiles(urls)
+      // The two pages that render this file's state repaint themselves; an
+      // import the owner did not start must not leave screen 4 still saying
+      // "waiting" about a file that has landed.
+      if out["state"] as? String == "ok" {
+        DispatchQueue.main.async { self.delegate?.linkedInExportChanged() }
+      }
+      done(out)
     }
   }
 
@@ -3129,23 +3377,59 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// aimed at the same path: the second consumed the first one's backup and
   /// then failed, leaving nothing to undo with. They are refused in the first
   /// pass, by name, before anything is written.
+  ///
+  /// A ZIP IS A PICKED FILE TOO, and it is the one LinkedIn actually sends.
+  /// PASS ZERO takes Connections.csv out of each archive and hands the extracted
+  /// copy to the rest of this function; everything after it is unchanged, which
+  /// is the point — the archive buys no shortcut past the header check, the
+  /// vintage comparison or the atomic swap. The owner still sees the name they
+  /// picked in every refusal, because "Complete_LinkedInDataExport_2026.zip" is
+  /// what is in their Downloads folder and "Connections.csv" is not.
   private func acceptLinkedInFiles(_ urls: [URL]) -> [String: Any] {
     let fm = FileManager.default
-    if let zip = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
-      return [
-        "state": "error", "reason": "zip",
-        "file": zip.lastPathComponent,
-      ]
+
+    // PASS ZERO: unpack the archives. Nothing is written outside the temporary
+    // directory, and every extracted copy is removed on the way out of this
+    // function however it leaves.
+    var extracted: [URL] = []
+    defer {
+      for temporary in extracted {
+        try? fm.removeItem(at: temporary.deletingLastPathComponent())
+      }
+    }
+    // `url` is what gets read and copied; `label` is what the owner picked and
+    // is the only one of the two that may appear in a message.
+    var picked: [(url: URL, label: String)] = []
+    for url in urls {
+      guard url.pathExtension.lowercased() == "zip" else {
+        picked.append((url, url.lastPathComponent))
+        continue
+      }
+      switch Bridge.extractConnections(fromZipAt: url) {
+      case .extracted(let csv):
+        extracted.append(csv)
+        picked.append((csv, url.lastPathComponent))
+      case .notFound:
+        // THE ONE ZIP FAILURE WITH A REMEDY IN IT: the archive is fine and the
+        // owner asked LinkedIn for the wrong thing, or for everything and got a
+        // partial first. Named separately so the screen can say which.
+        return [
+          "state": "error", "reason": "zip-connections",
+          "file": url.lastPathComponent,
+        ]
+      case .unreadable:
+        return ["state": "error", "reason": "zip", "file": url.lastPathComponent]
+      }
     }
 
     // PASS ONE: every file is checked, and nothing is written.
-    var accepted: [(url: URL, kind: (anchor: String, name: String))] = []
-    for url in urls {
+    var accepted: [(url: URL, label: String, kind: (anchor: String, name: String))] = []
+    for (url, label) in picked {
       // 4 KB is well past LinkedIn's Notes: preamble and its header, and a
       // bounded read means a file the owner picked by mistake -- a 2 GB
       // video renamed .csv -- costs one page, not a stall.
       guard let head = Bridge.readHead(of: url, bytes: 4096) else {
-        return ["state": "error", "reason": "unreadable", "file": url.lastPathComponent]
+        return ["state": "error", "reason": "unreadable", "file": label]
       }
       guard let kind = Bridge.linkedInKind(of: head) else {
         // NAME THE COLUMN BACK. "I cannot read this" is an accusation with no
@@ -3153,7 +3437,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // happened and that an English export is the fix.
         return [
           "state": "error", "reason": "columns",
-          "file": url.lastPathComponent,
+          "file": label,
           "firstColumn": Bridge.firstColumn(of: head),
         ]
       }
@@ -3173,14 +3457,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // The panel cannot say which of the two was meant — the order `urls`
       // arrive in is the panel's, not a preference — so this refuses and
       // names both files rather than silently picking one.
+      //
+      // TWO ZIPS ARE TWO PICKS OF THE SAME KIND, and they arrive here as two
+      // extracted Connections.csv files with the same name — so the names the
+      // owner needs to choose between are the ARCHIVES they picked, which is why
+      // the refusal reads `label` and not the extracted file's name.
       if let clash = accepted.first(where: { $0.kind.name == kind.name }) {
         return [
           "state": "error", "reason": "duplicate",
           "file": kind.name,
-          "files": [clash.url.lastPathComponent, url.lastPathComponent],
+          "files": [clash.label, label],
         ]
       }
-      let destination = linkedInDirectory.appendingPathComponent(kind.name)
+      let destination = Bridge.linkedInDirectory.appendingPathComponent(kind.name)
       // DO NOT REPLACE A NEWER FILE WITH AN OLDER ONE. Onboarding can be
       // replayed from the gear on a machine that already has an export, and
       // the owner reaching for "the LinkedIn file" in Downloads may well find
@@ -3188,25 +3477,29 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // ...unless this app could not establish the installed file's vintage at
       // all. See unstampedImports: "now" is then a fact about the copy, not
       // about the export, and refusing on it is the dead end.
+      //
+      // An extracted copy carries the ARCHIVE's date, not the moment it was
+      // unpacked — see extractConnections — so a zip from last year is refused
+      // here exactly like the CSV inside it would have been.
       if !Bridge.unstampedImports.contains(kind.name),
          let existing = Bridge.installedVintage(of: destination),
-         let picked = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+         let pickedVintage = try? url.resourceValues(forKeys: [.contentModificationDateKey])
           .contentModificationDate,
-         existing > picked {
+         existing > pickedVintage {
         return [
           "state": "error", "reason": "newer",
           "file": kind.name,
         ]
       }
-      accepted.append((url, kind))
+      accepted.append((url, label, kind))
     }
 
     // PASS TWO: stage every copy, then swap them in.
     do {
-      try fm.createDirectory(at: linkedInDirectory, withIntermediateDirectories: true,
+      try fm.createDirectory(at: Bridge.linkedInDirectory, withIntermediateDirectories: true,
                              attributes: [.posixPermissions: 0o700])
       try fm.setAttributes([.posixPermissions: 0o700],
-                           ofItemAtPath: linkedInDirectory.path)
+                           ofItemAtPath: Bridge.linkedInDirectory.path)
     } catch {
       return ["state": "error", "reason": "copy", "file": accepted.first?.kind.name ?? ""]
     }
@@ -3214,8 +3507,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                   vintage: Date?)] = []
     let discardStaged = { for entry in staged { try? fm.removeItem(at: entry.temporary) } }
     for entry in accepted {
-      let destination = linkedInDirectory.appendingPathComponent(entry.kind.name)
-      let temporary = linkedInDirectory
+      let destination = Bridge.linkedInDirectory.appendingPathComponent(entry.kind.name)
+      let temporary = Bridge.linkedInDirectory
         .appendingPathComponent("\(entry.kind.name).importing")
       do {
         if fm.fileExists(atPath: temporary.path) { try fm.removeItem(at: temporary) }
@@ -3273,7 +3566,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
     for entry in staged {
       let backupName = "\(entry.kind.name).previous"
-      let backup = linkedInDirectory.appendingPathComponent(backupName)
+      let backup = Bridge.linkedInDirectory.appendingPathComponent(backupName)
       let hadPrevious = fm.fileExists(atPath: entry.destination.path)
       do {
         if hadPrevious {
@@ -3390,7 +3683,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// replace it.
   private func linkedInState() -> [String: Any] {
     let fm = FileManager.default
-    let destination = linkedInDirectory.appendingPathComponent("Connections.csv")
+    let destination = Bridge.linkedInDirectory.appendingPathComponent("Connections.csv")
     guard fm.fileExists(atPath: destination.path),
           let head = Bridge.readHead(of: destination, bytes: 4096),
           let kind = Bridge.linkedInKind(of: head), kind.name == "Connections.csv"

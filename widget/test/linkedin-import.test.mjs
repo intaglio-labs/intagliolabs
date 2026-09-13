@@ -111,20 +111,92 @@ test('an older pick cannot overwrite a newer export', () => {
   assert.match(accept, /contentModificationDateKey[\s\S]{0,400}existing > picked[\s\S]{0,200}"reason": "newer"/u);
 });
 
-test('a zip is refused with a sentence, not extracted', () => {
-  // Extraction would mean a subprocess, and every check in this flow runs in
-  // this process. It stays SELECTABLE in the panel so the file the owner just
-  // downloaded is not greyed out with no explanation.
-  assert.match(bridge, /UTType\("public\.zip-archive"\)/u, 'offered in the panel');
-  assert.match(accept, /pathExtension\.lowercased\(\) == "zip"[\s\S]{0,200}"reason": "zip"/u);
-  // Scoped to the import itself: Bridge.swift spawns exactly one process
-  // elsewhere (moveToApplications' detached relauncher), and a file-wide
-  // assertion would pin that unrelated fact instead of this one.
-  const region = /\/\/ MARK: the LinkedIn export([\s\S]*?)\n {2}private func bridgeCall\(/u
+// ~~'a zip is refused with a sentence, not extracted'~~ — THE DECISION FLIPPED,
+// deliberately (owner, 2026-09-13), and the reasoning it replaced is kept here
+// because it was not wrong, only outweighed:
+//
+//   "Extraction would mean a subprocess, and every check in this flow runs in
+//   this process. It stays SELECTABLE in the panel so the file the owner just
+//   downloaded is not greyed out with no explanation."
+//
+// What that traded away is the whole feature. LinkedIn does not hand out a
+// Connections.csv — it emails `Complete_LinkedInDataExport_*.zip` or
+// `Basic_LinkedInDataExport_*.zip` — so the app was asking for a file, being
+// handed exactly that file, and telling the owner to go and unpack it by hand.
+// One /usr/bin/unzip is the smaller cost. Foundation has no archive API, so
+// there was never a third option.
+//
+// WHAT SURVIVES THE FLIP is the part that mattered: the archive buys no
+// shortcut. Connections.csv comes out of it and then goes through the same
+// header check, the same vintage refusal and the same atomic swap as a picked
+// CSV — PASS ZERO ends where PASS ONE begins and changes nothing after it.
+test('the zip is unpacked, and only Connections.csv comes out of it', () => {
+  assert.match(bridge, /UTType\("public\.zip-archive"\)/u, 'still offered in the panel');
+  const extract = /static func extractConnections\(fromZipAt zip: URL\) -> ZipExtraction \{([\s\S]*?)\n {2}\}/u
     .exec(bridge)?.[1];
-  assert.ok(region, 'the LinkedIn import section is gone');
-  assert.doesNotMatch(region, /Process\(\)|launchPath|executableURL/u,
-    'nothing in the import spawns anything to open an archive');
+  assert.ok(extract, 'extractConnections() not found');
+  assert.match(extract, /executableURL = URL\(fileURLWithPath: "\/usr\/bin\/unzip"\)/u);
+  // ONE ENTRY, BY NAME. The export holds Profile.csv and Contacts.csv as well,
+  // both with an exact `First Name` column, and either landing at the
+  // destination destroys a good import. A pattern with a wildcard in it could
+  // match more than one entry and unzip -p would concatenate them.
+  assert.match(extract, /arguments = \["-p", zip\.path, "Connections\.csv"\]/u);
+  // NO SHELL. `arguments` goes to execve, so nothing in a file name is
+  // interpreted on the way.
+  assert.doesNotMatch(extract, /\/bin\/sh|-c"|NSAppleScript/u);
+});
+
+test('extraction happens before PASS ONE and buys no shortcut through it', () => {
+  const zero = accept.indexOf('// PASS ZERO');
+  const one = accept.indexOf('// PASS ONE');
+  const two = accept.indexOf('// PASS TWO');
+  assert.ok(zero > -1 && zero < one && one < two, 'the passes are out of order');
+  const unpack = accept.slice(zero, one);
+  assert.match(unpack, /pathExtension\.lowercased\(\) == "zip"/u);
+  assert.match(unpack, /Bridge\.extractConnections\(fromZipAt: url\)/u);
+  // Nothing is written outside the temporary directory, and what is written
+  // there goes away however this function leaves.
+  assert.match(accept, /defer \{\n\s*for temporary in extracted \{/u,
+    'an extracted copy must not outlive the import that made it');
+  // PASS ONE reads `picked`, which is extracted-or-original — so the header
+  // check runs on the CSV either way and cannot be reached around.
+  assert.match(accept, /for \(url, label\) in picked \{/u);
+  assert.match(accept, /Bridge\.readHead\(of: url, bytes: 4096\)/u);
+});
+
+test('an archive that opened and has no Connections.csv says so separately', () => {
+  // The two zip failures are not the same sentence. "I could not open that" has
+  // no remedy in it; "there is no Connections.csv in there" tells the owner to
+  // tick Connections next time, which is the whole fix.
+  assert.match(bridge, /case notFound/u);
+  assert.match(bridge, /terminationStatus == 11[\s\S]{0,120}return \.notFound/u,
+    "unzip answers 11 for no-matching-files, which is the archive being fine");
+  const unpack = accept.slice(accept.indexOf('// PASS ZERO'), accept.indexOf('// PASS ONE'));
+  assert.match(unpack, /"reason": "zip-connections"/u);
+  assert.match(unpack, /"reason": "zip"/u);
+  // And both pages can say it. A refusal either renders as its own sentence or
+  // it is "i couldn't read that file", which sends the owner back to the
+  // columns for a problem that is not there.
+  for (const file of ['widget/ui/onboarding.js', 'widget/ui/connections.js']) {
+    const page = readFileSync(join(ROOT, file), 'utf8');
+    assert.match(page, /out\.reason === 'zip-connections'/u, `${file} has no sentence for it`);
+    // Code only. Both pages keep the struck-through line they used to show, the
+    // way everything else in this repo keeps the sentence it replaced, and a
+    // naive scan finds the old copy inside the comment explaining why it went.
+    const code = page.split('\n').filter((line) => !/^\s*\/\//u.test(line)).join('\n');
+    assert.doesNotMatch(code, /unzip it and choose Connections\.csv/u,
+      `${file} still tells the owner to unpack the archive themselves`);
+  }
+});
+
+test('an extracted copy carries the archive’s date, not the moment it was unpacked', () => {
+  // PASS ONE refuses an export older than the installed one, and the swap
+  // records the vintage. A freshly extracted file is dated `now`, so without
+  // this last year's archive reads as today's export and overwrites a newer one.
+  const extract = /static func extractConnections\(fromZipAt zip: URL\) -> ZipExtraction \{([\s\S]*?)\n {2}\}/u
+    .exec(bridge)?.[1] ?? '';
+  assert.match(extract,
+    /zip\.resourceValues\(forKeys: \[\.contentModificationDateKey\]\)[\s\S]{0,200}setResourceValues/u);
 });
 
 const COUNT_ROWS = /private static func countRows\(inCsvAt url: URL, anchor: String\) -> Int \{([\s\S]*?)\n {2}\}/u
@@ -456,8 +528,18 @@ const DUP = /"reason": "duplicate"[\s\S]{0,300}?"files": \[([^\]]*)\]/u.exec(acc
 test('a second file of a kind already picked is refused, by name', () => {
   assert.ok(DUP, 'nothing refuses two picks of the same kind');
   // BOTH names: the remedy is choosing between them, and the app cannot.
-  assert.match(DUP[1], /clash\.url\.lastPathComponent/u, 'the file already accepted');
-  assert.match(DUP[1], /url\.lastPathComponent/u, 'and the one that clashed with it');
+  //
+  // THE NAMES THE OWNER PICKED, not the names the import is working with.
+  // ~~clash.url.lastPathComponent~~ was right while every pick was a CSV and
+  // wrong the moment a zip could be one: two LinkedIn archives both unpack to a
+  // file called `Connections.csv`, so the extracted names would hand the owner
+  // two identical strings to choose between. `label` is the name on the thing in
+  // their Downloads folder — the only name they can act on — and it is the
+  // picked file's own name whenever there was no archive.
+  assert.match(DUP[1], /clash\.label/u, 'the file already accepted, as the owner named it');
+  assert.match(DUP[1], /(?<!clash\.)\blabel\b/u, 'and the one that clashed with it');
+  assert.doesNotMatch(DUP[1], /lastPathComponent/u,
+    'an extracted copy is always called Connections.csv, and two of those is not a choice');
 
   // In PASS ONE, before anything is written — same rule as every other refusal.
   const passOne = accept.indexOf('// PASS ONE');
