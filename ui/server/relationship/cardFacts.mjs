@@ -15,6 +15,7 @@
 // once rather than spelled out at each send site.
 
 import { CAL_GATES } from './calendarReconnect.mjs';
+import { parseConnectedOn } from '../../../connectors/lib/linkedinRows.mjs';
 
 const DAY = 86_400_000;
 
@@ -36,9 +37,14 @@ function asText(v) {
 // `connected_on`, `url` (and an `email` this deliberately does not carry:
 // the card needs who they are, not how to reach them).
 //
-// `connectedOn` stays the export's own string ("01 Jun 2020"), not an epoch:
-// it is the only field here LinkedIn hands over as text, and parsing it into
-// a number would invent a precision the csv does not have.
+// `connectedOn` reaches the page as a ms epoch, like every other date on the
+// card, so the page formats one kind of thing. It is parsed by the
+// CONNECTOR'S OWN parser rather than a second one written here: that same
+// function already decided what timestamp the connection row was stored
+// under (linkedinRows.mjs's `ts`), and two parsers for one csv column is how
+// a card ends up a day off from the row it came from. An unparseable or
+// missing date is null -- never Date.parse, which is engine-dependent on
+// this shape and would land a NaN on the wire.
 export function personFacts(linkedinJson) {
   if (typeof linkedinJson !== 'string' || linkedinJson.length === 0) return { ...NO_PERSON };
   let parsed = null;
@@ -48,7 +54,7 @@ export function personFacts(linkedinJson) {
     title: asText(parsed.position),
     company: asText(parsed.company),
     industry: asText(parsed.industry),
-    connectedOn: asText(parsed.connected_on),
+    connectedOn: parseConnectedOn(parsed.connected_on),
     url: asText(parsed.url),
   };
 }

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { start, openDb } from '../server/hermes.mjs';
-import { personCardFacts, changedForCard } from '../server/relationship/cardFacts.mjs';
+import { personCardFacts, personFacts, changedForCard } from '../server/relationship/cardFacts.mjs';
 
 const NOW = Date.parse('2026-06-01T12:00:00Z');
 const DAY = 86_400_000;
@@ -130,10 +130,20 @@ test('the card reply carries who they are, who wrote last, and when they last me
 
     const peek = await get('/admin/relationship/card?peek=1');
     assert.equal(peek.card.personKey, key);
-    assert.deepEqual(peek.card.person, {
-      title: 'Partner', company: 'Sequoia', industry: 'Venture Capital',
-      connectedOn: '01 Jun 2020', url: 'https://www.linkedin.com/in/partner',
-    }, 'the tease knows who they are too -- and never carries their email');
+    assert.deepEqual(
+      { ...peek.card.person, connectedOn: undefined },
+      {
+        title: 'Partner', company: 'Sequoia', industry: 'Venture Capital',
+        url: 'https://www.linkedin.com/in/partner', connectedOn: undefined,
+      },
+      'the tease knows who they are too -- and never carries their email'
+    );
+    // A ms epoch like every other date on the card, not the csv's own string,
+    // and asserted by the date it lands on rather than by a literal number so
+    // the test does not depend on the machine's timezone.
+    assert.equal(typeof peek.card.person.connectedOn, 'number');
+    const connected = new Date(peek.card.person.connectedOn);
+    assert.deepEqual([connected.getFullYear(), connected.getMonth(), connected.getDate()], [2020, 5, 1]);
     assert.equal(peek.card.quote, undefined, 'a peek still carries no receipt');
     assert.equal(peek.card.lastMeetingDaysAgo, 300);
 
@@ -207,6 +217,28 @@ test('a declined invite is not a meeting either', () => {
     attendees: [{ email: 'declined@example.com', response: 'declined' }, { email: 'owner@example.com' }],
   });
   assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingDaysAgo, null);
+});
+
+test('personFacts: the csv date becomes an epoch, and anything unreadable becomes null', () => {
+  const parsed = personFacts(JSON.stringify({
+    position: 'Partner', company: 'Sequoia', industry: 'Venture Capital',
+    connected_on: '01 Jun 2020', url: 'https://www.linkedin.com/in/partner',
+    email: 'partner@example.com',
+  }));
+  assert.equal(typeof parsed.connectedOn, 'number');
+  assert.equal(Object.hasOwn(parsed, 'email'), false, 'the card needs who they are, not how to reach them');
+
+  // A row whose "Connected On" column the connector could not read either:
+  // null, never NaN and never the raw string.
+  assert.equal(personFacts(JSON.stringify({ position: 'P', connected_on: 'sometime in 2020' })).connectedOn, null);
+  assert.equal(personFacts(JSON.stringify({ position: 'P' })).connectedOn, null);
+
+  // Absent, empty, and unparseable LinkedIn all answer the same full shape.
+  const empty = { title: null, company: null, industry: null, connectedOn: null, url: null };
+  assert.deepEqual(personFacts(null), empty);
+  assert.deepEqual(personFacts(''), empty);
+  assert.deepEqual(personFacts('{not json'), empty);
+  assert.deepEqual(personFacts(JSON.stringify({ position: '   ' })), empty, 'a blank column is not a title');
 });
 
 test('changedForCard counts its sources and drops a change with nothing to say', () => {
