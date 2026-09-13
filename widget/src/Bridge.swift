@@ -995,6 +995,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           "apps": outcome.apps,
           "failures": outcome.failures,
           "dataKept": outcome.dataKept,
+          "readerRestarted": outcome.readerRestarted,
         ])
         // A HALF-UNINSTALL STAYS ON SCREEN. Quitting on a failure takes the
         // window away along with the only account of what did not happen —
@@ -2096,12 +2097,30 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // https only, linkedin.com or www.linkedin.com only, and a /in/ path
       // only: that is the shape graph.mjs stores, and anything else is either a
       // corrupted row or a page asking for something it was not given.
-      let asked = String((payload["url"] as? String ?? "").prefix(300))
-      guard let profile = URL(string: asked), profile.scheme == "https",
-            let host = profile.host?.lowercased(),
+      // LENGTH IS A REFUSAL, NOT A TRIM. ~~prefix(300)~~ truncated before
+      // parsing, so an over-long row opened a silently different path.
+      let asked = payload["url"] as? String ?? ""
+      guard asked.count <= 300,
+            let parsed = URL(string: asked), parsed.scheme == "https",
+            let host = parsed.host?.lowercased(),
             host == "linkedin.com" || host == "www.linkedin.com",
-            profile.path.hasPrefix("/in/")
+            parsed.path.hasPrefix("/in/"),
+            var rebuilt = URLComponents(url: parsed, resolvingAgainstBaseURL: false)
       else {
+        reply(webView, id, ["state": "error", "error": "not a linkedin profile"])
+        return
+      }
+      // REBUILT FROM ITS PARTS, not opened as written. The export row carries a
+      // ?trk= tracking parameter, which is this app handing LinkedIn a referrer
+      // for a click the owner made privately — and rebuilding also removes the
+      // whole class of disagreement between Foundation's parser and the
+      // browser's about exotic inputs. Scheme, host, path; nothing else.
+      rebuilt.query = nil
+      rebuilt.fragment = nil
+      rebuilt.user = nil
+      rebuilt.password = nil
+      rebuilt.port = nil
+      guard let profile = rebuilt.url else {
         reply(webView, id, ["state": "error", "error": "not a linkedin profile"])
         return
       }

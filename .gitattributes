@@ -1,0 +1,16 @@
+# A SOURCE FILE WITH A NUL IN IT IS STILL A SOURCE FILE.
+#
+# connectors/lib/linkedinRows.mjs carries a literal NUL — the separator in
+# sha8's `parts.join('\0')` — so git classified the whole file as binary and
+# rendered every diff of it as "Binary files differ". A change to its date
+# parser went through a review round invisible to the reviewer, to GitHub and
+# to `git diff`, which is the kind of gap nobody notices until it has already
+# cost something.
+#
+# Declared for the tree rather than fixed at the call site: the separator is
+# load-bearing (a NUL cannot appear in the fields being joined, which is why it
+# was chosen), and the next file to embed one should not have to rediscover
+# this.
+*.mjs diff
+*.js diff
+*.swift diff

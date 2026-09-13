@@ -141,6 +141,9 @@ enum Uninstall {
     var apps: [String] = []
     var failures: [String] = []
     var dataKept: String = Uninstall.dataHome
+    /// Whether the reader came back up after a partial failure. Only the
+    /// restart can answer that, and only on the path where one was attempted.
+    var readerRestarted = false
   }
 
   /// Do it. Returns what happened rather than logging it and hoping: the page
@@ -153,6 +156,11 @@ enum Uninstall {
   /// screen saying why. `progress` is called as each step lands so the row the
   /// owner pressed can narrate it.
   static func run(progress: @escaping (String) -> Void = { _ in }) -> Outcome {
+    // SAID OUT LOUD, because the alternative is a deadlock rather than a bug:
+    // this function blocks, and it hops to main for every mutation of the
+    // main-confined Connectors. Called ON main, that first hop would wait for a
+    // thread that is already inside this call.
+    dispatchPrecondition(condition: .notOnQueue(.main))
     var out = Outcome()
 
     // 1. THE READER FIRST, AND ALL THE WAY DOWN. It is this app's own child,
@@ -171,13 +179,24 @@ enum Uninstall {
     //    thing this function exists to prevent, so it is CHECKED rather than
     //    fired and hoped for.
     let labels = agentLabels().sorted()
+    // ONE ENUMERATION, NOT ONE PER LABEL. loadedLabels() lists every launchd
+    // job on the Mac and drains the pipe; calling it inside the loop was five
+    // full enumerations for five agents, on the path whose whole point is not
+    // to block. Taken once here, and refreshed only for a label whose bootout
+    // did not return cleanly — which is the only case where the before-picture
+    // is not enough.
+    var loaded = Set(loadedLabels())
     for (index, label) in labels.enumerated() {
       progress("stopping \(label) (\(index + 1) of \(labels.count))…")
       let status = bootout(label)
       // A job that was not loaded is not a failure: `bootout` answers non-zero
       // for "no such process" too, and the plist is what brings it back at
       // login. Ask launchd what is true now instead of reading the code.
-      let stillLoaded = loadedLabels().contains(label)
+      var stillLoaded = false
+      if status != 0, loaded.contains(label) {
+        loaded = Set(loadedLabels())
+        stillLoaded = loaded.contains(label)
+      }
       if stillLoaded {
         out.failures.append("\(label) is still running (launchctl bootout said \(status))")
         continue
@@ -204,7 +223,14 @@ enum Uninstall {
           out.apps.append(path)
           NSLog("Intaglio Labs: uninstall removed \(path)")
         } catch {
+          // STOP AT THE FIRST ONE. appBundles() puts the RUNNING bundle last on
+          // purpose, so carrying on after a failure deletes the live app after
+          // something else has already refused to go — an app that has removed
+          // itself while the owner is still looking at it, with its reader
+          // unable to restart because the backend went with the bundle.
           out.failures.append("could not delete \(path): \(error.localizedDescription)")
+          out.failures.append("nothing after it was deleted, including the app you are using")
+          break
         }
       }
     } else {
@@ -216,8 +242,15 @@ enum Uninstall {
     // its latch set — a state in which "start it" reports success for ever and
     // nothing reads. Whatever else is half-done, this much is put back.
     if !out.failures.isEmpty {
-      Connectors.shared.allowRestart()
-      Connectors.shared.start(bypassingThrottle: true)
+      // Back through main, because this class is main-confined (see
+      // stopAndWait) — and the restart's OWN ANSWER is what the row is allowed
+      // to claim. `start()` returns .missingRuntime when the bundle it would
+      // run from is gone, and the page used to print "the app is still running
+      // and still reading" unconditionally on this path.
+      DispatchQueue.main.sync {
+        Connectors.shared.allowRestart()
+        out.readerRestarted = Connectors.shared.start(bypassingThrottle: true).isUp
+      }
     }
     return out
   }

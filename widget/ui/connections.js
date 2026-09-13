@@ -426,6 +426,9 @@ const START_REFUSED = {
   modelMaintenance: 'it is paused while a local model finishes downloading.',
   missingRuntime: 'the local runtime is missing — this install needs repairing.',
   missingConfig: 'there is nothing set up for it to read yet. finish setup first.',
+  // The reply itself did not land, or landed saying the settings write failed.
+  // Whatever is or is not running, nothing here was configured.
+  config: 'i could not write down what it should read. nothing changed.',
   unknown: 'it did not start, and did not say why.',
 };
 
@@ -438,8 +441,11 @@ const START_REFUSED = {
 const ENGINE_LABEL = 'use your claude subscription for reading and drafting';
 const ENGINE_PRIVACY = "when this is on, excerpts of your messages go to anthropic's servers "
   + 'to be read. when it is off, nothing leaves this Mac.';
-const ENGINE_TIMING = 'turning it off applies to the next person it reads about — one already '
-  + 'being written finishes with what it started.';
+// NEUTRAL ABOUT THE DIRECTION, because the row shows it after a press either
+// way — and it was written about turning the switch OFF, so turning it on
+// printed an off-specific sentence about what had just been turned on.
+const ENGINE_TIMING = 'this applies to the next person it reads about — one already being '
+  + 'written finishes with what it started.';
 // What a probe that is not `ok` means, in the same voice as the rest of this
 // panel. NEVER a raw error string: see onboarding's statusCell for the same
 // rule, and the review item that asked for it.
@@ -516,7 +522,7 @@ function engineRow(configPromise) {
   again.type = 'button';
   again.className = 'setting-btn';
   again.textContent = 'check again';
-  again.addEventListener('click', () => { probe(); });
+  again.addEventListener('click', () => { probe({ manual: true }); });
 
   // THE SWITCH IS OFFERED ONLY WHEN THE PROBE WORKED. "you have it" and "it
   // works" are different questions, and only the second one may put a switch on
@@ -556,16 +562,20 @@ function engineRow(configPromise) {
   // to notice and press. Bounded, because a probe that is busy for ever is a
   // different bug and a page that retries for ever hides it.
   let busyRetries = 0;
-  function probe() {
+  // `manual` is a press, and a press starts the budget again. Without that the
+  // three retries were spent once per panel session and every later press
+  // parked on the busy pill for good — the exact state the retry was added to
+  // get out of. Any answer that is not `busy` resets it too.
+  function probe({ manual = false } = {}) {
+    if (manual) busyRetries = 0;
     state.textContent = 'checking…';
     control.replaceChildren();
     hzPost('engineProbe')
       .then((out) => {
+        if (out?.state !== 'busy') busyRetries = 0;
         if (out?.state === 'busy' && busyRetries < 3) {
           busyRetries += 1;
           setTimeout(probe, 2000);
-          paint(out);
-          return;
         }
         paint(out);
       })
@@ -737,6 +747,14 @@ function performanceRow(selected) {
 // not call a connector "active" just because its daemon is running: only model
 // bytes in flight and app-owned indexing/distillation phases appear here.
 function activityRow() {
+  // WHAT THE LAST PRESS OF "start it" ANSWERED, held here rather than in a node.
+  //
+  // paint() below begins by emptying the list and runs on a two-second
+  // interval, so a refusal written straight into the row was gone within two
+  // seconds of the press — taking the entire reason the start outcome is
+  // reported at all. Held in the closure, read on every repaint, cleared by a
+  // fresh press or by the reader actually coming up.
+  let startNote = null;
   const el = document.createElement('div');
   el.className = 'setting setting-col activity-setting';
   const head = document.createElement('div');
@@ -782,9 +800,11 @@ function activityRow() {
       const idle = document.createElement('span');
       idle.className = 'activity-idle';
       const reading = data && data.reading;
-      idle.textContent = reading === false
-        ? 'nothing is running.'
-        : 'nothing to do right now — everything it can see is read.';
+      if (reading !== false) startNote = null; // it came up; the refusal is history
+      idle.textContent = startNote
+        || (reading === false
+          ? 'nothing is running.'
+          : 'nothing to do right now — everything it can see is read.');
       list.appendChild(idle);
       if (reading === false) {
         // The same idempotent call onboarding's banner offers, and the same
@@ -796,6 +816,7 @@ function activityRow() {
         start.textContent = 'start it';
         start.addEventListener('click', async () => {
           start.disabled = true;
+          startNote = null;
           idle.textContent = 'starting…';
           const out = await hzPost('startSources').catch(() => null);
           start.disabled = false;
@@ -803,13 +824,20 @@ function activityRow() {
           // reader actually came up and, when it did not, which of the six
           // guards refused — two of which are states this button used to sit
           // in for ever, saying "starting…" and meaning nothing.
-          if (out?.reading === true) {
-            idle.textContent = out.why === 'queued'
-              ? 'starting…'
-              : 'reading now.';
-            return;
+          //
+          // STATE FIRST. `reading` rides on a reply whose `state` can be
+          // "error": the config write failed and the daemon happened to be up
+          // already, which is not a reader anybody configured. Trusting
+          // `reading` alone said "reading now." about a configuration that was
+          // never written.
+          if (landed(out) && out.reading === true) {
+            startNote = out.why === 'queued' ? 'starting…' : 'reading now.';
+          } else if (!landed(out)) {
+            startNote = START_REFUSED.config;
+          } else {
+            startNote = START_REFUSED[out?.why] || START_REFUSED.unknown;
           }
-          idle.textContent = START_REFUSED[out?.why] || START_REFUSED.unknown;
+          idle.textContent = startNote;
           fitConnections();
         });
         list.appendChild(start);
@@ -1023,8 +1051,14 @@ async function renderSettings() {
         const failures = Array.isArray(out.failures) ? out.failures : [];
         const gone = Array.isArray(out.services) ? out.services.length : 0;
         const removed = gone > 0 ? `${gone} service${gone === 1 ? '' : 's'} were removed. ` : '';
-        say(`${removed}this was left: ${failures.join('; ')}. `
-          + 'the app is still running and still reading.');
+        // WHAT THE RESTART ACTUALLY ANSWERED. This used to assert "still
+        // running and still reading" on every partial — including the one
+        // where the app had just deleted its own bundle, so the reader had
+        // nothing left to run and start() said so.
+        const still = out.readerRestarted === true
+          ? 'the app is still running and still reading.'
+          : 'the app is still running, but the reader did not come back — quit and reopen it.';
+        say(`${removed}this was left: ${failures.join('; ')}. ${still}`);
         return;
       }
       if (!landed(out)) {

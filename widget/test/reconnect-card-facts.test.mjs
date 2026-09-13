@@ -38,8 +38,7 @@ function lift(names) {
   // The module constants those functions read. Lifted with them rather than
   // restated here: a copy of MONTHS in the test is a second source of truth
   // that can drift silently past the thing it is testing.
-  for (const decl of [/const MONTHS = \[[\s\S]*?\];/u, /const asText = [^\n]*;/u,
-    /const TEMPLATE_TIE =\s*\n[^\n]*;/u]) {
+  for (const decl of [/const asText = [^\n]*;/u, /const TEMPLATE_TIE =\s*\n[^\n]*;/u]) {
     const found = decl.exec(src)?.[0];
     assert.ok(found, `a constant the lifted functions read was not found: ${decl}`);
     parts.unshift(found);
@@ -82,16 +81,21 @@ test('a gap is said the way a person would say it', () => {
   assert.equal(fns.whenPhrase(NOW - 634 * DAY, NOW), '21 months ago');
 });
 
-test('a timestamp becomes a month this year and a distance before that', () => {
+test('a timestamp is a distance, in the same unit the trigger uses', () => {
   assert.equal(fns.whenPhrase(NOW, NOW), 'today');
   assert.equal(fns.whenPhrase(NOW - DAY, NOW), 'yesterday');
   assert.equal(fns.whenPhrase(NOW - 5 * DAY, NOW), '5 days ago');
   assert.equal(fns.whenPhrase(NOW - 21 * DAY, NOW), '3 weeks ago');
-  // Inside this calendar year: a month name can be placed.
-  assert.equal(fns.whenPhrase(Date.parse('2026-03-04T09:00:00Z'), NOW), 'in march');
-  // Across the boundary it cannot, so it becomes a distance.
+  // ~~a month NAME for any date inside the current calendar year~~. It read
+  // well on its own and it broke the one thing this card keeps being reviewed
+  // for: a December card for somebody last seen in February said "quiet 10
+  // months" on one line and "you last spoke in february" on the next — one span
+  // in two units, again. One unit, everywhere.
+  assert.equal(fns.whenPhrase(Date.parse('2026-03-04T09:00:00Z'), NOW), '6 months ago');
   assert.equal(fns.whenPhrase(Date.parse('2025-12-20T09:00:00Z'), NOW), '9 months ago');
   assert.equal(fns.whenPhrase(Date.parse('2023-09-01T09:00:00Z'), NOW), '3 years ago');
+  // The same span, said the same way by both formatters, which is the point.
+  assert.equal(fns.quietPhrase(300), fns.whenPhrase(NOW - 300 * DAY, NOW).replace(' ago', ''));
 });
 
 test('a missing or impossible timestamp prints nothing at all', () => {
@@ -193,8 +197,20 @@ test('each number has one home on the card', () => {
     fns.historyLine({ lastMeetingAt: twoYears, lastMeetingDaysAgo: 3, evidence: { meetings: 1, messages: 0 } }, NOW),
     /met 1×, last 2 years ago/u,
     'the instant wins over the day count it was derived from');
-  // The day count stays readable for one release, for a card built before the
-  // instant was on the wire.
+  // THE EVIDENCE ARM IS GONE. cardFacts.mjs stopped consulting the produce-time
+  // day count "at all, not even as a fallback", and sends lastMeetingDaysAgo:
+  // null when its live query finds nothing — and `??` falls through on exactly
+  // that null, straight back to the stale number the server had just refused to
+  // use. A name-keyed calendar card carries `quiet` from its own scan, so a
+  // card produced three weeks ago rendered a three-week-fresh meeting date.
+  assert.equal(
+    fns.historyLine({ lastMeetingDaysAgo: null, evidence: { meetings: 2, messages: 0, lastMeetingDaysAgo: 200 } }, NOW),
+    'met 2×', 'a null from the server is an answer, not a reason to read the snapshot');
+  assert.equal(
+    fns.historyLine({ evidence: { meetings: 2, messages: 0, lastMeetingDaysAgo: 200 } }, NOW),
+    'met 2×', 'and the evidence value is never consulted on its own either');
+  // The top-level day count stays readable for one release, for a card built
+  // before the instant was on the wire.
   assert.match(fns.historyLine({ lastMeetingDaysAgo: 700, evidence: { meetings: 1, messages: 0 } }, NOW),
     /met 1×, last \d+ (months|years) ago/u);
   for (const bad of [null, undefined, 'never', 0]) {

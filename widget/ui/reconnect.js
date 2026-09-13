@@ -203,14 +203,8 @@ function monthsOrYears(days) {
   return `${years} year${years === 1 ? '' : 's'}`;
 }
 
-const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june',
-  'july', 'august', 'september', 'october', 'november', 'december'];
-
-// WHEN SOMETHING HAPPENED, said the way it would be said out loud. Two shapes,
-// and the rule for which is about what the owner can PLACE: a date inside this
-// calendar year has a month name they can locate ("in March"), and anything
-// older is a distance ("8 months ago") because naming a month across a year
-// boundary reads as this year's.
+// WHEN SOMETHING HAPPENED, as a distance — "3 weeks ago", "10 months ago" —
+// which is the same unit the trigger line uses for the same span.
 //
 // Returns null for anything that is not a usable timestamp — a null column, a
 // zero, a string. A card must never print "Invalid Date" or "NaN months ago",
@@ -223,12 +217,15 @@ function whenPhrase(ms, now = Date.now()) {
   if (days === 1) return 'yesterday';
   if (days < 14) return `${days} days ago`;
   if (days < 60) return `${Math.round(days / 7)} weeks ago`;
-  const then = new Date(t);
-  if (then.getFullYear() === new Date(now).getFullYear()) return `in ${MONTHS[then.getMonth()]}`;
-  // THE SAME RULE AS quietPhrase ABOVE, and that is the point: a trigger line
-  // reading "quiet 21 months" over a history row reading "met 1×, last 2 years
-  // ago" is one span in two units, which is the defect this card keeps being
-  // reviewed for. One function decides where months become years.
+  // ~~a month NAME for any date inside the current calendar year~~. It read
+  // well on its own and it broke the one thing this card keeps being reviewed
+  // for: a December card for somebody last seen in February said "quiet 10
+  // months" on one line and "you last spoke in february" on the next. One span,
+  // two units, again — and the month name was reached BEFORE the shared rule,
+  // so the two formatters could not agree even in principle.
+  //
+  // One function decides where months become years, and everything on this card
+  // goes through it.
   return `${monthsOrYears(days)} ago`;
 }
 
@@ -340,7 +337,15 @@ function historyLine(c, now = Date.now()) {
   // obvious spelling turns "this corpus cannot say when you last met" into "you
   // met today". cardFacts.mjs carries the same warning on its own side.
   const metAt = personField(c, 'lastMeetingAt');
-  const metDays = personField(c, 'lastMeetingDaysAgo') ?? ev.lastMeetingDaysAgo;
+  // ~~`?? ev.lastMeetingDaysAgo`~~ — and `??` falling through was the whole bug:
+  // cardFacts.mjs stopped consulting the produce-time count "at all, not even
+  // as a fallback" and sends `lastMeetingDaysAgo: null` when its live query
+  // finds nothing, so the page read that null as "no answer" and went straight
+  // back to the stale number the server had just refused to use. A name-keyed
+  // calendar card carries its own `quiet` in evidence, so a card produced three
+  // weeks ago dated the meeting three weeks late — the exact drift `lastMeetingAt`
+  // was added to remove.
+  const metDays = personField(c, 'lastMeetingDaysAgo');
   const metWhen = typeof metAt === 'number' && Number.isFinite(metAt) && metAt > 0
     ? whenPhrase(metAt, now)
     : typeof metDays === 'number' && Number.isFinite(metDays) && metDays >= 0

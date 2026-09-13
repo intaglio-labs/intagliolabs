@@ -344,22 +344,26 @@ enum Permissions {
   /// on the second screen of a consumer flow for every owner who has no such
   /// problem, which is nearly all of them.
   ///
-  /// So it is a probe now. It returns the PREVIOUS identifier only when this
-  /// process cannot read AND the old install is STILL ON THIS MAC — because the
-  /// sentence it produces tells the owner they will see two rows in a System
-  /// Settings list, and a row is only there for software that is still there.
+  /// So it is a probe now: the PREVIOUS identifier, when this process cannot
+  /// read AND this Mac carries any mark of an install from before the rename.
   ///
-  /// ~~A value under the old defaults domain counted as evidence.~~ It does
-  /// not: DefaultsMigration.runIfNeeded copies and never deletes, so the old
-  /// domain keeps HazlieOnboarded and friends for ever. An owner who ran the
-  /// old build once and deleted it would have been sent hunting for a second
-  /// row that does not exist — on the screen this probe was added to de-clutter.
+  /// NEITHER DIRECTION IS PROVABLE FROM HERE, and two rounds of review pushed
+  /// this the two opposite ways before that was said out loud:
+  ///   - a leftover defaults domain outlives the app that wrote it
+  ///     (DefaultsMigration copies and never deletes), so it is not proof the
+  ///     old grant is still listed;
+  ///   - a TCC row outlives the app that EARNED it — macOS keeps Full Disk
+  ///     Access entries until the owner removes them by hand — so a deleted
+  ///     Hazlie.app is not proof it is gone either.
+  /// Requiring the old install to still be present therefore said nothing on
+  /// the machine the probe was written for; requiring nothing at all promised a
+  /// row that may not be there. The fix is in the SENTENCE, not the evidence:
+  /// the screen now says "if you see a row for an older copy of me…", which is
+  /// true whichever way it fell, and every mark counts again.
   ///
   /// WHY NOT READ TCC.db: it is itself protected by Full Disk Access, so on the
   /// one machine where the answer matters we are the process that cannot read
-  /// it. "The old build is still installed" is the closest legible thing to
-  /// "the old build still holds the grant", and both marks below are artefacts
-  /// only a surviving install has.
+  /// it.
   ///
   /// NOT ON THE POLL PATH: two directory reads and two stats, on the denied-FDA
   /// machine where the permissions screen polls every few seconds. The caller
@@ -370,14 +374,19 @@ enum Permissions {
     let fm = FileManager.default
     let home = fm.homeDirectoryForCurrentUser
 
-    // 1. A pre-rename launch agent. Only the old install writes these, and an
-    //    uninstall of it removes them.
+    // 1. The old defaults domain. UserDefaults is keyed on the bundle id, so
+    //    anything under the old one is an install that ran before the rename.
+    if let old = UserDefaults(suiteName: previous),
+       DefaultsMigration.carried.contains(where: { old.object(forKey: $0) != nil }) {
+      return previous
+    }
+    // 2. A pre-rename launch agent. Only the old install writes these.
     let agents = home.appendingPathComponent("Library/LaunchAgents")
     if let names = try? fm.contentsOfDirectory(atPath: agents.path),
        names.contains(where: { $0.hasPrefix("com.hazlie.") && $0.hasSuffix(".plist") }) {
       return previous
     }
-    // 2. The pre-rename app itself, still installed under its old name.
+    // 3. The pre-rename app itself, still installed under its old name.
     for path in ["\(home.path)/Applications/Hazlie.app", "/Applications/Hazlie.app"]
     where fm.fileExists(atPath: path) {
       return previous

@@ -443,6 +443,11 @@ permsEl.addEventListener('click', async (e) => {
       "macOS didn't show the prompt for that one — you can switch it on in Settings.";
   }
   if (map[which] === 'granted') startedSources();
+  // The grant just moved, so the question the bundle note answers may have a
+  // different answer now. This is the "and after a permission request" half of
+  // the deep check, which was described in two comments and implemented in
+  // neither.
+  recheckBundleNote();
 });
 
 // ~~"granting to: io.intaglio.widget"~~ ON EVERY MAC. A bundle identifier on
@@ -468,8 +473,28 @@ function paintBundleNote(res) {
     permBundle.textContent = '';
     return;
   }
-  permBundle.textContent = `you may see two rows in that list: an older copy of me (${stale}) `
-    + `and this one (${mine}). the switch has to be on for this one.`;
+  // CONDITIONAL, because nothing here can see that list. TCC.db is protected by
+  // the very grant being probed, so this Mac carrying the marks of an older
+  // install is as close as we get — the row may or may not still be listed, and
+  // a sentence that promises two rows to somebody looking at one sends them
+  // hunting. "if you see" is true either way, and useful only in the case the
+  // probe exists for.
+  permBundle.textContent = `if you see a row for an older copy of me (${stale}), that one is not `
+    + `this one — the switch has to be on for ${mine}.`;
+}
+
+// THE ANSWER CAN CHANGE WHILE THE SCREEN IS UP, and this is what asks again.
+// The deep check ran on entry and nowhere else, so the note outlived the thing
+// it described: the owner granted Full Disk Access, the row turned green on the
+// next poll, and the sentence about which switch to use stayed on screen until
+// they left and came back.
+function recheckBundleNote() {
+  hzPost('permissionState', { diagnostic: true })
+    .then((res) => {
+      if (!res) return;
+      paintBundleNote(res);
+    })
+    .catch(() => {});
 }
 
 // LIVE PERMISSION POLLING, which is what makes this feel like it is watching.
@@ -511,6 +536,13 @@ function startPermPolling() {
       // Something turned green since the last look: the reader can suddenly
       // see more, and it only picks that up when it runs.
       if (Object.values(next).includes('granted')) startedSources();
+      // A READ THAT NOW WORKS ENDS THE QUESTION. The whole note is about which
+      // app the switch belongs to; once this one can read, it belongs to this
+      // one, and the sentence is answered rather than merely stale. Cleared
+      // here without a round trip, and re-asked below in case the grant landed
+      // on something else.
+      if (next.fda === 'granted') permBundle.textContent = '';
+      else if (prev.fda !== next.fda) recheckBundleNote();
     }
   }, PERM_POLL_MS);
 }

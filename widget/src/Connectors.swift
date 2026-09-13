@@ -619,8 +619,8 @@ final class Connectors {
     process = nil
   }
 
-  /// Stop it AND WAIT FOR IT TO BE GONE, up to `timeout`, then SIGKILL and wait
-  /// a little longer. Returns whether the child is actually gone.
+  /// Stop it AND WAIT FOR IT TO BE GONE, up to `timeout`. Returns whether the
+  /// child is actually gone; a child that will not stop is reported, not shot.
   ///
   /// WHY THE WAIT EXISTS: the uninstall deletes the app bundle, and the daemon
   /// is running from `Bundle.main/backend/connectors/daemon.mjs`. stop() is
@@ -628,25 +628,49 @@ final class Connectors {
   /// unlinks the tree out from under a graceful shutdown that is still doing
   /// lazy import()s — already-open fds survive an unlink, a module that has not
   /// been loaded yet does not. What is lost is the shutdown's cursor and lock
-  /// flush into ~/.hazlie, which is the one directory an uninstall deliberately
-  /// keeps for a reinstall.
+  /// flush into ~/.hazlie, which is the one directory an uninstall keeps.
   ///
-  /// NEVER ON THE MAIN THREAD: the caller runs this on a background queue.
+  /// CALLED OFF THE MAIN THREAD, AND THIS CLASS IS MAIN-CONFINED. Plain vars,
+  /// no lock and no queue: main.swift hops to main to call start(), Bridge's
+  /// starter carries a dispatchPrecondition, and the child's terminationHandler
+  /// hops to main before it touches `process`. The settings panel polls
+  /// `activity` every two seconds, and that reads `isRunning` — so a write to
+  /// `process` from a background queue is not a stale read, it is a non-atomic
+  /// Optional<Process> read against a concurrent write. Every mutation here
+  /// therefore hops to main; only the waiting happens on the caller's queue.
+  ///
+  /// AND THE HANDLE IS KEPT UNTIL THE CHILD IS PROVEN DEAD. Clearing `process`
+  /// up front means nothing in the app owns that child any more: it cannot be
+  /// re-signalled or reaped, `isRunning` answers false for something that is
+  /// still alive, and the next start() spawns a second daemon onto the same
+  /// SQLite files. ~~kill(pid, SIGKILL)~~ went with it — signalling a pid this
+  /// app may already have stopped owning is a race against pid reuse, and a
+  /// reader that ignores SIGTERM is a thing to report rather than to shoot.
   func stopAndWait(timeout: TimeInterval = 5) -> Bool {
-    let child = process
-    stopping = true
-    process = nil
-    guard let child, child.isRunning else { return true }
+    // Same reason as Uninstall.run's: main.sync from the main queue is a
+    // deadlock, and a precondition says so where a comment would not.
+    dispatchPrecondition(condition: .notOnQueue(.main))
+    var child: Process?
+    DispatchQueue.main.sync {
+      stopping = true
+      child = process
+    }
+    let clear = { [weak self] in
+      DispatchQueue.main.sync {
+        guard let self, self.process === child else { return }
+        self.process = nil
+      }
+    }
+    guard let child, child.isRunning else { clear(); return true }
     child.terminate()
     let deadline = Date().addingTimeInterval(timeout)
     while child.isRunning, Date() < deadline { usleep(100_000) }
-    if child.isRunning {
-      NSLog("Intaglio Labs: the reader did not stop in \(Int(timeout))s; killing it")
-      kill(child.processIdentifier, SIGKILL)
-      let hard = Date().addingTimeInterval(2)
-      while child.isRunning, Date() < hard { usleep(100_000) }
+    guard !child.isRunning else {
+      NSLog("Intaglio Labs: the reader did not stop in \(Int(timeout))s")
+      return false
     }
-    return !child.isRunning
+    clear()
+    return true
   }
 
   /// Let it be started again after a stop() that turned out not to be final.
@@ -657,6 +681,7 @@ final class Connectors {
   /// stop, and without this the reader could never be restarted for the rest of
   /// the session — the "start it" button would report success and do nothing.
   func allowRestart() {
+    dispatchPrecondition(condition: .onQueue(.main))
     stopping = false
   }
 }

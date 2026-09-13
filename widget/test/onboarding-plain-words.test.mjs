@@ -34,17 +34,13 @@ test('the bundle identifier appears only when a probe found a grant elsewhere', 
     'a Mac that can read has no mismatch to report, whatever else is installed');
   assert.match(probe, /DefaultsMigration\.previousBundleID/u,
     'the identifier it names is the one the rename left behind, not a literal');
-  // Marks a SURVIVING install leaves, none of which needs the grant we are
+  // Marks a previous install leaves, none of which needs the grant we are
   // missing: TCC.db is itself protected by the thing being probed.
   assert.match(probe, /com\.hazlie\./u);
   assert.match(probe, /Hazlie\.app/u);
   assert.doesNotMatch(probe, /TCC\.db/u, 'the one file we cannot read is not the source');
-  // THE OLD DEFAULTS DOMAIN IS NOT EVIDENCE. DefaultsMigration copies and never
-  // deletes, so it outlives the install that wrote it — and the sentence this
-  // probe produces promises a second row in a Settings list, which is only
-  // there for software that is still there.
-  assert.doesNotMatch(probe, /UserDefaults\(suiteName: previous\)/u,
-    'a leftover defaults domain is not a surviving grant');
+  // Which marks count, and why the sentence has to be conditional, is pinned in
+  // the test below: neither side of this can be proven from outside TCC.
 
   assert.match(bridge, /if deepCheck,\s*\n\s*let stale = Permissions\.staleGrantBundle/u,
     'the probe runs on the deep check, never on the poll that ticks every few seconds');
@@ -56,6 +52,34 @@ test('the bundle identifier appears only when a probe found a grant elsewhere', 
     'no mismatch, no sentence — and the line is cleared, not left from a prior poll');
   assert.doesNotMatch(code, /granting to:/u,
     'the old unconditional line must not survive anywhere in the page');
+  // AND IT HAS TO BE ABLE TO GO AWAY. The deep check ran on screen entry and
+  // nowhere else, while the only thing that can change its answer — a grant —
+  // happens while the screen is up. The note sat there contradicting a row that
+  // had just turned green.
+  assert.match(js, /function recheckBundleNote\(\)/u);
+  assert.match(js, /hzPost\('permissionState', \{ diagnostic: true \}\)[\s\S]{0,500}paintBundleNote/u,
+    'a permission that changed re-asks the question the note answers');
+  assert.match(js, /next\.fda === 'granted'/u,
+    'and a read that now works clears it without waiting for a round trip');
+});
+
+test('the stale-grant sentence does not promise a row it cannot see', () => {
+  // The probe cannot read TCC.db — that file is protected by the very grant
+  // being probed — so it reasons from what a previous install leaves behind.
+  // Two rounds of review pulled it in opposite directions: a leftover defaults
+  // domain outlives the app that wrote it (so it is not proof the old row is
+  // still there), and a TCC row outlives the app that earned it (so a deleted
+  // Hazlie.app is not proof the row is gone). Both are true, and neither is
+  // knowable from here. What was actually wrong was the SENTENCE, which
+  // asserted two rows in a list this process cannot read.
+  const probe = /static func staleGrantBundle[\s\S]*?\n {2}\}/u.exec(permissions)?.[0] ?? '';
+  assert.match(probe, /UserDefaults\(suiteName: previous\)/u,
+    'every mark of a previous install counts again, because none of them is proof');
+  const paint = /function paintBundleNote\(res\)([\s\S]*?)\n\}/u.exec(js)?.[1] ?? '';
+  assert.match(paint, /if you see/u,
+    'so the sentence is conditional on what the owner is actually looking at');
+  assert.doesNotMatch(paint, /you may see two rows/u,
+    'and it must not promise two rows to somebody who has one');
 });
 
 test('the load table is written for a person, not for whoever built it', () => {

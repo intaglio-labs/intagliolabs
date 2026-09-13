@@ -21,6 +21,7 @@ const read = (p) => readFileSync(join(WIDGET, p), 'utf8');
 const bridge = read('src/Bridge.swift');
 const uninstall = read('src/Uninstall.swift');
 const connections = read('ui/connections.js');
+const connectors = read('src/Connectors.swift');
 const onboardingHtml = read('ui/onboarding.html');
 const palette = read('ui/palette.css');
 
@@ -235,4 +236,117 @@ test('an idle activity row says which kind of idle it is', () => {
   assert.match(paint, /everything it can see is read/u);
   assert.match(paint, /hzPost\('startSources'\)/u,
     'a stopped reader needs the same "start it" the onboarding banner offers');
+});
+
+test('the uninstall never touches the reader from a background queue', () => {
+  // Connectors is MAIN-THREAD-CONFINED: plain vars, no lock, no queue. Every
+  // other caller honours that — main.swift wraps start() in a main hop,
+  // startReadingSources carries a dispatchPrecondition, and the child's
+  // terminationHandler hops to main before touching `process`. The uninstall
+  // runs on a global queue (it must; it blocks), and the settings panel is
+  // polling `activity` every two seconds, which reads isRunning on main. A
+  // non-atomic Optional<Process> read against a concurrent write is a
+  // use-after-free, not a stale value.
+  const stop = /func stopAndWait\(timeout: TimeInterval = 5\) -> Bool \{([\s\S]*?)\n {2}\}/u
+    .exec(connectors)?.[1] ?? '';
+  assert.ok(stop, 'stopAndWait was not found');
+  assert.match(stop, /DispatchQueue\.main\.sync \{\s*\n\s*stopping = true/u,
+    'the mutations hop to main; only the wait blocks on the caller’s queue');
+  // And the handle is kept until the child is PROVEN gone: dropping it early
+  // means nothing can re-signal or reap that process, isRunning lies about it,
+  // and a later start() spawns a second daemon against the same SQLite files.
+  const signal = /DispatchQueue\.main\.sync \{([\s\S]*?)\n {4}\}/u.exec(stop)?.[1] ?? '';
+  assert.match(signal, /stopping = true/u);
+  assert.doesNotMatch(signal, /process = nil/u,
+    'the handle survives the stop signal — it is cleared by the wait, not by the ask');
+  assert.match(stop, /guard !child\.isRunning else \{[\s\S]{0,220}return false/u,
+    'a child that will not go is reported, with its handle still owned');
+  assert.match(stop, /self\.process === child/u,
+    'and cleared only when it is still the child that was waited on');
+  // A raw SIGKILL on a pid we may already have stopped owning is a TOCTOU
+  // against pid recycling. A child that will not stop is reported, not shot.
+  assert.doesNotMatch(stop, /SIGKILL/u, 'an unstoppable child is a failure to report, not a pid to signal');
+  const restore = /if !out\.failures\.isEmpty \{([\s\S]*?)\n {4}\}/u.exec(uninstall)?.[1] ?? '';
+  assert.match(restore, /DispatchQueue\.main\.sync/u, 'and the restart goes back through main too');
+});
+
+test('a failed delete stops the uninstall before it deletes the running app', () => {
+  // appBundles() puts the RUNNING bundle last on purpose. Without a break, a
+  // pre-rename copy that cannot be deleted is recorded as a failure and the
+  // live app is deleted anyway — leaving an app that has removed itself, whose
+  // reader cannot restart because its backend went with the bundle.
+  const loop = /for path in appBundles\(\) \{([\s\S]*?)\n {6}\}/u.exec(uninstall)?.[1] ?? '';
+  assert.ok(loop, 'the delete loop was not found');
+  assert.match(loop, /break/u, 'the loop must stop at the first failure');
+  // And the restart's own answer decides what the row claims, rather than the
+  // row asserting that something is reading.
+  assert.match(uninstall, /var readerRestarted/u);
+  assert.match(uninstall, /out\.readerRestarted = /u,
+    "the restore records what start() actually answered");
+  assert.match(connections, /out\.readerRestarted === true/u,
+    'the page may only say it is still reading when the restart said so');
+});
+
+test('one launchctl enumeration, not one per agent', () => {
+  // loadedLabels() enumerates every job on the Mac and drains the pipe. It was
+  // called once per label, inside the loop, on the path whose whole point is
+  // not to block.
+  const body = /static func run\(progress[\s\S]*?\n {2}\}/u.exec(uninstall)?.[0] ?? '';
+  const firstCall = body.indexOf('loadedLabels()');
+  const loopAt = body.indexOf('for (index, label) in labels.enumerated()');
+  assert.ok(firstCall > -1 && loopAt > -1, 'the enumeration and the loop must both be in run()');
+  assert.ok(firstCall < loopAt,
+    'loadedLabels() must be hoisted above the loop, not spawned once per agent');
+  assert.match(body, /stillLoaded/u, 'what launchd still has loaded is what decides');
+});
+
+test('a profile link is rebuilt from its parts, not forwarded as written', () => {
+  // Comments stripped: the line that removed the truncation says what it
+  // removed, and a pin over prose is not a pin.
+  const verb = (/case "openProfile":([\s\S]*?)\n\n/u.exec(bridge)?.[1] ?? '')
+    .replace(/\/\/[^\n]*/gu, '');
+  assert.ok(verb, 'openProfile was not found');
+  // Scheme, host and path prefix were already pinned. What was not: the export
+  // row's ?trk= tracking parameter rode along to LinkedIn on every click, and
+  // a >300-character row was TRUNCATED BEFORE PARSING, so it opened a silently
+  // different path.
+  assert.match(verb, /URLComponents/u, 'rebuild from components');
+  assert.doesNotMatch(verb, /prefix\(300\)/u, 'a too-long row is refused, never trimmed into a new url');
+  assert.match(verb, /guard asked\.count <= \d+,/u, 'length is a refusal, before parsing');
+  assert.match(verb, /query = nil/u);
+  assert.match(verb, /fragment = nil/u);
+});
+
+test('the start button’s answer survives the next repaint', () => {
+  // The activity row repaints every two seconds and begins by emptying itself.
+  // The refusal was written into a node that repaint destroys, so the whole
+  // StartOutcome change was invisible about two seconds after the press.
+  assert.match(connections, /let startNote = null;/u,
+    'the refusal must live in state the repaint reads');
+  const paint = /if \(!items\.length\) \{([\s\S]*?)\n {4}\} else \{/u.exec(connections)?.[1] ?? '';
+  assert.match(paint, /startNote/u, 'and the repaint must read it');
+  assert.match(connections, /startNote = null;[\s\S]{0,400}hzPost\('startSources'\)/u,
+    'a fresh press clears the last answer before asking again');
+});
+
+test('"reading now" is not claimed for a config that was never written', () => {
+  const handler = /start\.addEventListener\('click'([\s\S]*?)\n {8}\}\);/u.exec(connections)?.[1] ?? '';
+  assert.match(handler, /landed\(out\)/u,
+    'state decides first: a failed config write is not a reading daemon');
+});
+
+test('the busy-probe retry does not exhaust itself for the session', () => {
+  const row = /function engineRow\(configPromise\)([\s\S]*?)\n\}/u.exec(connections)?.[1] ?? '';
+  assert.match(row, /busyRetries = 0;[\s\S]{0,600}state\.textContent = 'checking…'/u,
+    'a manual press starts the budget again');
+  assert.match(row, /if \(out\?\.state !== 'busy'\) busyRetries = 0;/u,
+    'and any real answer resets it');
+});
+
+test('the engine row’s timing line reads correctly in both directions', () => {
+  // ENGINE_TIMING was written about turning it OFF and shown for both.
+  const timing = /const ENGINE_TIMING = ([\s\S]*?);\n/u.exec(connections)?.[1] ?? '';
+  assert.ok(timing, 'ENGINE_TIMING was not found');
+  assert.doesNotMatch(timing, /turning it off/u, 'the same sentence is shown when it is turned on');
+  assert.match(timing, /the next person it reads about/u, 'and it still says what it means');
 });
