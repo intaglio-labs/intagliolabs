@@ -128,8 +128,8 @@ test('settings carries the engine switch, and the same words onboarding used', (
   // back as the real one.
   assert.doesNotMatch(row, /paintSwitch\(out\.engine === 'claude-cli'\)/u,
     'the switch must not read a missing field as off');
-  assert.match(row, /const engine = fromProbe \?\? \(await configPromise\)\?\.engine \?\? null;/u,
-    'the config reply answers when the probe does not');
+  assert.match(row, /const engine = fromProbe \?\? configEngine\(await configPromise\);/u,
+    'the config reply answers when the probe does not, absent key included');
   assert.match(row, /if \(engine !== 'claude-cli' && engine !== 'local'\) \{/u,
     'and with neither able to say, there is no switch at all');
   assert.doesNotMatch(row, /lastError|String\(err/u,
@@ -150,8 +150,15 @@ test('the daily-card row reads the config, and asserts nothing when it cannot', 
   assert.match(row, /Number\.isInteger\(cfg\?\.capPerDay\)/u,
     'a cap that is not a whole number is not a cap');
   assert.match(row, /n === 1 \? 'one card a day'/u, 'and "1 cards a day" never ships');
-  assert.match(row, /cfg\?\.engine === 'claude-cli'/u,
+  assert.match(row, /configEngine\(cfg\) === 'claude-cli' \? 'reading with claude' : 'reading on this Mac'/u,
     'the row says which way the engine is set, for an owner who cannot see the switch');
+  // ABSENT IS NOT UNKNOWN: the route sends `engine: null` for a key that has
+  // never been written, and an absent key IS the loopback model (engines.mjs).
+  // Only a reply that never came is unknown.
+  const engineOf = /function configEngine\(cfg\)([\s\S]*?)\n\}/u.exec(connections)?.[1] ?? '';
+  assert.match(engineOf, /if \(cfg === null \|\| cfg === undefined\) return null;/u);
+  assert.match(engineOf, /return cfg\.engine === 'claude-cli' \? 'claude-cli' : 'local';/u,
+    "every answer but 'claude-cli' means nothing leaves this Mac");
   // A reader that is still starting up must not be reported as a setting.
   assert.match(row, /bits\.length > 0 \? bits\.join\(' · '\) : '—'/u,
     'nothing known must render as nothing known, never as a default');

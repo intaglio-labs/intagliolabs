@@ -291,6 +291,16 @@ function settingRow({ name, note, hint, on, message }) {
 // ONE REQUEST, TWO ROWS. The promise is made once in renderSettings and handed
 // to whoever needs it, so opening settings is one question to the reader and
 // not one per row.
+// WHAT THE CONFIG SAYS THE ENGINE IS, from a reply that arrived. 'claude-cli'
+// is the only value that means anything leaves this Mac; every other answer,
+// INCLUDING the absent key the route sends as null, is the loopback model
+// (engines.mjs' own default). Returns null only for a reply that never came,
+// which is the one state that may not be reported as a setting.
+function configEngine(cfg) {
+  if (cfg === null || cfg === undefined) return null;
+  return cfg.engine === 'claude-cli' ? 'claude-cli' : 'local';
+}
+
 function cardConfigRow(configPromise) {
   const el = document.createElement('div');
   el.className = 'setting';
@@ -323,8 +333,15 @@ function cardConfigRow(configPromise) {
     // The engine in words, because this row is where an owner who cannot see
     // the switch below (no claude on this Mac, or a probe that failed) finds
     // out which way it is set.
-    if (cfg?.engine === 'claude-cli') bits.push('reading with claude');
-    else if (cfg?.engine === 'local') bits.push('reading on this Mac');
+    //
+    // ABSENT IS NOT UNKNOWN. The route answers `engine: null` when the config
+    // key has never been written, and engines.mjs reads an absent key as the
+    // loopback model — so on a fresh install "nothing is set" IS "nothing
+    // leaves this Mac", and rendering it as a shrug would leave the one fact
+    // this row exists to state unstated on exactly the machines that have just
+    // been set up. An answer with no engine key is still an answer; only a
+    // reply that never came is unknown, and that is `cfg` itself being null.
+    if (cfg) bits.push(configEngine(cfg) === 'claude-cli' ? 'reading with claude' : 'reading on this Mac');
     // NOTHING IS ASSERTED WHEN NOTHING ANSWERED. A reader that is still
     // starting up must not be reported as a setting: an em dash says "not
     // known", where a default would say "investor" to somebody on 'any'.
@@ -471,7 +488,7 @@ function engineRow(configPromise) {
       return;
     }
     const fromProbe = typeof out.engine === 'string' ? out.engine : null;
-    const engine = fromProbe ?? (await configPromise)?.engine ?? null;
+    const engine = fromProbe ?? configEngine(await configPromise);
     if (engine !== 'claude-cli' && engine !== 'local') {
       state.textContent = 'claude is here, but i cannot tell how this is set right now.';
       control.replaceChildren(again);
