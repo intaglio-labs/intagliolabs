@@ -30,7 +30,11 @@ test('finishing onboarding closes the scrim and opens the card', () => {
   // onboardingDone BEFORE close: if the window goes first the page can be torn
   // down mid-message and the whole flow reappears on the next launch.
   assert.match(finish, /hzPost\('onboardingDone'\)/u);
-  assert.match(finish, /hzPost\('close'\)[\s\S]*hzPost\('openReconnect'\)/u);
+  // Open paren only: openReconnect grew a payload when the flow learned to
+  // hand the widened "just this once" card to the panel (5491a38), and this
+  // line has been red since — it pins the ORDER of the two messages, which is
+  // what matters, not the argument list of the second.
+  assert.match(finish, /hzPost\('close'\)[\s\S]*hzPost\('openReconnect'/u);
   assert.doesNotMatch(onboarding, /hzPost\('openPeople'\)/u,
     'and the People popup is no longer the destination');
 });

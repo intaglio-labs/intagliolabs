@@ -109,6 +109,19 @@ const EMPTY_REASONS = {
   'claim-gone': 'the commitment behind the queued card is gone, so the card went with it.',
   'claim-rejected': 'the commitment behind the queued card was rejected, so the card went with it.',
   'no-cap-configured': 'no frequency cap is set, so nothing will show. set one first.',
+  // THE ORDINARY FRESH-INSTALL BRANCH, and the one that used to fall through to
+  // the generic line. A card wants somebody whose last activity is at least 180
+  // days old, and the reader walks backwards through the history to find them —
+  // so on a new install there is genuinely nobody YET, which is a different
+  // sentence from "there is nobody".
+  'queue-empty': 'still reading back through your history — nobody has been quiet long enough yet.',
+  'pool-exhausted': 'still reading back through your history — nobody has been quiet long enough yet.',
+  // There are people and there is history; none of them is in the group the
+  // picker is on. The chips are right above this line, which is the remedy.
+  'pool-exhausted-mode': 'nobody quiet in the group you picked yet — try another chip above.',
+  // Not a reason the route sends: the panel's own, for a hermes it could not
+  // reach at all. See pull()'s catch.
+  unreachable: 'i cannot reach the part of me that does the reading. it may still be starting up.',
 };
 const EMPTY_DEFAULT = 'nothing to review — the orb will light up when there is.';
 
@@ -145,17 +158,135 @@ function oweTriggerLine(c) {
   return `OWE · you never answered${days !== null ? ` · ${days}d` : ''}`;
 }
 
+// ONE HOME PER FACT (review finding 17). The trigger line, the tie sentence
+// under the name and the history row all printed messages/quiet/meetings, so a
+// card said "quiet 634 days · 21 msgs" at the top, said it again in the middle
+// and listed it a third time at the bottom — three restatements of two numbers
+// and nothing about the person.
+//
+// The trigger owns WHY NOW, which is the silence and nothing else. History owns
+// the durable counts. Who spoke last belongs to "how you left it", where the
+// question it answers is already written on the label.
 function triggerLine(c) {
   if (c.kind === 'owe') return oweTriggerLine(c);
   const ev = c.evidence ?? {};
-  const nums = [];
-  if (ev.dormancyDays) nums.push(`quiet ${ev.dormancyDays}d`);
-  if (ev.meetings) nums.push(`met ${ev.meetings}×`);
-  if (ev.messages) nums.push(`${ev.messages} msgs`);
   const parts = [];
   if (c.focus) parts.push(`NEED · focus: ${c.focus}`);
-  if (nums.length) parts.push(nums.join(' · '));
+  if (ev.dormancyDays) parts.push(`quiet ${quietPhrase(ev.dormancyDays)}`);
   return parts.join(' · ');
+}
+
+// A NUMBER OF DAYS IS NOT HOW ANYONE HOLDS A GAP. "quiet 634d" is a figure to
+// convert; "quiet nearly 2 years" is the fact it stands for. Under a fortnight
+// the day count IS the natural unit, so it survives there.
+function quietPhrase(days) {
+  const d = Math.max(0, Math.round(Number(days) || 0));
+  if (d < 14) return `${d}d`;
+  if (d < 60) return `${Math.round(d / 7)} weeks`;
+  if (d < 545) {
+    const months = Math.max(1, Math.round(d / 30.4));
+    return months >= 12 ? 'about a year' : `${months} months`;
+  }
+  const years = Math.round(d / 365);
+  return years <= 1 ? 'about a year' : `${years} years`;
+}
+
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december'];
+
+// WHEN SOMETHING HAPPENED, said the way it would be said out loud. Two shapes,
+// and the rule for which is about what the owner can PLACE: a date inside this
+// calendar year has a month name they can locate ("in March"), and anything
+// older is a distance ("8 months ago") because naming a month across a year
+// boundary reads as this year's.
+//
+// Returns null for anything that is not a usable timestamp — a null column, a
+// zero, a string. A card must never print "Invalid Date" or "NaN months ago",
+// and the callers below all drop the whole clause on null rather than guessing.
+function whenPhrase(ms, now = Date.now()) {
+  const t = Number(ms);
+  if (!Number.isFinite(t) || t <= 0 || t > now + 86400000) return null;
+  const days = Math.floor((now - t) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 14) return `${days} days ago`;
+  if (days < 60) return `${Math.round(days / 7)} weeks ago`;
+  const then = new Date(t);
+  if (then.getFullYear() === new Date(now).getFullYear()) return `in ${MONTHS[then.getMonth()]}`;
+  const months = Math.round(days / 30.4);
+  if (months < 18) return `${months} months ago`;
+  const years = Math.round(days / 365);
+  return years <= 1 ? 'a year ago' : `${years} years ago`;
+}
+
+// WHERE THE PERSON'S OWN FACTS LIVE ON THE REPLY. hermes reads them from the
+// `people` row at serve time and puts them under `person`; a card built by an
+// older hermes carries whatever it carries. Reading both shapes costs one
+// function and means a version skew between the app and the reader is a missing
+// line rather than a missing card.
+function personField(c, name) {
+  const value = c?.person?.[name] ?? c?.[name];
+  return value === undefined ? null : value;
+}
+
+const asText = (v) => (typeof v === 'string' ? v.trim() : '');
+
+// "Partner at Sequoia", from the LinkedIn export that has been imported and
+// never shown. The role bucket ("investor", "business") is the fallback, not
+// the headline: it is this app's guess about a category, and a title is the
+// person's own word for what they do.
+function whoLine(c) {
+  const title = asText(personField(c, 'title'));
+  const company = asText(personField(c, 'company'));
+  if (title && company) return `${title} at ${company}`;
+  return title || company || '';
+}
+
+// WHO SPOKE LAST, AND WHEN — the single strongest reconnect signal, and the
+// card omitted it entirely while printing the message count three times. The
+// later of the two sides wins; `lastSeen` answers a Mac that knows there was
+// contact but not which way it went.
+function spokeLastLine(c) {
+  const them = Number(personField(c, 'lastFromThem')) || null;
+  const mine = Number(personField(c, 'lastFromOwner')) || null;
+  if (them || mine) {
+    const theirs = them !== null && (mine === null || them >= mine);
+    const when = whenPhrase(theirs ? them : mine);
+    if (when === null) return '';
+    return theirs ? `they wrote last, ${when}` : `you wrote last, ${when}`;
+  }
+  const seen = whenPhrase(personField(c, 'lastSeen'));
+  return seen === null ? '' : `you last spoke ${seen}`;
+}
+
+// The durable counts, plus when the last meeting actually was. `met 1×` alone
+// invites the next question and has always had the answer beside it:
+// evidence.lastMeetingDaysAgo is computed by the matcher and was dropped on the
+// floor.
+function historyLine(c) {
+  const ev = c.evidence ?? {};
+  const bits = [];
+  if (ev.messages) bits.push(`${ev.messages} message${ev.messages === 1 ? '' : 's'}`);
+  const metDays = personField(c, 'lastMeetingDaysAgo') ?? ev.lastMeetingDaysAgo;
+  const metWhen = Number.isFinite(Number(metDays)) && Number(metDays) >= 0
+    ? whenPhrase(Date.now() - Number(metDays) * 86400000)
+    : null;
+  if (ev.meetings) {
+    bits.push(`met ${ev.meetings}×${metWhen === null ? '' : `, last ${metWhen}`}`);
+  }
+  return bits.join(' · ');
+}
+
+// The newest corroborated public-web change, with how many independent sources
+// stand behind it. The count is the honest part: one url shown alone reads as
+// the only thing that could be said, and this line is the one place the card
+// makes a claim about the world rather than about the owner's own messages.
+function changedLine(c) {
+  const changed = c.changed;
+  const text = asText(changed?.text);
+  if (!text) return '';
+  const sources = Array.isArray(changed?.sources) ? changed.sources.length : 0;
+  return sources > 0 ? `${text} · ${sources} source${sources === 1 ? '' : 's'}` : text;
 }
 
 function render(c) {
@@ -214,21 +345,34 @@ function render(c) {
   el('rcAsksRow').hidden = asks.length === 0;
 
   // `who` replaces the role fact when present -- the two say the same kind
-  // of thing (who this person is), and showing both duplicates it.
-  const role = (who ? '' : [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ')).trim();
+  // of thing (who this person is), and showing both duplicates it. A LinkedIn
+  // title outranks both: "Partner at Sequoia" is what this person calls their
+  // own job, where `role` is this app's bucket for it and `who` is a page's
+  // prose about them.
+  const titled = whoLine(c);
+  const role = titled
+    || (who ? '' : [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ')).trim();
   el('rcRole').textContent = role;
   el('rcRoleRow').hidden = !role;
 
+  // "how you left it" carries two different things and both belong here: the
+  // outstanding claim, when there is one, and who spoke last. The claim is the
+  // specific fact and leads; the timing is the quiet line under it.
   const left = (c.left ?? '').trim();
-  el('rcLeft').textContent = left;
-  el('rcLeftRow').hidden = !left;
-  el('rcLeft').classList.toggle('rc-warn', c.leftTone === 'bad');
-  const ev = c.evidence ?? {};
-  const bits = [];
-  if (ev.messages) bits.push(`${ev.messages} messages`);
-  if (ev.dormancyDays) bits.push(`quiet ${ev.dormancyDays}d`);
-  if (ev.meetings) bits.push(`met ${ev.meetings}×`);
-  el('rcHistory').textContent = bits.join(' · ');
+  const spoke = spokeLastLine(c);
+  el('rcLeft').textContent = left || spoke;
+  el('rcLeft').classList.toggle('rc-warn', Boolean(left) && c.leftTone === 'bad');
+  const leftWhen = el('rcLeftWhen');
+  const under = left && spoke ? spoke : '';
+  leftWhen.textContent = under;
+  leftWhen.hidden = !under;
+  el('rcLeftRow').hidden = !(left || spoke);
+
+  const changed = changedLine(c);
+  el('rcChanged').textContent = changed;
+  el('rcChangedRow').hidden = !changed;
+
+  el('rcHistory').textContent = historyLine(c);
   el('rcFeedback').value = '';
   el('rcActionsError').hidden = true;
   el('rcActionsError').textContent = '';
@@ -343,7 +487,12 @@ async function pull() {
       // climbed past 1), so this can stay unconditional.
       hzPost('relEvent', { snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'opened' }).catch(() => {});
     } else renderEmpty(out);
-  } catch { renderEmpty(); }
+  } catch {
+    // A THROW IS ITS OWN REASON. Every other path here is hermes answering; this
+    // one is hermes not being there, and rendering "nothing to review" for it
+    // told the owner their queue was empty when nothing had been asked.
+    renderEmpty({ reason: 'unreachable' });
+  }
 }
 
 const VERDICT_BUTTON_IDS = ['rcYes', 'rcNo', 'rcMute', 'rcNever', 'rcNotThisKind'];
@@ -353,7 +502,11 @@ function setVerdictButtonsDisabled(disabled) {
 }
 
 async function verdict(event, extra = {}) {
-  if (!card) { console.log('verdict: no card, ignoring click'); return; }
+  // A verdict with no card in hand is a click on a button the empty state left
+  // enabled; there is nothing to record and nothing to say. ~~console.log~~ —
+  // shipped code, and the first thing anyone sees on opening Web Inspector at
+  // a demo.
+  if (!card) return;
   const note = el('rcFeedback').value.trim();
   setVerdictButtonsDisabled(true);
   try {

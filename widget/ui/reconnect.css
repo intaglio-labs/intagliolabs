@@ -83,6 +83,16 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .rc-facts dt { opacity: 0.55; min-width: 92px; flex-shrink: 0; }
 .rc-facts dd { margin: 0; }
 .rc-warn { color: #c96; }
+/* Who spoke last, under an outstanding claim rather than beside it: the claim
+   is a sentence in the person's own words and the timing is a footnote to it.
+   Its own line, quieter, and it collapses to nothing when there is no claim
+   above it (reconnect.js puts the timing in the main slot instead). */
+.rc-left-when { display: block; opacity: 0.6; font-size: 11.5px; margin-top: 2px; }
+.rc-left-when[hidden] { display: none; }
+/* The public-web line. It is the one row making a claim about the world rather
+   than about the owner's own messages, so it reads as quoted rather than
+   stated. */
+#rcChanged { opacity: 0.85; }
 /* The footer is never clipped by design (see the note above), so everything
    in it competes for the window's remaining height against popupCeiling --
    and the drafts block is the one part with unbounded content: two drafts of

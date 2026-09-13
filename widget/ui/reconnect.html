@@ -37,9 +37,21 @@
           <div class="rc-asks-label">asked you for</div>
           <ul class="rc-asks-list" id="rcAsksList"></ul>
         </div>
+        <!-- ONE HOME PER FACT (review finding 17). The trigger line at the top
+             owns WHY NOW (the silence), "how you left it" owns who spoke last
+             and what was outstanding, and "history" owns the durable counts.
+             They used to print the same messages/quiet/meetings three times
+             over, once in the trigger, once in the tie sentence between them
+             and once here. -->
         <dl class="rc-facts">
           <div id="rcRoleRow"><dt>who they are</dt><dd id="rcRole"></dd></div>
-          <div id="rcLeftRow"><dt>how you left it</dt><dd id="rcLeft"></dd></div>
+          <div id="rcLeftRow"><dt>how you left it</dt>
+            <dd><span id="rcLeft"></span><span class="rc-left-when" id="rcLeftWhen" hidden></span></dd></div>
+          <!-- The newest corroborated public-web change about this person.
+               hermes has been resolving it and putting it on the reply the
+               whole time; nothing rendered it. It is the line that makes a
+               card feel like it knows something. -->
+          <div id="rcChangedRow" hidden><dt>changed since</dt><dd id="rcChanged"></dd></div>
           <div><dt>history</dt><dd id="rcHistory"></dd></div>
         </dl>
       </div>
