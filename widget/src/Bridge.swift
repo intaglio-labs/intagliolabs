@@ -569,6 +569,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// the page by widget/test/first-run-waiting.test.mjs so the two cannot drift.
   static let relationshipModes: Set<String> = ["founder", "investor", "any"]
 
+  /// The one-off mode the reconnect panel's NEXT pull should use, handed over by
+  /// onboarding's "just this once" button. Instance state and not UserDefaults:
+  /// see the openReconnect case.
+  private var pendingOneOffMode: String?
+
   /// How many launches a pending mode may survive. The retry exists for a hermes
   /// that is down today; a value it refuses is not going to start being accepted
   /// on the ninth morning, and a pending write with no ceiling is a request this
@@ -837,6 +842,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       delegate?.openPeople()
       reply(webView, id, ["state": "ok"])
     case "openReconnect":
+      // A WIDENING THAT TRAVELS EXACTLY ONE FETCH.
+      //
+      // Onboarding's "show me anyone, just this once" peeks under a one-off mode
+      // and then hands over to this panel, which pulls under the STANDING mode --
+      // the one with nobody in it. The owner pressed a button, the flow finished,
+      // and the panel said "nothing to review" with their own chip lit. So the
+      // mode rides here, is held for the panel's first pull, and is gone.
+      //
+      // In memory, deliberately: it is a hand-off inside one launch, and a
+      // widening that survived a relaunch would be the durable write that button
+      // exists not to make.
+      if let mode = payload["oneOffMode"] as? String, Bridge.relationshipModes.contains(mode) {
+        pendingOneOffMode = mode
+      }
       delegate?.openReconnect()
       reply(webView, id, ["state": "ok"])
     case "widgetSpot":
@@ -1535,7 +1554,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // proxies to hermes -- the page never holds the token, and the card
     // payload crosses as data the page renders with textContent only.
     case "relCard":
-      relHermes("GET", "admin/relationship/card", json: nil) { [weak self] out in
+      // SPENT, NOT READ. See openReconnect: the widening is for the pull that
+      // follows the hand-off and for nothing after it, so taking it here is what
+      // makes "just this once" true.
+      var cardPath = "admin/relationship/card"
+      if let mode = pendingOneOffMode {
+        cardPath += "?mode=\(mode)"
+        pendingOneOffMode = nil
+      }
+      relHermes("GET", cardPath, json: nil) { [weak self] out in
         self?.reply(webView, id, out)
       }
 

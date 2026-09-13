@@ -56,6 +56,18 @@ function adoptServerMode(out) {
   renderModes();
 }
 
+// `oneOff` is the server saying this card was served under a mode the owner did
+// not choose. Cleared on every render, so it can never outlive the card it
+// describes.
+function showOneOff(out) {
+  const line = el('rcOneOff');
+  if (!line) return;
+  const served = MODES.includes(out?.servedMode) ? out.servedMode : null;
+  const show = out?.oneOff === true && served !== null;
+  line.hidden = !show;
+  line.textContent = show ? `shown once from ${served}` : '';
+}
+
 function renderModes() {
   el('rcModeAny').classList.toggle('rc-mode-active', currentMode === 'any');
   el('rcModeFounder').classList.toggle('rc-mode-active', currentMode === 'founder');
@@ -150,6 +162,10 @@ function render(c) {
   card = c;
   el('rcCard').hidden = false;
   el('rcEmpty').hidden = true;
+  // Reset here rather than only where it is set: every path that draws a card
+  // has to clear a line about a different one.
+  const oneOff = el('rcOneOff');
+  if (oneOff) { oneOff.hidden = true; oneOff.textContent = ''; }
 
   // Owe cards are a different ask ("will you reply to this specific thing")
   // than reconnect's ("will you reach out at all"), and carry no mode of
@@ -317,6 +333,11 @@ async function pull() {
     adoptServerMode(out);
     if (out?.card) {
       render(out.card);
+      // SAY WHERE IT CAME FROM. A one-off card was served under a mode the owner
+      // did not pick -- onboarding's "just this once" -- and the chip beside it
+      // is still their own. Without a word here that reads as the picker lying
+      // about the card in hand.
+      showOneOff(out);
       // 'opened' is deduped per snapshot SERVER-side (a re-show of the same
       // pending card used to post another, and openRate = opened/shown
       // climbed past 1), so this can stay unconditional.

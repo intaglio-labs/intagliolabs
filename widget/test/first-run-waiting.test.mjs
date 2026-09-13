@@ -571,3 +571,45 @@ test('a one-off look does not move the card picker', () => {
     /out\?\.oneOff === true\n\s*\? \(MODES\.includes\(out\?\.mode\) \? out\.mode : null\)/u
   );
 });
+
+// ---------------------------------------------- the widened card has to arrive
+
+// LIVE ON RUN FIVE. The owner pressed "show me anyone, just this once", the flow
+// finished — config mode still investor, correctly — and the reconnect panel that
+// opened pulled under the STANDING mode and said "nothing to review" with the
+// investor chip lit. The widening has to travel with the hand-off or it is not a
+// hand-off: the card the owner asked for never reached them.
+test('a card widened just this once survives the hand-off to the panel', () => {
+  const peek = bodyOf(js, 'peekCard');
+  assert.match(peek, /finishedOnOneOff = out\.oneOff === true && typeof out\.servedMode === 'string'/u,
+    'servedMode is what the panel must ask for; `mode` on that reply is the standing pick');
+
+  const fin = bodyOf(js, 'finish');
+  assert.match(fin, /hzPost\('openReconnect', finishedOnOneOff === null/u,
+    'the widening rides the hand-off');
+  assert.match(fin, /\{ oneOffMode: finishedOnOneOff \}/u);
+
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const src = code(bridge);
+  // Held for exactly one pull, and in memory: a widening that survived a
+  // relaunch would be the durable write the button exists not to make.
+  assert.match(src, /private var pendingOneOffMode: String\?/u);
+  assert.doesNotMatch(src, /pendingOneOffMode.*UserDefaults|UserDefaults.*pendingOneOffMode/u);
+  assert.match(src, /if let mode = payload\["oneOffMode"\] as\? String, Bridge\.relationshipModes\.contains\(mode\)/u);
+  assert.match(src, /cardPath \+= "\?mode=\\\(mode\)"\n\s*pendingOneOffMode = nil/u,
+    'spent on the first pull, so "just this once" is true');
+});
+
+test('the panel says a card came from somewhere the owner did not pick', () => {
+  const rc = readFileSync(join(ROOT, 'widget', 'ui', 'reconnect.js'), 'utf8');
+  const show = /function showOneOff\(out\) \{\n([\s\S]*?)\n\}/u.exec(rc)?.[1];
+  assert.ok(show, 'showOneOff not found');
+  assert.match(code(show), /out\?\.oneOff === true/u);
+  assert.match(code(show), /shown once from \$\{served\}/u);
+  // The chip beside it is still the owner's own — adoptServerMode keys on
+  // oneOff — so without this line the picker reads as lying about the card.
+  const render = /function render\(c\) \{\n([\s\S]*?)\n  const isOwe/u.exec(rc)?.[1];
+  assert.ok(render, 'render() not found');
+  assert.match(code(render), /oneOff\.hidden = true/u,
+    'every path that draws a card clears a line about a different one');
+});

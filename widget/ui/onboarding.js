@@ -1464,12 +1464,27 @@ function enterLoad() {
   startLoadPolling();
 }
 
+// THE CARD THE OWNER ASKED FOR IS NOT THE CARD THE PANEL WOULD FETCH.
+//
+// "show me anyone, just this once" peeks under a one-off mode; the flow then
+// finishes and the panel opens and pulls under the STANDING mode, which is the
+// one with nobody in it. Live on run five: the owner pressed the button, the
+// flow completed, and the panel said "nothing to review" with the investor chip
+// lit. The widening has to travel with the hand-off or it is not a hand-off.
+let finishedOnOneOff = null;
+
 function peekCard(out) {
   if (!out) return;
   // Cleared on every answer: this row belongs to one reason, and leaving it up
   // under a different one would offer a remedy for a problem that has moved on.
   hideModeShortfall();
   if (out.card) {
+    // The mode this card was produced under, when it was not the owner's own.
+    // `mode` on a one-off reply is still the standing pick, so servedMode is
+    // what the panel has to ask for to see this card.
+    finishedOnOneOff = out.oneOff === true && typeof out.servedMode === 'string'
+      ? out.servedMode
+      : null;
     // A real card is waiting. The table has done its job; hand over to the
     // panel that actually serves, which is where this whole flow was going.
     stopLoadPolling();
@@ -1544,7 +1559,12 @@ function finish() {
     // survives orderOut, so this second message remains deliverable after
     // close resolves.
     .then(() => hzPost('close'))
-    .then(() => hzPost('openReconnect'))
+    // WITH THE WIDENING, when there was one. Native holds it for exactly one
+    // fetch (Bridge.pendingOneOffMode), so the panel opens on the card the owner
+    // asked for and everything after that is their standing pick again.
+    .then(() => hzPost('openReconnect', finishedOnOneOff === null
+      ? {}
+      : { oneOffMode: finishedOnOneOff }))
     .catch(() => {});
 }
 
