@@ -504,6 +504,13 @@ test('no row can wrap at the width this panel actually is', () => {
     ['quit', pill('quit')],
     ['uninstall', pill('uninstall')],
     ['activity', said('~ 12.5 HRS LEFT')],
+    // THE ROW THAT SHIPPED WRAPPING, because it was never put in this budget.
+    // Live on the run: the label rendered "linke…" and the value was cut. Its
+    // three states are all here now — the sentence each one abbreviates is the
+    // row's hover, which costs the line nothing.
+    ['linkedin', said('export ready · open email')],
+    ['linkedin', said('waiting for your file')],
+    ['linkedin', said('2,970 · 13 sep')],
   ];
   for (const [label, control] of rows) {
     assert.ok(connections.includes(`'${label}'`),
@@ -521,6 +528,34 @@ test('no row can wrap at the width this panel actually is', () => {
   assert.match(rule, /text-overflow: ellipsis;/u);
   assert.match(palette, /\.setting > \.setting-name \{ flex: 1 1 auto; min-width: 0; \}/u,
     'and it takes the room the control does not');
+  // ...EXCEPT WHERE THE NAME IS THE SHORTER OF THE TWO. `min-width: 0` lets the
+  // label shrink before the value does, which on the LinkedIn row produced
+  // "linke…" beside a value that was itself cut: both halves unreadable, and
+  // the label is the half that says which setting this is. A row may opt out,
+  // and then only the value ellipsizes.
+  assert.match(palette, /\.setting > \.setting-name-keep \{ flex: 0 0 auto; \}/u);
+  assert.match(connections, /className = 'setting-name setting-name-keep'/u,
+    'the linkedin row is the one that needs it');
+});
+
+test('the linkedin row is a label and a value, like the daily card row', () => {
+  // The same shape test the daily-card row gets, for the same reason: that row
+  // was unreadable on the panel it ships in, and the answer was one line with
+  // the value shrinking first. This row then shipped breaking the same rule.
+  const row = /function linkedInRow\(\) \{([\s\S]*?)\n\}/u.exec(connections)?.[1] ?? '';
+  assert.ok(row, 'linkedInRow() not found');
+  assert.match(row, /row\.append\(label, said\);/u, 'label left, value right, one line');
+  assert.doesNotMatch(bare(row), /className = 'setting-note'/u,
+    'no paragraph under this label — the sentence is the row title');
+  assert.doesNotMatch(bare(row), /className = 'setting-value/u);
+  assert.doesNotMatch(bare(row), /setting-col/u, 'and it does not stack');
+  // EVERY ABBREVIATION HAS ITS SENTENCE ON THE HOVER. The line is four words
+  // because the panel is 312px; what it means may not be lost with the width.
+  assert.match(row, /row\.title = hover/u);
+  for (const full of ['drop it here', 'open the email']) {
+    assert.ok(connections.includes(full),
+      `"${full}" left the row and must still be somewhere the owner can read it`);
+  }
 });
 
 test('the activity row is the one row that stacks, and it is capped', () => {

@@ -46,6 +46,7 @@ const reconnectJs = read('widget/ui/reconnect.js');
 const reconnectHtml = read('widget/ui/reconnect.html');
 // Loaded by every page, which is where a sentence two surfaces must share lives.
 const bridgeJs = read('widget/ui/bridge.js');
+const widgetJs = read('widget/ui/widget.js');
 
 /// Comments in these files describe the very behaviour being pinned — and, by
 /// house convention, the sentence each one replaced. A naive `includes` finds
@@ -337,10 +338,19 @@ test('the settings row is one line, and the line is the control', () => {
   assert.match(row, /row\.className = 'setting';/u);
   assert.doesNotMatch(code(row), /setting-note|setting-col/u,
     'a line under the name is the one thing this panel does not do any more');
-  assert.match(connectionsJs, /LINKEDIN_WAITING = 'waiting for your file · drop it here'/u);
+  // FOUR WORDS. The panel is 252px of monospace and the longer line was cut at
+  // both ends; settings-exits.test.mjs budgets all three states exactly, and
+  // the sentence each abbreviates is the row's hover.
+  assert.match(connectionsJs, /LINKEDIN_WAITING = 'waiting for your file'/u);
+  assert.match(connectionsJs, /drop it here, or press to choose it/u,
+    'the drop target still has to be advertised somewhere');
   // ...and the installed state is counts and a date, which is all linkedInState
   // will tell a page about that file.
-  assert.match(row, /connections\$\{dated\}/u);
+  // The count and a short date; "connections" and the year are the hover, or
+  // the line is 267px of a 252px row.
+  assert.match(row, /\$\{n\.toLocaleString\(\)\}\$\{dated\}/u);
+  assert.match(row, /month: 'short'/u);
+  assert.match(row, /connections, imported/u, 'and the word is still said, on the hover');
   assert.match(row, /hzPost\('linkedInState'\)/u);
   assert.match(row, /hzPost\('importLinkedIn'\)/u, 'pressing the line opens the picker');
   // Every refusal is a few words on the line and the sentence on the hover,
@@ -527,9 +537,12 @@ test('the held line says what IS happening, not only what is not', () => {
 function liftHoldLine() {
   const constant = /const HZ_HOLD_EXPIRES_MS = [^;]+;/u.exec(bridgeJs)?.[0];
   const builder = /function hzModeHoldLine\([\s\S]*?\n\}/u.exec(bridgeJs)?.[0];
-  assert.ok(constant && builder, 'hzModeHoldLine is no longer liftable from bridge.js');
+  // It reads the marker through the shared helper now, so the helper comes with
+  // it -- which is itself the thing being pinned: one reader, not three.
+  const reader = /function hzExportReadyAt\([\s\S]*?\n\}/u.exec(bridgeJs)?.[0];
+  assert.ok(constant && builder && reader, 'hzModeHoldLine is no longer liftable from bridge.js');
   // eslint-disable-next-line no-new-func
-  return new Function(`${constant}\n${builder}\nreturn hzModeHoldLine;`)();
+  return new Function(`${reader}\n${constant}\n${builder}\nreturn hzModeHoldLine;`)();
 }
 
 test('the sentence ages, and only on a clock that was actually sent', () => {
@@ -582,7 +595,10 @@ test('a hold that has outlived its own promise stops making it', () => {
   // Positive AS WELL AS finite. `Number(null)` is 0, which is finite; the
   // executable test below is what caught that, against a comment here claiming
   // isFinite already handled it.
-  assert.match(builder, /Number\.isFinite\(since\) && since > 0/u);
+  // Through the shared reader, which is where that guard lives now: the same
+  // coercion was wrong in three places and is one function.
+  assert.match(builder, /const since = hzExportReadyAt\(heldSince\);/u);
+  assert.match(builder, /since !== null/u);
   const neverAt = builder.indexOf('never arrived');
   const landsAt = builder.indexOf('lands — showing anyone for now');
   assert.ok(neverAt > -1 && landsAt > neverAt,
@@ -618,14 +634,13 @@ test('nothing in Swift reads the marker file', () => {
 });
 
 test('the gear says which errand its glow is about, and takes it back', () => {
-  const widgetJs = read('widget/ui/widget.js');
   assert.match(widgetJs, /hzPost\('linkedInReady'\)/u);
   assert.match(widgetJs, /your export is ready — open the email/u);
   // A TIMESTAMP IS THE WHOLE CONDITION. exportReadyAt answers null once the
   // export is installed, so the page has no second fact to combine and no way
   // to badge an errand already run.
   const check = /function checkLinkedInReady\(\) \{([\s\S]*?)\n\}/u.exec(widgetJs)?.[1] ?? '';
-  assert.match(check, /Number\.isFinite\(Number\(out\?\.readyTs\)\)/u);
+  assert.match(check, /hzExportReadyAt\(out\?\.readyTs\) !== null/u);
   assert.match(check, /setGearErrand\('linkedin'/u);
   // The glow is shared with the onboarding handoff and each errand raises and
   // drops its own; linkedin-drop-and-watch.test.mjs pins that arrangement.
@@ -635,8 +650,52 @@ test('the gear says which errand its glow is about, and takes it back', () => {
   assert.doesNotMatch(check, /setInterval/u);
 });
 
+// THE SAME COERCION BUG, TWICE MORE.
+//
+// `Number.isFinite(Number(ts))` was written in three places and was wrong in
+// all three: `Number(null)` and `Number('')` are 0, which is finite. The first
+// one told every held owner their export had never arrived; these two told
+// every owner on a fresh install that their export was READY — the settings row
+// and the gear glow both, on a Mac where hermes had answered
+// `linkedinExportReady: null` because no marker exists.
+//
+// It is one helper now, in bridge.js, and it is a function of one value, so the
+// test RUNS it instead of reading it. A rule that looks right and answers wrong
+// is precisely what got through three times.
+function liftReadyAt() {
+  const fn = /function hzExportReadyAt\([\s\S]*?\n\}/u.exec(bridgeJs)?.[0];
+  assert.ok(fn, 'hzExportReadyAt is no longer liftable from bridge.js');
+  // eslint-disable-next-line no-new-func
+  return new Function(`${fn}\nreturn hzExportReadyAt;`)();
+}
+
+test('an absent export-ready marker is absent, not 1970', () => {
+  const readyAt = liftReadyAt();
+  // hermes sends null when there is no marker, which is every fresh install.
+  // These must ALL be "nothing to say", not "ready since the epoch".
+  for (const nothing of [null, undefined, 0, '', NaN, 'soon', -1, false]) {
+    assert.equal(readyAt(nothing), null, `${String(nothing)} must not read as a marker`);
+  }
+  // ...and a real timestamp is kept, unchanged.
+  const ms = Date.UTC(2026, 8, 6);
+  assert.equal(readyAt(ms), ms);
+  assert.equal(readyAt(String(ms)), ms, 'a number over the bridge may arrive as a string');
+});
+
+test('both surfaces read the marker through that one helper', () => {
+  assert.match(connectionsJs, /hzExportReadyAt\(/u);
+  assert.match(widgetJs, /hzExportReadyAt\(/u);
+  // The coercion that caused it may not survive anywhere.
+  for (const [name, page] of [['connections.js', connectionsJs], ['widget.js', widgetJs]]) {
+    assert.doesNotMatch(code(page), /Number\.isFinite\(Number\((?:ts|out\?\.readyTs)\)\)/u,
+      `${name} still coerces the marker itself`);
+  }
+});
+
 test('the settings row rides the fetch the panel already makes', () => {
-  assert.match(connectionsJs, /const LINKEDIN_READY = 'your export is ready — open the email'/u);
+  assert.match(connectionsJs, /const LINKEDIN_READY = 'export ready · open email'/u);
+  assert.match(connectionsJs, /LINKEDIN_READY_FULL = 'your export is ready — open the email/u,
+    'the line is the flag; the sentence it abbreviates is the hover');
   // ONE READER OF THE NOTE ON THIS PAGE. refresh() asks connect for the shelf
   // on every open and every focus, and the timestamp is a field on the row it
   // already has -- a second bridge call would be two readers of one note.
@@ -654,11 +713,11 @@ test('the settings row rides the fetch the panel already makes', () => {
   assert.match(row, /if \(linkedInReadyTs !== null\) \{/u);
   // ...and null is an answer too, or the row keeps saying "open the email"
   // after the owner has.
-  assert.match(connectionsJs, /linkedInReadyTs = Number\.isFinite\(Number\(ts\)\) \? Number\(ts\) : null;/u);
+  assert.match(connectionsJs, /linkedInReadyTs = hzExportReadyAt\(ts\);/u);
   // BUFFERED, so a refresh() that beats renderSettings does not drop the answer
   // on the floor and leave the row saying "waiting for your file" (finding 13).
   assert.match(connectionsJs, /let linkedInReadyTs = null;/u);
-  assert.match(connectionsJs, /let noteLinkedInReady = \(ts\) => \{/u,
+  assert.match(connectionsJs, /let noteLinkedInReady = \(ts\) => \{ linkedInReadyTs = hzExportReadyAt\(ts\); \};/u,
     'the buffer has to exist before the row does, not be installed by it');
 });
 

@@ -373,7 +373,9 @@ test('one glow, two errands, and neither hides the other', () => {
   const check = code(/function checkLinkedInReady\(\) \{([\s\S]*?)\n\}/u.exec(widgetJs)?.[1] ?? '');
   // A null answer is an answer: it takes the errand back. Returning early there
   // is what let the glow outlive the thing it was about.
-  assert.match(check, /setGearErrand\('linkedin', Number\.isFinite\(Number\(out\?\.readyTs\)\)\)/u);
+  assert.match(check, /setGearErrand\('linkedin', hzExportReadyAt\(out\?\.readyTs\) !== null\)/u,
+    'through the shared reader: Number(null) is 0 and finite, and lit this on '
+    + 'every fresh install');
   // ...but a reply that never came is not. A reader still starting up has no
   // opinion about the owner's inbox and must not clear a glow on its silence.
   assert.match(check, /if \(out\?\.state !== 'ok'\) return;/u);

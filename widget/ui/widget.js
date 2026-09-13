@@ -807,7 +807,9 @@ function checkLinkedInReady() {
   hzPost('linkedInReady')
     .then((out) => {
       if (out?.state !== 'ok') return;
-      setGearErrand('linkedin', Number.isFinite(Number(out?.readyTs)));
+      // Through the shared reader: `Number(null)` is 0 and finite, so coercing
+      // here lit this glow on every fresh install. See hzExportReadyAt.
+      setGearErrand('linkedin', hzExportReadyAt(out?.readyTs) !== null);
     })
     .catch(() => {});
 }

@@ -586,18 +586,35 @@ function hzConnectorFeature(set, name) {
 // and names the one surface that can still change it, because the widen button
 // is gone from screen 6 and the chips are in a panel this owner has never been
 // sent to.
+// WHEN LINKEDIN MAILED TO SAY THE ARCHIVE IS READY, or null for "it has not".
+//
+// THE SAME MISTAKE THREE TIMES, which is why it is one function now. Every
+// reader of this field wrote `Number.isFinite(Number(value))`, and every one of
+// them was wrong the same way: `Number(null)` and `Number('')` are 0, and 0 IS
+// finite. hermes sends null whenever there is no marker — which is every fresh
+// install, because the mail connector has not seen the mail — so the settings
+// row said "export ready" and the gear glowed on a Mac where nothing had
+// arrived, and hzModeHoldLine below read the same 0 as 1970 and told held
+// owners their export never came.
+//
+// A marker is a moment in time. Finite is not enough; it has to be a real one.
+function hzExportReadyAt(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const at = Number(value);
+  return Number.isFinite(at) && at > 0 ? at : null;
+}
+
 const HZ_HOLD_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000;
 
 function hzModeHoldLine(mode, heldSince, now = Date.now()) {
   // A CLOCK THAT WAS NOT SENT IS NOT A CLOCK OF ZERO. hermes omits `heldSince`
   // when it cannot read one — its own comment says absence of a claim is not a
-  // claim — and `Number(null)` and `Number('')` are both 0, which is finite,
-  // reads as 1970, and would have told every held owner their export never
-  // arrived. `isFinite` alone was written here with a comment claiming it
-  // handled exactly this; the test that runs the function is what found that it
-  // did not. Positive as well as finite: a timestamp is a real moment.
-  const since = Number(heldSince);
-  if (Number.isFinite(since) && since > 0 && now - since > HZ_HOLD_EXPIRES_MS) {
+  // claim — and the same coercion that caught hzExportReadyAt above caught this
+  // too: 0 is finite, reads as 1970, and would tell every held owner their
+  // export never arrived. One reader for both, so there is one place to get it
+  // right and one test that runs it.
+  const since = hzExportReadyAt(heldSince);
+  if (since !== null && now - since > HZ_HOLD_EXPIRES_MS) {
     return 'your linkedin export never arrived — showing anyone; add it in settings';
   }
   return `${mode} cards start when your linkedin export lands — showing anyone for now`;

@@ -378,7 +378,13 @@ const LINKEDIN_HELP = 'linkedin will not let anything read your connections, so 
   + 'for a copy and hand the file over. tick connections if linkedin offers it; '
   + 'if it is not there, choose the larger archive, which includes them. '
   + 'it is what tells a founder from an investor.';
-const LINKEDIN_WAITING = 'waiting for your file · drop it here';
+// FOUR WORDS, BECAUSE THE ROW IS 252px OF MONOSPACE. ~~"waiting for your file ·
+// drop it here"~~ needed 307px of it, so the value was cut AND the label
+// shrank to "linke…" beside it — both halves unreadable, on the row whose
+// entire job is to say whether the file is here. The drop target did not go
+// anywhere; the sentence that advertises it is the hover now, which costs the
+// line nothing. settings-exits.test.mjs budgets every one of these states.
+const LINKEDIN_WAITING = 'waiting for your file';
 // ...and what the same row says once LinkedIn has mailed to say the archive is
 // downloadable. "waiting for your file" is still true there and no longer
 // useful: the thing being waited for has arrived, in the owner's inbox, and the
@@ -386,7 +392,12 @@ const LINKEDIN_WAITING = 'waiting for your file · drop it here';
 // (connectors/lib/linkedinExport.mjs) and connect's linkedin-export row carries
 // its timestamp — spent the moment an export is installed, so a timestamp
 // reaching this row always means there is still something to do.
-const LINKEDIN_READY = 'your export is ready — open the email';
+// ...and this one needed 313px. ~~"your export is ready — open the email"~~ is
+// the hover; the line is the flag. "open email" rather than "open the email"
+// because the panel's own arithmetic says the article costs 8px it does not
+// have — measured, not guessed.
+const LINKEDIN_READY = 'export ready · open email';
+const LINKEDIN_READY_FULL = 'your export is ready — open the email linkedin sent you.';
 // WHAT WENT WRONG, TWICE OVER: a few words on the line, the whole sentence on
 // the hover. The row may not grow to hold a remedy, and a remedy nobody can
 // read is not one — so the short form says which failure it was and the hover
@@ -425,15 +436,18 @@ let refuseLinkedInDrop = null;
 // to replace, until something refocused the panel. The value is kept here and
 // the row reads it when it is built, whichever of the two arrives first.
 let linkedInReadyTs = null;
-let noteLinkedInReady = (ts) => {
-  linkedInReadyTs = Number.isFinite(Number(ts)) ? Number(ts) : null;
-};
+let noteLinkedInReady = (ts) => { linkedInReadyTs = hzExportReadyAt(ts); };
 
 function linkedInRow() {
   const row = document.createElement('div');
   row.className = 'setting';
   const label = document.createElement('span');
-  label.className = 'setting-name';
+  // THE LABEL DOES NOT SHRINK ON THIS ROW. Every other row here has a name at
+  // least as long as its control, so `min-width: 0` costs them nothing; this
+  // one has the shortest name and the longest value in the panel, and the
+  // default let the name go first -- "linke…" next to a value that was itself
+  // cut. See .setting-name-keep.
+  label.className = 'setting-name setting-name-keep';
   label.textContent = 'linkedin';
   // A BUTTON, NOT A SPAN. It is the control as well as the read-out, and a span
   // would lose the keyboard and the focus ring on the only door into the picker
@@ -463,10 +477,12 @@ function linkedInRow() {
   const paint = () => {
     if (installed) return;
     if (linkedInReadyTs !== null) {
-      say(LINKEDIN_READY, `${LINKEDIN_HELP} press to choose it.`);
+      say(LINKEDIN_READY, `${LINKEDIN_READY_FULL} ${LINKEDIN_HELP}`);
       return;
     }
-    say(LINKEDIN_WAITING, LINKEDIN_HELP);
+    // The drop target lives in the hover now; the line has no room to advertise
+    // it and still say what the row is for.
+    say(LINKEDIN_WAITING, `drop it here, or press to choose it. ${LINKEDIN_HELP}`);
   };
 
   paint();
@@ -479,9 +495,20 @@ function linkedInRow() {
     if (!installed) { paint(); return; }
     const n = Number(out.connections || 0);
     const when = Number(out.modifiedTs);
-    const dated = Number.isFinite(when) ? ` · ${new Date(when).toLocaleDateString()}` : '';
-    say(n > 0 ? `${n.toLocaleString()} connections${dated}` : `an export is here${dated}`,
-      `${LINKEDIN_HELP} press to replace it.`);
+    // A DAY AND A SHORT MONTH. ~~toLocaleDateString()~~ is "13/09/2026", and
+    // "2,970 connections · 13/09/2026" is 267px of a 252px row. The word
+    // "connections" and the year both go to the hover, where the count is
+    // spelled out in full.
+    const short = Number.isFinite(when)
+      ? new Date(when).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+        .toLowerCase()
+      : '';
+    const dated = short ? ` · ${short}` : '';
+    const full = Number.isFinite(when) ? ` on ${new Date(when).toLocaleDateString()}` : '';
+    say(n > 0 ? `${n.toLocaleString()}${dated}` : `an export is here${dated}`,
+      n > 0
+        ? `${n.toLocaleString()} connections, imported${full}. ${LINKEDIN_HELP} press to replace it.`
+        : `an export is here${full}. ${LINKEDIN_HELP} press to replace it.`);
   };
 
   const ask = () => hzPost('linkedInState').then(paintState).catch(() => {});
@@ -491,7 +518,10 @@ function linkedInRow() {
   // email" once the owner has. Writes the module-level buffer, so a later
   // rebuild of this row starts from the same answer.
   noteLinkedInReady = (ts) => {
-    linkedInReadyTs = Number.isFinite(Number(ts)) ? Number(ts) : null;
+    // Through the shared reader: hermes sends null when there is no marker, and
+    // `Number(null)` is 0 and finite -- which painted READY on every fresh
+    // install. See hzExportReadyAt.
+    linkedInReadyTs = hzExportReadyAt(ts);
     paint();
     fitConnections();
   };
