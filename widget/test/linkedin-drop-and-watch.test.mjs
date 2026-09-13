@@ -183,7 +183,7 @@ test('a file still being written does not spend the one offer', () => {
     'and the scan has to re-look on its own, because no directory event is coming');
   // Neither the zero-byte case nor the growing case marks the file offered, so
   // a partial download cannot spend the one offer it gets.
-  const offeredAt = scan.indexOf('Self.offeredKeys = already.union');
+  const offeredAt = scan.indexOf('Self.rememberOffer(key)');
   assert.ok(offeredAt > scan.indexOf('previous.size == size'),
     'nothing may be recorded as offered before it has been found to be still');
 });
@@ -209,9 +209,137 @@ test('an old archive is offered with its date on it', () => {
   // Downloads imports on one press and the connector ingests a year-old graph
   // as current. It cannot be refused outright (an owner restoring a Mac may
   // mean it), so the banner says how old it is and the press is informed.
-  const offer = swiftFunc(watch, 'offer\\(_ url: URL, vintage: Date\\?\\)');
-  assert.match(code(offer), /DateFormatter|formatted\(/u,
+  const offer = swiftFunc(watch, 'offer\\(_ url: URL, vintage: Date\\?, in directory: URL\\)');
+  assert.match(code(offer), /DateFormatter/u,
     'the offer has to be able to say when the file is from');
+  // ...and the panel says it too, not only the banner that may never arrive.
+  assert.match(code(offer), /dated: dated/u);
+});
+
+// -------------------------------------------------- the offer has to be SEEN
+
+// THE ONLY VISIBLE OUTCOME OF "FOUND YOUR EXPORT" WAS NOTHING.
+//
+// Live on the recorded run (a9d5d01): the watcher found three archives in
+// ~/Downloads and wrote all three into HazlieLinkedInOffered -- so offer() ran
+// three times -- and no banner ever appeared, before or after the owner allowed
+// notifications, with nothing from usernotifications in the system log for the
+// bundle. Whatever was wrong there is on the far side of an API this app cannot
+// see into, and that is the point: a feature whose entire output is a system
+// notification has no output at all on a Mac where notifications do not arrive.
+//
+// So the offer is made IN the app, where this code can actually put it on
+// screen, and the notification is a bonus for the Macs that deliver it. The
+// offers are also SPENT either way -- a recorded offer nobody saw is the bug
+// being fixed, so the record has to follow the thing the owner can see.
+test('an export found raises an in-app offer, not only a notification', () => {
+  const offer = /private func offer\(_ url: URL, vintage: Date\?, in directory: URL\) \{([\s\S]*?)\n  \}/u
+    .exec(watch)?.[1] ?? '';
+  assert.ok(offer, 'offer() not found');
+  assert.match(code(offer), /linkedInExportFound/u,
+    'the offer has to reach a surface this app draws itself');
+  assert.match(code(offer), /ModelSetup\.notify/u, 'and the banner stays, for the Macs that show it');
+  // The bridge holds what is being offered, and the panel asks for it.
+  assert.match(bridge, /func linkedInExportFound\(/u);
+  assert.match(bridge, /case "exportOffer":/u);
+  assert.match(bridge, /case "exportDecide":/u);
+  const caps = /"export": \[([\s\S]*?)\],\n/u.exec(bridge)?.[1] ?? '';
+  assert.ok(caps.includes('"exportOffer"') && caps.includes('"exportDecide"'),
+    'the offer panel has a compartment of its own');
+  // ...and it is a narrow one: this page shows one sentence and posts one
+  // verdict. It must not be able to reach the picker or anything else.
+  assert.ok(!caps.includes('"importLinkedIn"'),
+    'the panel answers yes or no; native owns the import');
+});
+
+test('the panel says which file, and where it came from', () => {
+  const html = read('widget/ui/export.html');
+  const js = read('widget/ui/export.js');
+  // The owner has to be able to tell whether this is the archive they were
+  // expecting before they say yes to it -- it is the whole difference between
+  // an offer and an import that happened at them.
+  assert.match(js, /hzPost\('exportOffer'\)/u);
+  // Guarded, then read: an offer that is no longer there closes the panel
+  // rather than drawing a card about nothing.
+  assert.match(js, /typeof out\.name !== 'string' \|\| out\.name === ''/u);
+  assert.match(js, /el\('exFile'\)\.textContent = out\.name/u);
+  assert.match(js, /out\.folder/u, 'Downloads or Desktop -- the owner may have meant only one');
+  assert.match(js, /out\.dated/u, 'and how old it is, which the notification already said');
+  // Two answers, and "not this one" is a real answer that spends the offer.
+  // One verdict verb, and the button decides which answer it carries.
+  assert.match(js, /hzPost\('exportDecide', \{ take \}\)/u);
+  assert.match(js, /addEventListener\('click', \(\) => decide\(true\)\)/u);
+  assert.match(js, /decide\(false\)/u);
+  assert.match(html, /id="exTake"/u);
+  assert.match(html, /id="exSkip"/u);
+  // textContent only, like every other page that renders a name off the disk.
+  assert.doesNotMatch(js, /innerHTML/u);
+  // AND IT HAS TO BE ABLE TO SIZE ITSELF. A panel that posts fitContent and is
+  // not named in main.swift's table gets a silent no-op and stays at its base
+  // height -- the comment above that table records exactly this happening to
+  // the reconnect card. This panel's height is a filename the owner has never
+  // seen before, so it is the last one that can be sized by guess.
+  assert.match(js, /hzPost\('fitContent'/u);
+  assert.match(mainSwift, /\(exportPanel, Self\.exportBase\),/u,
+    'the export panel must be in the fitContent table, not only in the window list');
+});
+
+test('the widget lights up for it too, and puts the light out again', () => {
+  // A panel can be behind something. The gear is always on the desktop, and it
+  // already carries named errands, so this is one more rather than a new idea.
+  assert.match(widgetJs, /__hzExportFound/u);
+  assert.match(widgetJs, /setGearErrand\('export'/u);
+  const found = /window\.__hzExportFound = \(([\s\S]*?)\n\};/u.exec(widgetJs)?.[1] ?? '';
+  assert.match(found, /setGearErrand\('export', /u);
+  assert.match(widgetJs, /\['export', 'found your linkedin export — import it\?'\]/u,
+    'and the hover says which errand the glow is about');
+});
+
+// -------------------------------------------------- the scan has to run again
+
+test('a file that changed without the folder changing is looked at again', () => {
+  // THE BUG, EXACTLY. Touching an archive changes its mtime, which changes its
+  // offer key -- so it SHOULD be offered again. It was not, and the key was
+  // never the problem: a metadata change does not modify the directory's
+  // contents, so the vnode source never fires, so scan() never runs to notice.
+  // Nothing was re-evaluated, so nothing could be re-offered.
+  assert.match(code(watch), /NSApplication\.didBecomeActiveNotification/u,
+    'coming back to the app is a reason to look again');
+  assert.match(code(watch), /private static let sweepSeconds/u);
+  assert.match(code(watch), /60/u, 'and a slow sweep, for the app nobody activates');
+  const sweep = /private func armSweep\(\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
+  assert.ok(sweep, 'armSweep() not found');
+  assert.match(code(sweep), /scan\(\)/u);
+});
+
+test('the offers it remembers are the most recent ones, not an arbitrary 200', () => {
+  // `Set.suffix(200)` takes 200 of an UNORDERED collection: once the list is
+  // full, which of the owner's answers survive a relaunch is whatever the hash
+  // seed decided that day. Kept in order, newest last, and trimmed from the
+  // front.
+  const keys = /private static var offeredKeys: \[String\] \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
+  assert.ok(keys, 'offeredKeys is no longer an ordered list');
+  assert.doesNotMatch(code(keys), /Set\(/u, 'a Set has no newest');
+});
+
+// -------------------------------------------------- 3: asking to notify
+
+test('notification permission is asked for, and the banner waits for the answer', () => {
+  const notify = /static func notify\(title: String, body: String,([\s\S]*?)\n  \}/u
+    .exec(read('widget/src/ModelSetup.swift'))?.[1] ?? '';
+  assert.match(notify, /center\.requestAuthorization/u);
+  // The add is INSIDE the authorization completion, so nothing is posted before
+  // the owner has answered the prompt.
+  const askAt = notify.indexOf('requestAuthorization');
+  const addAt = notify.indexOf('center.add(');
+  assert.ok(askAt > -1 && addAt > askAt, 'the post has to happen after the grant, not beside it');
+  // AND A FAILURE HAS TO LEAVE A TRACE. `withCompletionHandler: nil` swallowed
+  // every reason a notification did not appear, which is precisely the state
+  // this run was in: three offers recorded, no banner, and nothing anywhere
+  // saying why.
+  assert.doesNotMatch(code(notify), /center\.add\(req, withCompletionHandler: nil\)/u,
+    'a notification that fails silently is how "nothing happened" becomes unexplainable');
+  assert.match(code(notify), /NSLog/u);
 });
 
 // -------------------------------------------------- 10: one import at a time

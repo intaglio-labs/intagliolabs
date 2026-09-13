@@ -274,7 +274,7 @@ test('it watches Downloads and Desktop, and takes a denial silently', () => {
 test('it offers, and never imports on its own', () => {
   // A file appearing in Downloads is not consent to read it. Nothing in this
   // file may call the import except in answer to a press.
-  const offer = /private func offer\(_ url: URL, vintage: Date\?\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
+  const offer = /private func offer\(_ url: URL, vintage: Date\?, in directory: URL\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
   assert.match(offer, /ModelSetup\.notify/u, 'the app has one notifier, and this is it');
   assert.doesNotMatch(offer, /importLinkedIn/u);
   const scan = /private func scan\(\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';

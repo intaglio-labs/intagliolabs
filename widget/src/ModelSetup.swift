@@ -153,8 +153,21 @@ enum ModelSetup {
                      category: String? = nil,
                      userInfo: [String: Any] = [:]) {
     let center = UNUserNotificationCenter.current()
-    center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-      guard granted else { return }
+    // ASKED FIRST, POSTED AFTER THE ANSWER. The add is inside this completion,
+    // so nothing reaches the centre before the owner has decided -- and on a Mac
+    // where the answer was given long ago this returns immediately with it, so
+    // the ordering costs a settled install nothing.
+    center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+      guard granted else {
+        // WHY THERE WAS NO BANNER, WRITTEN DOWN SOMEWHERE. A run went out with
+        // three offers recorded and nothing on screen, and there was no way to
+        // tell a refused grant from a failed post from a notification centre
+        // that simply swallowed it. Titles only, never the body: that carries a
+        // filename off the owner's disk.
+        NSLog("Intaglio Labs: notifications not granted "
+              + "(\(error.map { "\($0)" } ?? "declined")) -- \(title) was not shown")
+        return
+      }
       let content = UNMutableNotificationContent()
       content.title = title
       content.body = body
@@ -162,7 +175,13 @@ enum ModelSetup {
       if !userInfo.isEmpty { content.userInfo = userInfo }
       let req = UNNotificationRequest(
         identifier: "hazlie.model.\(UUID().uuidString)", content: content, trigger: nil)
-      center.add(req, withCompletionHandler: nil)
+      // ~~`withCompletionHandler: nil`~~ swallowed every reason a notification
+      // did not appear, which is exactly the state the walked run was in. This
+      // does not make the banner arrive; it makes its absence explicable.
+      center.add(req) { addError in
+        guard let addError else { return }
+        NSLog("Intaglio Labs: notification refused by the centre -- \(title): \(addError)")
+      }
     }
   }
 

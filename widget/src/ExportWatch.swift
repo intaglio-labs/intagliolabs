@@ -85,7 +85,11 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   /// Refused for good — the registry has linkedin off, or an export is already
   /// installed. Different from `watching`, which a later attempt may retry.
   private var finished = false
+  /// The didBecomeActive observer, registered once. See begin().
+  private var activation: NSObjectProtocol?
   private var rescan: DispatchWorkItem?
+  /// The slow sweep, for a change no directory event describes. See armSweep.
+  private var sweep: DispatchWorkItem?
 
   /// The two folders a browser puts a download in. Desktop is here because
   /// Safari's "save to" is per-download and plenty of people keep it there.
@@ -153,6 +157,20 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
       // One look now: the archive may well have landed while the app was not
       // running, or while the owner was in the browser asking for it.
       self.scan()
+      self.armSweep()
+    }
+
+    // AND WHENEVER THE OWNER COMES BACK. They have most likely just been in the
+    // browser downloading the thing this is waiting for, and a file that changed
+    // without the folder changing produces no event at all — see armSweep.
+    // Registered once, with the watcher, and harmless after stop(): scan()
+    // returns immediately with no sources.
+    if activation == nil {
+      activation = NotificationCenter.default.addObserver(
+        forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+      ) { [weak self] _ in
+        self?.queue.async { self?.scan() }
+      }
     }
   }
 
@@ -166,6 +184,8 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
       guard let self else { return }
       self.rescan?.cancel()
       self.rescan = nil
+      self.sweep?.cancel()
+      self.sweep = nil
       // Each source closes its own descriptor in its cancel handler; see
       // watch(). Closing them here as well would close a number the kernel may
       // already have handed to something else.
@@ -207,6 +227,35 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   /// terminates and still re-arms on the next write.
   private static let settleSeconds = 3.0
 
+  /// AND A LOOK THAT DOES NOT WAIT FOR AN EVENT AT ALL.
+  ///
+  /// A directory source fires when the directory's CONTENTS change. Touching a
+  /// file in it does not: the entry is still there under the same name, so the
+  /// vnode is untouched and nothing wakes this class. Live on the recorded run
+  /// — an archive already offered was touched, which changed its mtime and so
+  /// its offer key, and it was never offered again. The key was right; no scan
+  /// ever ran to evaluate it.
+  ///
+  /// So there are two more ways in. Coming back to the app is the moment the
+  /// owner is most likely to have just downloaded something, and a slow sweep
+  /// covers the Mac nobody activates this app on for hours. Neither reads
+  /// anything a directory event would not have.
+  private static let sweepSeconds = 60.0
+
+  private func armSweep() {
+    dispatchPrecondition(condition: .onQueue(queue))
+    sweep?.cancel()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.scan()
+      // Re-armed from the tail rather than a repeating timer, so a scan that
+      // stopped the watcher does not leave a timer firing into a dead object.
+      if !self.sources.isEmpty { self.armSweep() }
+    }
+    sweep = work
+    queue.asyncAfter(deadline: .now() + Self.sweepSeconds, execute: work)
+  }
+
   private func scheduleScan() {
     dispatchPrecondition(condition: .onQueue(queue))
     rescan?.cancel()
@@ -227,12 +276,23 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     "\(url.path)|\(size)|\(at.map { String(Int($0.timeIntervalSince1970)) } ?? "-")"
   }
 
-  private static var offeredKeys: Set<String> {
-    get { Set(UserDefaults.standard.stringArray(forKey: offeredDefaultsKey) ?? []) }
-    // Bounded: this is a list of things the owner has already been asked about,
-    // and it must not become an unbounded defaults entry on a Downloads folder
-    // somebody never tidies.
+  /// AN ORDERED LIST, NEWEST LAST.
+  ///
+  /// ~~A Set, trimmed with `suffix(200)`~~ — `Set.suffix` takes 200 of an
+  /// UNORDERED collection, so once the list filled up, which of the owner's
+  /// answers survived a relaunch was whatever the hash seed decided that day.
+  /// Bounded it must be — a Downloads folder nobody tidies would grow this
+  /// forever — but the thing to drop is the oldest answer, not an arbitrary one.
+  private static var offeredKeys: [String] {
+    get { UserDefaults.standard.stringArray(forKey: offeredDefaultsKey) ?? [] }
     set { UserDefaults.standard.set(Array(newValue.suffix(200)), forKey: offeredDefaultsKey) }
+  }
+
+  private static func rememberOffer(_ key: String) {
+    var keys = offeredKeys
+    guard !keys.contains(key) else { return }
+    keys.append(key)
+    offeredKeys = keys
   }
 
   /// Look again shortly, with no directory event to ride on.
@@ -259,7 +319,7 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     // stop, and this is the check that notices.
     if Bridge.linkedInExportInstalled { stop(); return }
     let fm = FileManager.default
-    let already = Self.offeredKeys
+    let already = Set(Self.offeredKeys)
     for directory in Self.watched {
       guard let names = try? fm.contentsOfDirectory(
         at: directory, includingPropertiesForKeys: [.contentModificationDateKey],
@@ -285,8 +345,8 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
         guard let previous, previous.size == size else { settleAgain(); continue }
         let key = Self.offerKey(found.url, size: size, at: found.at)
         guard !already.contains(key) else { continue }
-        Self.offeredKeys = already.union([key])
-        offer(found.url, vintage: found.at)
+        Self.rememberOffer(key)
+        offer(found.url, vintage: found.at, in: directory)
         // ONE OFFER AT A TIME. Two banners for two files in the same folder is
         // an inbox, not an offer, and the second is nearly always the browser's
         // duplicate download of the first.
@@ -366,19 +426,40 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   ///
   /// Today's download says nothing, because "found your export, from today" is
   /// noise on the one case this is really for.
-  private func offer(_ url: URL, vintage: Date?) {
+  ///
+  /// IN THE APP FIRST, AND THE BANNER SECOND.
+  ///
+  /// ~~This was a UNUserNotification and nothing else.~~ Live on the recorded
+  /// run: three archives found, three offers written into the defaults, and no
+  /// banner ever shown — before or after the owner allowed notifications, with
+  /// nothing from usernotifications in the system log for the bundle. Whatever
+  /// is wrong on that Mac is on the far side of an API this app cannot see
+  /// into, and that is exactly why it cannot be the only output: a feature whose
+  /// entire result is a system notification produces NOTHING on a Mac where
+  /// notifications do not arrive, and the owner has no way to tell that from
+  /// "it never found anything".
+  ///
+  /// So the offer goes to a panel this app draws itself, which is on screen
+  /// because this code put it there, and the notification is a bonus for the
+  /// Macs that deliver one.
+  private func offer(_ url: URL, vintage: Date?, in directory: URL) {
     let dated: String
     if let vintage, !Calendar.current.isDateInToday(vintage) {
       let when = DateFormatter()
       when.dateStyle = .medium
       when.timeStyle = .none
-      dated = ", from \(when.string(from: vintage))"
+      dated = when.string(from: vintage)
     } else {
-      dated = ""
+      dated = "today"
+    }
+    let name = url.lastPathComponent
+    let folder = directory.lastPathComponent
+    DispatchQueue.main.async { [weak self] in
+      self?.bridge?.linkedInExportFound(at: url, name: name, folder: folder, dated: dated)
     }
     ModelSetup.notify(
       title: "found your LinkedIn export",
-      body: "\(url.lastPathComponent)\(dated) — import it?",
+      body: "\(name) in \(folder), \(dated) — import it?",
       category: Self.category,
       userInfo: [Self.pathKey: url.path])
   }

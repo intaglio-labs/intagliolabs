@@ -171,3 +171,26 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
   opacity: 1;
 }
 .rc-refresh:hover { background: rgba(127, 127, 127, 0.25); }
+
+/* ---------------- the export offer (export.html) ----------------
+   The Downloads watcher's "found your export" lives in a panel now, because a
+   system notification was the whole of it once and produced nothing at all on
+   the Mac it was walked on. It borrows this file rather than opening a second
+   one: it is the same shape of thing -- one small card, a fact, a decision --
+   and a second panel style would be a new idea where there is no new idea. */
+.ex-body { flex: 0 0 auto; padding: 2px 0 10px; }
+.ex-lead { margin: 0 0 8px; }
+/* The filename is the thing the owner is being asked to recognise, so it is the
+   line that looks like a filename. It may be long and it may not wrap into the
+   buttons, so it scrolls on its own rather than growing the panel. */
+.ex-file {
+  margin: 0 0 4px;
+  font-family: var(--mono, ui-monospace, Menlo, monospace); font-size: 12px;
+  color: var(--accent-soft, #cea);
+  overflow-x: auto; white-space: nowrap;
+}
+.ex-where { margin: 0; font-size: 12.5px; opacity: 0.7; }
+.ex-note { margin: 8px 0 0; font-size: 12.5px; opacity: 0.7; }
+.ex-note[hidden] { display: none; }
+/* Two buttons, and the one that reads the file is first. */
+.ex-actions { padding-top: 2px; }

@@ -76,6 +76,13 @@ protocol BridgeDelegate: AnyObject {
   /// screen 4 goes on saying "waiting for your file" about a file that is
   /// already installed.
   func linkedInExportChanged()
+  /// The Downloads watcher found an export and is asking about it. Put the offer
+  /// where the owner will meet it: a panel, and the gear's own glow, because a
+  /// panel can be behind something and the widget never is.
+  func linkedInExportOffered(name: String)
+  /// ...and the offer has been answered, either way. Take the glow back and
+  /// close the panel, or the app goes on asking about a decision already made.
+  func linkedInExportOfferClosed()
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -211,6 +218,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // resumes on it rather than snapping back to this year.
     "people-months": ["close", "peopleYear", "peopleFind", "peopleSelf", "peopleRole",
                       "openPeople", "monthsView", "peopleMap", "peopleAvatars"],
+    // The export offer (ExportWatch): one sentence about one file, and one
+    // verdict. It shows a name off the owner's disk and posts yes or no --
+    // deliberately NOT `importLinkedIn`, because the panel does not get to
+    // choose a file. Native holds the one it found and this page answers about
+    // that one or about nothing.
+    "export": ["exportOffer", "exportDecide", "close", "fitContent"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -625,6 +638,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// derived because nothing crosses that boundary at build time — and pinned to
   /// the page by widget/test/first-run-waiting.test.mjs so the two cannot drift.
   static let relationshipModes: Set<String> = ["founder", "investor", "any"]
+
+  /// THE EXPORT THE WATCHER FOUND, waiting on a yes or no.
+  ///
+  /// Instance state and never UserDefaults: an offer is about a file that is in
+  /// a folder right now, and one restored across a relaunch would be a panel
+  /// asking about something that may have been moved, renamed or imported since.
+  /// ExportWatch re-finds whatever is still there on its own.
+  private var pendingExport: (url: URL, name: String, folder: String, dated: String)?
 
   /// The one-off mode the reconnect panel's NEXT pull should use, handed over by
   /// onboarding's "just this once" button. Instance state and not UserDefaults:
@@ -2288,6 +2309,43 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       if openedExport { delegate?.yieldOnboardingToBrowser() }
       reply(webView, id, ["state": openedExport ? "ok" : "error", "opened": openedExport])
 
+    case "exportOffer":
+      // WHAT THE PANEL IS ASKING ABOUT, or that there is nothing to ask about.
+      // A name, the folder it is in and how old it is -- the three things the
+      // owner needs to recognise their own download -- and never the path,
+      // which the page has no use for and no business holding.
+      if let pending = pendingExport {
+        reply(webView, id, ["state": "ok", "name": pending.name,
+                            "folder": pending.folder, "dated": pending.dated])
+      } else {
+        reply(webView, id, ["state": "ok", "name": NSNull()])
+      }
+
+    case "exportDecide":
+      // YES OR NO, ABOUT THE FILE NATIVE FOUND. The page names no file: it
+      // answers about whatever this bridge is holding, so a compromised panel
+      // can accept an offer it was shown and nothing else.
+      //
+      // EITHER ANSWER SPENDS THE OFFER. "not this one" is a real answer -- the
+      // owner has looked at the name and it is not the archive they want -- and
+      // ExportWatch has already written the key, so nothing re-offers it.
+      guard let pending = pendingExport else {
+        reply(webView, id, ["state": "ok", "taken": false])
+        return
+      }
+      pendingExport = nil
+      delegate?.linkedInExportOfferClosed()
+      guard payload["take"] as? Bool == true else {
+        reply(webView, id, ["state": "ok", "taken": false])
+        return
+      }
+      importLinkedIn(files: [pending.url]) { [weak self] out in
+        self?.reply(webView, id, ["state": "ok", "taken": true,
+                                  "result": out["state"] as? String ?? "error",
+                                  "reason": out["reason"] as? String ?? NSNull(),
+                                  "connections": out["connections"] as? Int ?? 0])
+      }
+
     case "watchForExport":
       // ARM THE WATCHER, FROM THE ONE SCREEN THAT HAS EXPLAINED THE FILE.
       //
@@ -3538,6 +3596,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         }
       }
     }
+  }
+
+  /// THE WATCHER FOUND ONE. Hold it, and put it somewhere the owner can see.
+  ///
+  /// A notification was the whole of this and it produced nothing at all on the
+  /// Mac it was walked on -- see ExportWatch.offer. The panel is the surface
+  /// this app can actually guarantee, so the offer lives here until it is
+  /// answered and the delegate is what puts it on screen.
+  func linkedInExportFound(at url: URL, name: String, folder: String, dated: String) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    pendingExport = (url, name, folder, dated)
+    delegate?.linkedInExportOffered(name: name)
   }
 
   /// The same import, for files nobody picked in a panel: the Downloads watcher

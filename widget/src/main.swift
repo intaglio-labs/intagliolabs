@@ -61,6 +61,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // The reconnect card: one card, its receipt, four verdict buttons. Height
   // is a base guess; the page fits itself via fitContent once rendered.
   private static let reconnectBase = NSSize(width: 340, height: 430)
+  // The export offer: a lead, a filename, where it is, and two buttons. Short
+  // by construction, and the page fits itself through fitContent once drawn.
+  private static let exportBase = NSSize(width: 340, height: 200)
 
   private let bridge = Bridge()
   private var widgetWindow: WidgetWindow!
@@ -70,6 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var connectionsPanel: PopupPanel?
   private var peoplePanel: PopupPanel?
   private var reconnectPanel: PopupPanel?
+  /// The Downloads watcher's "found your export" offer. See linkedInExportOffered.
+  private var exportPanel: PopupPanel?
   private var monthsPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
   // Set while the onboarding scrim is standing aside for the system browser
@@ -1270,6 +1275,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // reaches as tall as popupCeiling allows; the page's own scrolling
       // footer covers whatever is left over.
       (reconnectPanel, Self.reconnectBase),
+      // AND THE EXPORT OFFER, for the same reason and caught by reading the
+      // paragraph above rather than by running it: a panel that posts
+      // fitContent and is not named here gets a silent no-op and stays at its
+      // base height. This one's height is a filename the owner has never seen
+      // before, so it is exactly the panel that cannot be sized by guess.
+      (exportPanel, Self.exportBase),
     ]
     for (panel, base) in panels {
       guard let p = panel, p.contentView === webView
@@ -1508,6 +1519,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     onboardingYieldedToBrowser = true
     p.level = .normal
     p.orderBack(nil)
+  }
+
+  // THE WATCHER FOUND AN EXPORT, AND THE OWNER HAS TO BE ABLE TO SEE THAT.
+  //
+  // This was a system notification and nothing else, and on the Mac it was
+  // walked on it produced NOTHING: three archives found, three offers recorded
+  // in the defaults, no banner before or after the owner allowed notifications,
+  // and nothing from usernotifications in the system log for the bundle. There
+  // is no diagnosing that from inside this app, and no need to: a feature whose
+  // only output is a notification has no output wherever notifications do not
+  // arrive, and the owner cannot tell that from "it never found anything".
+  //
+  // TWO SURFACES, because either one alone can be missed. The panel carries the
+  // decision; the gear carries the fact, because a panel can be behind
+  // something and the widget is on the desktop by definition.
+  func linkedInExportOffered(name: String) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    if exportPanel == nil {
+      exportPanel = makePanel(page: "export", size: capped(Self.scaled(Self.exportBase, Bridge.scale)))
+      exportPanel!.hasShadow = false
+    } else {
+      // Re-shown for a new offer. The page refetches, the way the reconnect
+      // card does on every show: a panel that survived hidden must never come
+      // back describing the file before this one.
+      (exportPanel?.contentView as? WKWebView)?
+        .evaluateJavaScript("window.__hzExportShow && window.__hzExportShow()")
+    }
+    present(exportPanel!)
+    eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(\(jsString(name)))")
+  }
+
+  // ...and the answer, either way. The glow goes back and the panel goes away,
+  // or the app keeps asking about a decision the owner has already made.
+  func linkedInExportOfferClosed() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(null)")
   }
 
   // AN EXPORT LANDED WITHOUT ANYBODY PRESSING ANYTHING ON A PAGE -- the
