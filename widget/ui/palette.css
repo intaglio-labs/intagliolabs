@@ -1987,7 +1987,16 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 .setting-control { flex: 0 0 auto; display: inline-flex; align-items: center; }
 /* A stated fact, not a control: right-aligned like a read-out, and quieter
    than the switch it sits in place of. */
-.setting-said { color: var(--hazelnut-light); opacity: 0.85; }
+/* A stated fact on its own line inside the row's text column — NOT the
+   right-hand read-out .setting-value is: that one holds a number for the size
+   slider, and this one holds a sentence. As a sibling of .setting-text its
+   content width competed with the description for a 312px panel and the
+   description lost, one word per line, with this printed over it. */
+.setting-said {
+  font-size: 11px; font-weight: 600;
+  color: var(--hazelnut-light); opacity: 0.85;
+  overflow-wrap: anywhere;
+}
 /* The switch borrows the connector dot's palette: off is a hollow ring,
    on is phosphor — the same two states the charms already teach. */
 .switch {

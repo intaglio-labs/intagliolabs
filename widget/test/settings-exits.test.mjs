@@ -167,6 +167,27 @@ test('the daily-card row reads the config, and asserts nothing when it cannot', 
   assert.match(row, /bits\.length > 0 \? bits\.join\(' · '\) : '—'/u,
     'nothing known must render as nothing known, never as a default');
   assert.match(row, /three chips at the top/u, 'and it points at where the picker lives');
+  // THE SHAPE, because the first version of this row was unreadable on the
+  // panel it ships in (run 6): its value wore .setting-value — the right-hand
+  // read-out built to hold a NUMBER for the size slider — while carrying a
+  // ~47-character sentence. As a sibling flex item that width competed with
+  // the text column, which carries min-width: 0 and therefore lost: the label
+  // rendered one word per line with the value printed across the description.
+  //
+  // Every row in this panel puts its words in the text column and its CONTROL
+  // beside it. This row has no control, so all three lines go in the column.
+  assert.match(row, /text\.append\(label, said, note\);\s*\n\s*el\.append\(text\);/u,
+    'label, value and description stack inside the text column');
+  assert.doesNotMatch(row, /el\.append\(text, said\)/u,
+    'the value must not be a right-hand slot competing with the description');
+  assert.doesNotMatch(row, /className = 'setting-value/u,
+    '.setting-value is the slider read-out, and this value is a sentence');
+  assert.match(palette, /\.setting-said \{[\s\S]{0,200}overflow-wrap: anywhere;/u,
+    'and it wraps rather than pushing the row wider than the panel');
+  // No absolute positioning anywhere in the rows: the panel measures its own
+  // content height to size the window, and an out-of-flow row is invisible to
+  // that measurement.
+  assert.doesNotMatch(palette, /\.setting-said \{[^}]*position: absolute/u);
   // ONE QUESTION PER OPEN, not one per row — and a reply that is not ok
   // resolves to null, because {state:'down'} is truthy and every reader of this
   // promise treats a truthy value as a configuration.

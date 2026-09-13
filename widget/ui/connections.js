@@ -324,22 +324,35 @@ function cardConfigRow(configPromise) {
   text.className = 'setting-text';
   const label = document.createElement('span');
   label.className = 'setting-name';
-  label.textContent = 'the daily card';
+  label.textContent = 'daily card';
+  const said = document.createElement('span');
+  said.className = 'setting-said';
+  // EMPTY UNTIL THE READER ANSWERS. A placeholder here would be a busy label
+  // for a question that is usually answered in the same frame, and this panel
+  // keeps one busy word per idea rather than one per row
+  // (connect-affordances.test.mjs).
+  said.textContent = '';
   const note = document.createElement('span');
   note.className = 'setting-note';
   // The picker is NOT duplicated here, deliberately: it lives on the card,
   // which is where you change your mind about it. This row exists because a new
   // owner reading settings saw no sign the product had modes at all.
   note.textContent = 'change who it looks for on the card itself — the three chips at the top.';
-  text.append(label, note);
-  const said = document.createElement('span');
-  said.className = 'setting-value setting-said';
-  // EMPTY UNTIL THE READER ANSWERS. A placeholder here would be a busy label
-  // for a question that is usually answered in the same frame, and this panel
-  // keeps one busy word per idea rather than one per row
-  // (connect-affordances.test.mjs).
-  said.textContent = '';
-  el.append(text, said);
+  // ALL THREE INSIDE THE TEXT COLUMN, and the value is NOT a right-hand slot.
+  //
+  // It was one, wearing .setting-value — the read-out built for the size
+  // slider, which holds a number. This value is a sentence: "investor · one
+  // card a day · reading on this Mac" is ~47 characters, and as a sibling flex
+  // item its content width competed with the text column for a 312px panel.
+  // The column lost (it carries min-width: 0, so it may shrink to nothing) and
+  // the row rendered its label one word per line with the value printed across
+  // the description. Live on run 6.
+  //
+  // Every other row here puts its words in this column and its CONTROL beside
+  // it. This row has no control, so it is label, value, description, stacked —
+  // .setting-text is already a column flex, so each takes its own line.
+  text.append(label, said, note);
+  el.append(text);
 
   const cap = (n) => (n === 1 ? 'one card a day' : `${n} cards a day`);
   configPromise.then((cfg) => {
