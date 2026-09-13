@@ -66,10 +66,13 @@ function lift() {
     assert.ok(found, `a declaration the lifted functions read was not found: ${decl}`);
     parts.push(found);
   }
-  parts.push(bodyOf(reconnectJs, 'verdictNext'));
-  parts.push(bodyOf(reconnectJs, 'pullPanel'));
+  for (const name of ['verdictNext', 'pullPanel', 'pullsLeftFrom', 'afterRejection']) {
+    parts.push(bodyOf(reconnectJs, name));
+  }
   // eslint-disable-next-line no-new-func
-  return new Function(`${parts.join('\n')}\nreturn { verdictNext, pullPanel, EMPTY_REASONS, PULLS_DONE };`)();
+  return new Function(
+    `${parts.join('\n')}\nreturn { verdictNext, pullPanel, pullsLeftFrom, afterRejection, EMPTY_REASONS, PULLS_DONE };`
+  )();
 }
 
 // Lifted on first use rather than at import: a missing function is then ONE
@@ -133,6 +136,57 @@ test('a card that arrives is rendered, whatever asked for it', () => {
   assert.equal(fns().pullPanel(CARD).panel, 'card');
 });
 
+test('the budget is read from whichever reply knows it', () => {
+  // hermes puts `pullsLeft` on the card replies and on the verdict reply. The
+  // verdict was posted after the serve, so it has seen the rejection and wins;
+  // the card reply is the fallback for a reader that answers without it.
+  assert.equal(fns().pullsLeftFrom({ pullsLeft: 1 }, { pullsLeft: 3 }), 1);
+  assert.equal(fns().pullsLeftFrom({ ok: true }, { pullsLeft: 3 }), 3);
+  assert.equal(fns().pullsLeftFrom({ pullsLeft: 0 }, { pullsLeft: 3 }), 0,
+    'zero is an answer, and it must not be skipped over as falsy');
+
+  // NULL IS NOT ZERO. `Number(x)` of a missing field is NaN and `x ?? 0` is
+  // zero, and either spelling tells every install running an older hermes that
+  // their day is over, permanently, while removing the button that would have
+  // proved otherwise.
+  for (const absent of [{}, null, undefined, { pullsLeft: null }, { pullsLeft: '2' },
+    { pullsLeft: 1.5 }, { pullsLeft: -1 }, { pullsLeft: NaN }]) {
+    assert.equal(fns().pullsLeftFrom(absent, {}), null, JSON.stringify(absent));
+  }
+});
+
+test('a rejection with no budget left says so without a press', () => {
+  // The answer to "is there another one" was on the reply that delivered the
+  // card, so offering a button whose only possible answer is `pulls-exhausted`
+  // asks the owner to press it to be told something already known here.
+  const spent = fns().afterRejection({ pullsLeft: 0 }, { pullsLeft: 3 });
+  assert.equal(spent.button, false);
+  assert.equal(spent.msg, fns().PULLS_DONE,
+    'and it is the same sentence the route gives, not a second wording for it');
+  // ...and the served reply answers when the verdict reply cannot.
+  assert.equal(fns().afterRejection({ ok: true }, { pullsLeft: 0 }).button, false);
+
+  // FAIL OPEN IN THE OTHER DIRECTION. One left, three left, or nobody said: the
+  // button is offered, because the press is answered by hermes, which is the
+  // authority, and the worst case is the honest sentence one press later.
+  for (const pair of [[{ pullsLeft: 1 }, {}], [{ pullsLeft: 3 }, {}], [{}, {}], [null, null]]) {
+    const next = fns().afterRejection(...pair);
+    assert.equal(next.button, true, JSON.stringify(pair));
+    assert.equal(next.msg, 'noted.');
+  }
+});
+
+test('the budget belongs to the card that was served, and dies with it', () => {
+  const src = code(reconnectJs);
+  assert.match(code(bodyOf(reconnectJs, 'renderServed')), /servedPullsLeft = pullsLeftFrom\(out\);/u,
+    'remembered from the reply that carried this card, and only that one');
+  // Cleared by both panels that replace a card, so a budget can never be read
+  // against a serve it did not describe.
+  assert.match(code(bodyOf(reconnectJs, 'showAnother')), /servedPullsLeft = null;/u);
+  assert.match(code(bodyOf(reconnectJs, 'renderEmpty')), /servedPullsLeft = null;/u);
+  assert.match(src, /let servedPullsLeft = null;/u);
+});
+
 // --------------------------------------------- the page asks for the pull
 
 test('"show me another" is the only thing that sends the pull flag', () => {
@@ -155,7 +209,12 @@ test('"show me another" is the only thing that sends the pull flag', () => {
 test('the verdict no longer fetches the next card by itself', () => {
   const verdict = code(bodyOf(reconnectJs, 'verdict'));
   assert.match(verdict, /verdictNext\(event, modesOn\) === 'another'/u);
-  assert.match(verdict, /showAnother\('noted\.', true\)/u,
+  // ~~`showAnother('noted.', true)`~~ — the pause asks the budget first, from
+  // the verdict reply it has just read and then from the serve that delivered
+  // the card. The sentence and the button are afterRejection's to choose.
+  assert.match(verdict, /afterRejection\(out, \{ pullsLeft: servedPullsLeft \}\)/u,
+    'the verdict reply is the fresher answer and must be asked first');
+  assert.match(verdict, /showAnother\(next\.msg, next\.button\)/u,
     'the pause offers the one thing the owner might still want');
   // The button and its panel exist on the page at all.
   assert.match(reconnectHtml, /id="rcAnother"/u);

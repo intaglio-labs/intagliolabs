@@ -28,6 +28,13 @@ let modesOn = false;
 // window.__hzReconnectShow at the foot of this file.
 let awaitingPull = false;
 
+// What the reply that served the card in hand said the pull budget would be.
+// Kept because the verdict is posted to a DIFFERENT route: the owner rejects a
+// card and the answer to "is there another one" was already on the reply that
+// delivered it. Null for a reader that does not send the field, which is not
+// zero -- see pullsLeftFrom.
+let servedPullsLeft = null;
+
 // The mode picker: 'any' · 'founder' · 'investor'.
 //
 // THE SERVER OWNS THIS, localStorage only remembers it (review finding 7).
@@ -221,6 +228,7 @@ function renderEmpty(out) {
   // of them is on screen at a time, and this is the answer arriving.
   el('rcAnother').hidden = true;
   awaitingPull = false;
+  servedPullsLeft = null;
   el('rcEmptyMsg').textContent = out?.refreshing ? 'still looking…' : emptyLine(out);
   // Reset to the reconnect defaults between cards: the empty state is where
   // the mode picker (reconnect's own) lives while nothing is showing, so it
@@ -745,6 +753,39 @@ function verdictNext(event, modes) {
 //                      tell the owner their day is over.
 const PULLS_DONE = "that's enough for today — more tomorrow";
 
+// HOW MANY PULLS ARE LEFT, FROM WHICHEVER REPLY KNOWS. hermes puts `pullsLeft`
+// on the card replies and on the verdict reply, and the freshest answer wins:
+// the verdict was posted after the serve, so it is the one that has seen the
+// rejection. The card reply is the fallback for a reader that answers the
+// verdict without it.
+//
+// NULL IS NOT ZERO, and this is the whole reason it is a function. `Number(x)`
+// of a missing field is NaN and `x ?? 0` of one is zero, and either spelling
+// turns "this reader does not send the field" into "your day is over" -- on
+// every install running an older hermes, permanently, with the button that
+// would have proved otherwise removed. An answer nobody gave is no answer.
+function pullsLeftFrom(...replies) {
+  for (const reply of replies) {
+    const n = reply?.pullsLeft;
+    if (Number.isInteger(n) && n >= 0) return n;
+  }
+  return null;
+}
+
+// What the panel says after a rejection. Zero left is the same sentence a spent
+// pull gets from the route, arrived at one press earlier: the budget is known
+// here, so offering a button whose only possible answer is `pulls-exhausted`
+// would be asking the owner to press it to be told something already on screen.
+//
+// Anything else -- one left, three left, or nobody said -- offers the button.
+// Fail-open is right in that direction: the press is answered by hermes, which
+// is the authority, and the worst case is the honest sentence one press later.
+function afterRejection(verdictReply, served) {
+  return pullsLeftFrom(verdictReply, served) === 0
+    ? { msg: PULLS_DONE, button: false }
+    : { msg: 'noted.', button: true };
+}
+
 function pullPanel(out) {
   if (!reachedHermes(out)) {
     return { panel: 'another', msg: EMPTY_REASONS.unreachable, button: true };
@@ -761,6 +802,8 @@ function pullPanel(out) {
 // second one against a snapshot the owner has finished with.
 function showAnother(msg, button) {
   card = null;
+  // With it, because it describes that card's serve and nothing else.
+  servedPullsLeft = null;
   el('rcCard').hidden = true;
   el('rcEmpty').hidden = true;
   el('rcAnother').hidden = false;
@@ -776,6 +819,10 @@ function showAnother(msg, button) {
 // another, and openRate = opened/shown climbed past 1), so this can stay
 // unconditional.
 function renderServed(out) {
+  // Remembered before the card is drawn, and only ever from the reply that
+  // carried this card: render() is the one place a card replaces a card, so
+  // the budget can never outlive the serve it describes.
+  servedPullsLeft = pullsLeftFrom(out);
   render(out.card);
   // SAY WHERE IT CAME FROM. A one-off card was served under a mode the owner
   // did not pick -- onboarding's "just this once" -- and the chip beside it
@@ -854,7 +901,14 @@ async function verdict(event, extra = {}) {
     // ~~`await pull()` on every verdict.~~ That made a dismissal fetch the next
     // card by itself, which is the app deciding the owner wants another one.
     // They may; the button is how they say so.
-    if (verdictNext(event, modesOn) === 'another') { showAnother('noted.', true); return; }
+    if (verdictNext(event, modesOn) === 'another') {
+      // THE BUDGET IS ALREADY KNOWN HERE. `out` is the verdict reply, which has
+      // seen this rejection; `servedPullsLeft` is what the reply that delivered
+      // the card said, for a reader that answers the verdict without the field.
+      const next = afterRejection(out, { pullsLeft: servedPullsLeft });
+      showAnother(next.msg, next.button);
+      return;
+    }
     await pull(); // next card, or the empty state -- clears the error on success
   } catch {
     setVerdictButtonsDisabled(false);
