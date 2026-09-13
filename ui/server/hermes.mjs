@@ -4991,10 +4991,18 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // must not insert -- rm_card_event is append-only, so a duplicate here
     // would be a duplicate forever. Caught before any write, including the
     // suppression side effect a 'never-this-person' dismissal carries.
+    //
+    // EVERY REPLY FROM THIS ROUTE CARRIES pullsLeft, INCLUDING THE DUPLICATES.
+    // The page hides "show me another" from this number, and a retried verdict
+    // is exactly when it must not be told something different from the verdict
+    // that landed: the first accept ended the day, so the retry's answer is
+    // zero too. Read AFTER the write on every path, so an accept's own reply
+    // already says the budget is gone (see controls.pullsLeft).
     if ((event === 'accepted' || event === 'dismissed') && snapId !== null) {
       const existing = rel.service.controls.alreadyJudged({ snapshotId: snapId });
       if (existing) {
-        send(res, 200, { ok: true, duplicate: true, existing }, cors);
+        send(res, 200, { ok: true, duplicate: true, existing,
+          pullsLeft: rel.service.controls.pullsLeft() }, cors);
         return;
       }
     }
@@ -5029,7 +5037,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       const already = db.prepare(
         "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'opened' LIMIT 1"
       ).get(snapId);
-      if (already) { send(res, 200, { ok: true, duplicate: true }, cors); return; }
+      if (already) {
+        send(res, 200, { ok: true, duplicate: true, pullsLeft: rel.service.controls.pullsLeft() }, cors);
+        return;
+      }
     }
     if (event === 'muted') {
       const days = Number.isFinite(mute_days) && mute_days > 0 ? mute_days : null;
@@ -5048,7 +5059,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       rel.service.controls.recordEvent({ personKey, kind, event,
         note: ownerNote, ruleVersion, snapshotId: snapId });
     }
-    send(res, 200, { ok: true }, cors);
+    // A REJECTION IS WHAT BUYS A PULL, so the verdict that just landed is the
+    // reply that should say how many are left -- the page would otherwise have
+    // to poll the card route to find out whether to draw the button, which is
+    // a request whose only purpose is to be refused.
+    send(res, 200, { ok: true, pullsLeft: rel.service.controls.pullsLeft() }, cors);
     return;
   }
 

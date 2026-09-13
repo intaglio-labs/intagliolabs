@@ -235,6 +235,59 @@ test('anything but pull=1 is not a pull', async () => {
   });
 });
 
+// --- WHAT THE VERDICT ITSELF SAYS ------------------------------------------
+//
+// The page draws "show me another" from the budget, and the verdict is the
+// moment it needs the number: a rejection is what buys a pull, and an accept is
+// what ends the day. Answering it here saves the page a request to the card
+// route whose only purpose would be to be refused -- and stops it offering a
+// button that is already spent.
+test('the verdict reply carries the budget, duplicates included', async () => {
+  await withCardServer(async ({ call, get }) => {
+    const first = await get('/admin/relationship/card');
+    const rejected = await (await call('POST', '/admin/relationship/event', {
+      snapshot_id: first.card.snapshot_id, person_key: first.card.personKey,
+      event: 'dismissed', reason: 'wrong-time',
+    })).json();
+    assert.deepEqual(rejected, { ok: true, pullsLeft: PULLS_PER_DAY },
+      'a rejection spends no part of the budget -- the serve it buys does');
+
+    const opened = await (await call('POST', '/admin/relationship/event', {
+      snapshot_id: first.card.snapshot_id, person_key: first.card.personKey, event: 'opened',
+    })).json();
+    assert.equal(opened.pullsLeft, PULLS_PER_DAY, 'every reply from this route answers it');
+
+    const second = await get('/admin/relationship/card?pull=1');
+    assert.equal(second.pullsLeft, PULLS_PER_DAY - 1);
+    const openedTwice = await (await call('POST', '/admin/relationship/event', {
+      snapshot_id: second.card.snapshot_id, person_key: second.card.personKey, event: 'opened',
+    })).json();
+    assert.equal(openedTwice.pullsLeft, PULLS_PER_DAY - 1, 'the pulled serve is what spent one');
+
+    // THE ACCEPT'S OWN REPLY ALREADY SAYS THE DAY IS OVER, rather than the page
+    // learning it on the next poll with the button still on screen.
+    const accepted = await (await call('POST', '/admin/relationship/event', {
+      snapshot_id: second.card.snapshot_id, person_key: second.card.personKey, event: 'accepted',
+    })).json();
+    assert.deepEqual(accepted, { ok: true, pullsLeft: 0 });
+
+    // And the retry of a verdict that already landed answers the same thing it
+    // did the first time -- a duplicate that reported a full budget would put
+    // the button back on a day that is done.
+    const retried = await (await call('POST', '/admin/relationship/event', {
+      snapshot_id: second.card.snapshot_id, person_key: second.card.personKey, event: 'accepted',
+    })).json();
+    assert.equal(retried.duplicate, true);
+    assert.equal(retried.pullsLeft, 0);
+
+    const dupOpened = await (await call('POST', '/admin/relationship/event', {
+      snapshot_id: second.card.snapshot_id, person_key: second.card.personKey, event: 'opened',
+    })).json();
+    assert.equal(dupOpened.duplicate, true);
+    assert.equal(dupOpened.pullsLeft, 0);
+  });
+});
+
 // --- THE DATABASE THAT PREDATES THE COLUMN ---------------------------------
 //
 // rm_card_event has been serving on the reference install since long before
