@@ -371,6 +371,14 @@ function cardConfigRow(configPromise) {
 const LINKEDIN_HELP = 'linkedin will not let anything read your connections, so you ask '
   + 'them for a copy and hand the file over. it is what tells a founder from an investor.';
 const LINKEDIN_WAITING = 'waiting for your file · drop it here';
+// ...and what the same row says once LinkedIn has mailed to say the archive is
+// downloadable. "waiting for your file" is still true there and no longer
+// useful: the thing being waited for has arrived, in the owner's inbox, and the
+// errand is to go and get it. The mail connector leaves the note
+// (connectors/lib/linkedinExport.mjs) and connect's linkedin-export row carries
+// its timestamp — spent the moment an export is installed, so a timestamp
+// reaching this row always means there is still something to do.
+const LINKEDIN_READY = 'your export is ready — open the email';
 // WHAT WENT WRONG, TWICE OVER: a few words on the line, the whole sentence on
 // the hover. The row may not grow to hold a remedy, and a remedy nobody can
 // read is not one — so the short form says which failure it was and the hover
@@ -390,6 +398,12 @@ const LINKEDIN_REFUSAL_DEFAULT = ["couldn't read that file", "i couldn't read th
 // watcher's notification, a file dropped on this panel — can repaint it.
 // Native calls __hzLinkedInChanged; see main.swift linkedInExportChanged.
 let repaintLinkedIn = null;
+// ...and so the shelf can hand the row the one fact it cannot ask for itself.
+// `linkedinExportReady` rides connect's linkedin-export source row, which
+// refresh() below already fetches on every open and every focus — asking for it
+// a second time through a bridge verb of its own would be two readers of one
+// note, which is how two lines in one panel come to disagree.
+let noteLinkedInReady = null;
 
 function linkedInRow() {
   const row = document.createElement('div');
@@ -413,13 +427,28 @@ function linkedInRow() {
     said.setAttribute('aria-label', `linkedin — ${line}`);
   };
 
-  say(LINKEDIN_WAITING, LINKEDIN_HELP);
+  // WHAT THE ROW SAYS WHILE THERE IS NO FILE, which is one of two things: the
+  // mail has arrived and the errand is to go and open it, or it has not and
+  // there is nothing to do but wait. Held rather than read, because the two
+  // answers arrive from different places at different times — the shelf hands
+  // over the mail's timestamp, `linkedInState` says whether a file is here —
+  // and whichever lands second must not paint the other one's answer away.
+  let readyTs = null;
+  let installed = false;
+  const paint = () => {
+    if (installed) return;
+    if (readyTs !== null) { say(LINKEDIN_READY, `${LINKEDIN_HELP} press to choose it.`); return; }
+    say(LINKEDIN_WAITING, LINKEDIN_HELP);
+  };
+
+  paint();
 
   // COUNTS AND A DATE. Nothing else ever crosses the bridge from that file —
   // see linkedInState in Bridge.swift. `present: false` is the ordinary
-  // first-run answer and leaves the line exactly where it is.
+  // first-run answer and hands the line back to the two waiting states above.
   const paintState = (out) => {
-    if (!out || out.present !== true) { say(LINKEDIN_WAITING, LINKEDIN_HELP); return; }
+    installed = out?.present === true;
+    if (!installed) { paint(); return; }
     const n = Number(out.connections || 0);
     const when = Number(out.modifiedTs);
     const dated = Number.isFinite(when) ? ` · ${new Date(when).toLocaleDateString()}` : '';
@@ -429,6 +458,14 @@ function linkedInRow() {
 
   const ask = () => hzPost('linkedInState').then(paintState).catch(() => {});
   repaintLinkedIn = ask;
+  // A TIMESTAMP OR NULL, and null is an answer: the note is spent the moment an
+  // export is installed, so the row has to be able to stop saying "open the
+  // email" once the owner has.
+  noteLinkedInReady = (ts) => {
+    readyTs = Number.isFinite(Number(ts)) ? Number(ts) : null;
+    paint();
+    fitConnections();
+  };
   ask();
 
   said.addEventListener('click', () => {
@@ -3138,6 +3175,17 @@ async function refresh() {
     const data = await hzPost('status');
     showNotice(noticeFor(data));
     if (data.state !== 'ok') return;
+    // THE SETTINGS ROW RIDES THIS FETCH. `linkedinExportReady` is a field on
+    // connect's linkedin-export row, and this is the only call in the panel
+    // that asks for it — so the settings row is told rather than asking again.
+    // Read off `data.sources` and not the visible set: the settings row exists
+    // whether or not the shelf is showing that tile, and the registry can hide
+    // the tile without making the export stop being something the owner is
+    // waiting on. A missing row is null, which is the row's "nothing to say".
+    if (noteLinkedInReady) {
+      const row = (data.sources ?? []).find((s) => s.id === LINKEDIN_EXPORT_ID);
+      noteLinkedInReady(row?.linkedinExportReady ?? null);
+    }
     // An OPEN strip survives the refresh. The cookie-paste and token/phone
     // login flows require leaving the popup (to copy cookies, a token, or a
     // code), and coming back fires the focus listener below; renderBridge

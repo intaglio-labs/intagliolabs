@@ -312,11 +312,6 @@ test('the card says why the lit chip is not the card in hand', () => {
   assert.match(show, /cards start when your linkedin export lands/u);
   // 'any' needs no export, so the sentence would be false for it.
   assert.match(show, /mode !== 'any'/u);
-  // THE STANDING CHIP STAYS SELECTED. A fallback is not a choice, any more than
-  // a one-off look is, and adoptServerMode is the function that would move it.
-  const adopt = /function adoptServerMode\(out\) \{([\s\S]*?)\n\}/u.exec(reconnectJs)?.[1] ?? '';
-  assert.doesNotMatch(adopt, /modeFallback/u,
-    'a fallback must not move the picker to the mode it fell back to');
   // Under the chips, which is what the line is about, and outside #rcCard,
   // because it is equally true of the empty state.
   const modesAt = reconnectHtml.indexOf('id="rcModes"');
@@ -328,6 +323,66 @@ test('the card says why the lit chip is not the card in hand', () => {
   const empty = /function renderEmpty\(out\) \{([\s\S]*?)\n\}/u.exec(reconnectJs)?.[1] ?? '';
   assert.match(empty, /showModeFallback\(out\)/u,
     'the two unreachable paths reach renderEmpty without passing pull()’s call');
+});
+
+// A HELD PICK MUST NOT BECOME A CHANGED ONE.
+//
+// ~~`assert.doesNotMatch(adoptServerMode, /modeFallback/)`~~ stood here and
+// passed while the bug was live, which is the whole reason this test is written
+// the other way round now. A fallback reply is `servedMode: 'any'` with `mode`
+// still the owner's investor or founder and no `oneOff` — nobody asked for this
+// widening — and adoptServerMode preferred servedMode on exactly that shape. It
+// would have moved the picker to `any` and called writeMode: the owner's
+// standing choice replaced permanently because a file had not arrived, under a
+// line telling them their pick was merely being held.
+//
+// An assertion that something is ABSENT is true of a feature that does not
+// exist yet and of a bug that has not been fixed. This one names the guard.
+test('a fallback does not move the picker, the way a one-off does not', () => {
+  const adopt = /function adoptServerMode\(out\) \{([\s\S]*?)\n\}/u.exec(reconnectJs)?.[1] ?? '';
+  assert.ok(adopt, 'adoptServerMode() not found');
+  assert.match(code(adopt),
+    /const held = out\?\.oneOff === true \|\| typeof out\?\.modeFallback === 'string';/u,
+    'the two cases are one rule: the server served something the owner did not pick');
+  assert.match(code(adopt), /const fromServer = held\s*\n\s*\? \(MODES\.includes\(out\?\.mode\)/u,
+    'and a held reply reads `mode`, which is the standing pick, never servedMode');
+  // The write is what makes getting this wrong permanent rather than cosmetic.
+  assert.match(adopt, /writeMode\(fromServer\)/u);
+});
+
+test('the fallback sentence rides the reason the server actually sends', () => {
+  // THE BRANCH THIS LIVED IN COULD NEVER RUN. hermes suppresses
+  // 'pool-exhausted-mode' while the pick is held — under the fallback the serve
+  // mode is already 'any', so there is nothing to widen to and no counts to
+  // report — and sends a plain 'pool-exhausted' with the flag on it instead.
+  // The first version of this branch sat in paintModeShortfall, which peekCard
+  // only reaches from 'pool-exhausted-mode': the sentence existed, the test
+  // passed, and nothing could ever have painted it.
+  const peek = /function peekCard\(out, \{ fromOneOff = false \} = \{\}\) \{([\s\S]*?)\n\}/u
+    .exec(onboardingJs)?.[1] ?? '';
+  assert.ok(peek, 'peekCard() not found');
+  const exhausted = peek.indexOf("out.reason === 'pool-exhausted'");
+  const modeExhausted = peek.indexOf("out.reason === 'pool-exhausted-mode'");
+  const pending = peek.indexOf('linkedInPending(out)');
+  assert.ok(exhausted > -1 && pending > exhausted && pending < modeExhausted,
+    'the flag has to be read on the plain pool-exhausted branch, which is where it arrives');
+  // Its own line, under whatever the status says: the house being empty and the
+  // owner's group waiting on a file are both true, and only one is actionable.
+  assert.match(peek, /if \(linkedInPending\(out\)\) paintModeShortfall\(out\);/u);
+  const sprint = peek.indexOf('if (readerSprinting)', exhausted);
+  assert.ok(sprint > pending, 'the sentence must be painted before the branch that returns');
+});
+
+test('the screen does not offer a widening that has already happened', () => {
+  // Under the fallback hermes is serving from `any` already, and a one-off peek
+  // NAMES a mode, which suppresses the fallback and comes back with the same
+  // empty answer. The button could not change the screen it is on.
+  const paint = /function paintModeShortfall\(out\) \{([\s\S]*?)\n\}/u.exec(onboardingJs)?.[1] ?? '';
+  const pendingBranch = paint.slice(paint.indexOf('linkedInPending(out)'), paint.indexOf('const mode ='));
+  assert.match(pendingBranch, /loadAnyMode\.hidden = true/u);
+  // ...and it is still offered for the ordinary empty-mode case, which is what
+  // it was built for.
+  assert.match(paint.slice(paint.indexOf('const mode =')), /loadAnyMode\.hidden = false/u);
 });
 
 test('screen 6 says the same thing instead of blaming the history', () => {
@@ -354,6 +409,76 @@ test('the card and the first-load screen say it in the same words', () => {
   const shape = /\$\{mode\} cards start when your linkedin export lands/u;
   assert.match(reconnectJs, shape);
   assert.match(onboardingJs, shape);
+});
+
+// -------------------------------------------------- the export is ready
+
+test('the widget gets one field, not the connector shelf', () => {
+  const body = code(swiftCase('linkedInReady'));
+  assert.match(body, /\$0\["id"\] as\? String == "linkedin-export"/u);
+  assert.match(body, /row\?\["linkedinExportReady"\] as\? Double/u);
+  // ONE FIELD OUT. The widget page must not be handed the whole status payload
+  // just because the timestamp travels on it.
+  assert.doesNotMatch(body, /self\.reply\(webView, id, data\)/u);
+  assert.match(body, /out\["readyTs"\]/u);
+  const caps = /"widget": \[([\s\S]*?)\],\n/u.exec(bridge)?.[1] ?? '';
+  assert.ok(caps.includes('"linkedInReady"'));
+  assert.ok(!caps.includes('"status"'), 'the shelf itself stays out of the widget');
+});
+
+test('nothing in Swift reads the marker file', () => {
+  // connectors/lib/linkedinExport.mjs owns that note's whole lifetime: it
+  // refuses to answer once an export is installed, and the linkedin connector
+  // deletes it on the first run that sees one. A second reader with its own
+  // idea of when the note is spent is how two surfaces come to disagree about
+  // whether the owner still has an errand.
+  for (const [name, src] of [['Bridge.swift', bridge], ['ExportWatch.swift', watch],
+    ['main.swift', mainSwift]]) {
+    assert.doesNotMatch(code(src), /export-ready\.json/u,
+      `${name} reads the marker directly instead of asking the route that owns it`);
+  }
+});
+
+test('the gear says which errand its glow is about, and takes it back', () => {
+  const widgetJs = read('widget/ui/widget.js');
+  assert.match(widgetJs, /hzPost\('linkedInReady'\)/u);
+  assert.match(widgetJs, /your export is ready — open the email/u);
+  // A TIMESTAMP IS THE WHOLE CONDITION. exportReadyAt answers null once the
+  // export is installed, so the page has no second fact to combine and no way
+  // to badge an errand already run.
+  const check = /function checkLinkedInReady\(\) \{([\s\S]*?)\n\}/u.exec(widgetJs)?.[1] ?? '';
+  assert.match(check, /Number\.isFinite\(Number\(out\?\.readyTs\)\)/u);
+  assert.match(check, /window\.__hzGearNudge\(true\)/u);
+  // The glow going off takes the sentence with it, or the hover keeps making a
+  // claim after the thing that made it has gone.
+  const nudge = /window\.__hzGearNudge = \(on\) => \{([\s\S]*?)\n\};/u.exec(widgetJs)?.[1] ?? '';
+  assert.match(nudge, /if \(on !== true\) gearBtn\.title = 'Settings';/u);
+  // Asked on load and on a wake -- the mail most likely arrived while the Mac
+  // was asleep -- and never on a timer.
+  assert.match(widgetJs, /__hzWake = \(\) => \{[^}]*checkLinkedInReady\(\);/u);
+  assert.doesNotMatch(check, /setInterval/u);
+});
+
+test('the settings row rides the fetch the panel already makes', () => {
+  assert.match(connectionsJs, /const LINKEDIN_READY = 'your export is ready — open the email'/u);
+  // ONE READER OF THE NOTE ON THIS PAGE. refresh() asks connect for the shelf
+  // on every open and every focus, and the timestamp is a field on the row it
+  // already has -- a second bridge call would be two readers of one note.
+  const refresh = /async function refresh\(\) \{([\s\S]*?)\n\}/u.exec(connectionsJs)?.[1] ?? '';
+  assert.match(refresh, /\(data\.sources \?\? \[\]\)\.find\(\(s\) => s\.id === LINKEDIN_EXPORT_ID\)/u);
+  assert.match(refresh, /noteLinkedInReady\(row\?\.linkedinExportReady \?\? null\)/u);
+  // Off the raw sources, not the visible set: hiding the shelf tile does not
+  // stop the owner waiting on the file, and the settings row is shown either way.
+  assert.doesNotMatch(refresh.slice(0, refresh.indexOf('noteLinkedInReady')),
+    /visibleSources[\s\S]*?noteLinkedInReady/u);
+  // An installed export outranks both waiting lines, whichever answer lands
+  // second -- the two facts arrive from different places at different times.
+  const row = /function linkedInRow\(\) \{([\s\S]*?)\n\}/u.exec(connectionsJs)?.[1] ?? '';
+  assert.match(row, /if \(installed\) return;/u);
+  assert.match(row, /if \(readyTs !== null\) \{ say\(LINKEDIN_READY/u);
+  // ...and null is an answer too, or the row keeps saying "open the email"
+  // after the owner has.
+  assert.match(row, /readyTs = Number\.isFinite\(Number\(ts\)\) \? Number\(ts\) : null;/u);
 });
 
 // -------------------------------------------------- the extraction, for real

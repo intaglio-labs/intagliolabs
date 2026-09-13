@@ -110,7 +110,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "widget": ["drag", "openChat", "openChatWith", "openConnections",
                "openMonths", "openReconnect", "voiceArm", "widgetBounds",
                "chatBarOpen",
-               "workStatus", "relCardPeek", "relEvent", "relRefresh"],
+               "workStatus", "relCardPeek", "relEvent", "relRefresh",
+               // The one thing the widget has to say about a source: LinkedIn
+               // has mailed the archive and nobody has imported it. It is the
+               // gear's nudge, so it belongs to the surface the gear is on.
+               // One field, not the connector shelf — see the case.
+               "linkedInReady"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim",
              "frontierSend", "frontierCancel"],
     // The reconnect card popup (L5 step 10): reads the current card, posts
@@ -1174,6 +1179,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "status":
       fetchStatus { [weak self] data in self?.reply(webView, id, data) }
+    case "linkedInReady":
+      // WHETHER LINKEDIN HAS MAILED TO SAY THE ARCHIVE IS DOWNLOADABLE, and
+      // nothing else about anything.
+      //
+      // The mail connector leaves a marker beside the import folder when it
+      // sees that mail (connectors/lib/linkedinExport.mjs), and connect's
+      // `linkedin-export` row relays its timestamp. This is that one field,
+      // lifted out of that one row, because the widget is a surface that has to
+      // say "your export is ready" and the whole connector shelf is not
+      // something the widget page has any business being handed.
+      //
+      // A TIMESTAMP OR NULL, and null already carries the second half of the
+      // question: exportReadyAt refuses to answer at all once Connections.csv
+      // is in place, so a non-null answer means ready AND not yet imported —
+      // the page does not have to combine two facts and cannot get it wrong.
+      //
+      // NOTHING HERE READS THE MARKER FILE, and Swift must not: the connector
+      // owns its lifetime and deletes it on the first run that sees an export.
+      // A second reader with its own idea of when the note is spent is how two
+      // surfaces come to disagree about whether the owner still has something
+      // to do.
+      fetchStatus { [weak self] data in
+        guard let self else { return }
+        let sources = data["sources"] as? [[String: Any]] ?? []
+        let row = sources.first { $0["id"] as? String == "linkedin-export" }
+        var out: [String: Any] = ["state": data["state"] as? String ?? "error"]
+        // NSNumber bridges to Double whether the JSON held an int or a float.
+        out["readyTs"] = (row?["linkedinExportReady"] as? Double).map { $0 as Any } ?? NSNull()
+        self.reply(webView, id, out)
+      }
     case "setConnectorEnabled":
       // This webview-controlled write is deliberately limited to the passive
       // WhatsApp connector marker; no arbitrary path reaches the filesystem.

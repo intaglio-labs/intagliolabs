@@ -553,7 +553,11 @@ try {
 // Wrapped rather than replaced: a wake from sleep is also when a card judged
 // or a panel closed while the mac slept is most likely to be stale.
 const hzApplyTod = hzApplyTimeOfDay(orbEl);
-window.__hzWake = () => { hzApplyTod(); refreshRelCard(); };
+// A wake is the moment everything here is most likely stale — including
+// whether LinkedIn has mailed the archive while the Mac was asleep, which is
+// exactly when it would have. checkLinkedInReady is defined further down;
+// this runs long after the page has finished loading.
+window.__hzWake = () => { hzApplyTod(); refreshRelCard(); checkLinkedInReady(); };
 winput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitFromWidget();
 });
@@ -723,7 +727,13 @@ monthsBtn.addEventListener('click', () => {
 // the gear is the next scene's door — so it bounces and glows until settings
 // has been opened once. Native drives it live (finish -> on, open -> off);
 // the prefs check below is what survives a relaunch in between.
-window.__hzGearNudge = (on) => gearBtn.classList.toggle('nudge', on === true);
+window.__hzGearNudge = (on) => {
+  gearBtn.classList.toggle('nudge', on === true);
+  // The nudge going off takes its sentence with it. The hover is what says
+  // WHICH errand the glow is about (see linkedInReady below), and a sentence
+  // left behind after the glow is a claim nothing on screen is making.
+  if (on !== true) gearBtn.title = 'Settings';
+};
 hzPost('prefs')
   .then((p) => {
     if (p && p.onboarded === true && p.connectorsIntroDone === false) {
@@ -731,6 +741,33 @@ hzPost('prefs')
     }
   })
   .catch(() => {});
+
+// THE ONE ERRAND THE WIDGET CAN TELL THE OWNER ABOUT.
+//
+// The LinkedIn export is the only source that needs the owner to go somewhere
+// and fetch something, and the fetch happens hours after they asked — by which
+// time the setup flow is closed and the reason they asked is forgotten. The
+// mail connector notices LinkedIn's "your archive is ready" mail and leaves a
+// note; this is the widget end of it. The glow is the gear's existing "there is
+// something for you in settings", and the hover says which thing — the same
+// split the reconnect button uses, where the title IS the tease.
+//
+// A TIMESTAMP OR NOTHING. The route refuses to answer once the export is
+// installed, so there is no second condition to get wrong here, and no way for
+// this to badge an errand the owner has already run.
+//
+// Asked when the page loads and again on a wake, and never on a timer: the note
+// is written at most once and the gear is not a status light.
+function checkLinkedInReady() {
+  hzPost('linkedInReady')
+    .then((out) => {
+      if (!Number.isFinite(Number(out?.readyTs))) return;
+      window.__hzGearNudge(true);
+      gearBtn.title = 'your export is ready — open the email';
+    })
+    .catch(() => {});
+}
+checkLinkedInReady();
 
 // Anywhere that isn't a control drags the window.
 document.body.addEventListener('mousedown', (e) => {
