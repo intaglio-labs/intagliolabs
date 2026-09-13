@@ -10,11 +10,17 @@
 //
 // THE MARKER. `export-ready.json` is the mail connector's note to the setup
 // screen: LinkedIn has mailed the owner to say their archive is downloadable.
-// It is NOT corpus. It holds the message's timestamp and its subject line and
-// nothing else -- no body, no link, no sender -- because the surfaces that
-// read it only ever say "your export is ready, open the email", and a link
-// copied out of a mail is a credential-shaped thing this file has no business
-// holding. The mail itself stays in the corpus, where deletion works.
+// It is NOT corpus. It holds ONE NUMBER -- when that mail arrived -- and
+// nothing else.
+//
+// ~~and its subject line~~ DROPPED (review finding 18). The subject was
+// written, read back, and consumed by nothing: every surface says its own
+// sentence ("your export is ready -- open the email") and only ever needed the
+// timestamp. What it actually did was leave a string an outsider chose sitting
+// at rest in the owner's import folder, for no reader. No body, no link, no
+// sender was ever in here, for the same reason, and a link copied out of a
+// mail is a credential-shaped thing this file has no business holding. The
+// mail itself stays in the corpus, where deletion works.
 //
 // IT IS A NUDGE, AND A NUDGE OUTLIVED BY ITS OWN ANSWER IS NOISE. Once
 // Connections.csv is in place the marker says nothing anybody needs: the
@@ -22,6 +28,15 @@
 // while the export is installed, and the linkedin connector's own run deletes
 // the file. Both, deliberately -- the delete is the tidy-up and the read gate
 // is what makes a marker left behind by a crashed pass harmless.
+//
+// AND A NUDGE OUTLIVED BY ITS OWN LINK IS WORSE THAN NOISE (review finding 7).
+// LinkedIn's download expires in days; the marker did not expire at all, so an
+// owner who never fetched the archive kept a badge pointing at a dead link for
+// the life of the install. Fourteen days is the bound, applied on BOTH sides --
+// the writer will not record a mail older than that, and the reader stops
+// answering when one ages past it. The read gate is the load-bearing half: a
+// marker written the day it was legitimate still has to go quiet later, and
+// nothing else runs to retire it.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -62,47 +77,54 @@ export function exportInstalled(home) {
   }
 }
 
-// `{ at, subject }` or null. Null while the export is installed (the nudge has
-// been answered), and null for anything unreadable, unparseable, or carrying
-// no usable timestamp -- absence of a claim is not a claim.
-export function readExportReady(home) {
+// How long a "your export is ready" mail is worth saying anything about.
+// LinkedIn's own download expires in days; this is the outer bound on a
+// sentence that sends the owner back to that mail.
+export const EXPORT_READY_MAX_AGE_MS = 14 * 86_400_000;
+
+// `{ at }` or null. Null while the export is installed (the nudge has been
+// answered), null once the mail is older than EXPORT_READY_MAX_AGE_MS, and
+// null for anything unreadable, unparseable, or carrying no usable timestamp
+// -- absence of a claim is not a claim.
+export function readExportReady(home, { now = Date.now } = {}) {
   const at = usableHome(home);
   if (at === null || exportInstalled(at)) return null;
   try {
     const raw = JSON.parse(readFileSync(markerPath(at), 'utf8'));
     const ts = Number(raw?.at);
     if (!Number.isFinite(ts)) return null;
-    return { at: ts, subject: typeof raw?.subject === 'string' ? raw.subject : null };
+    if (now() - ts > EXPORT_READY_MAX_AGE_MS) return null;
+    return { at: ts };
   } catch {
     return null;
   }
 }
 
-// WHAT THE SURFACES GET, and all they get: the timestamp. The subject is for
-// the owner's own eye on their own Mac, not for a status payload that three
-// processes relay -- a surface that never receives it cannot leak it.
-export function exportReadyAt(home) {
-  return readExportReady(home)?.at ?? null;
+// WHAT THE SURFACES GET, and all there is to get: the timestamp.
+export function exportReadyAt(home, options) {
+  return readExportReady(home, options)?.at ?? null;
 }
 
 // Records the note. Returns true when the file was written.
 //
 // REFUSED while the export is installed: the owner has already done the thing
-// the nudge asks for. Refused, too, for a mail no newer than the marker
-// already on disk, which is what keeps a backfill re-reading the same message
-// -- or a second mailbox carrying a copy of it -- from rewriting the file on
-// every pass.
-export function noteExportReady(home, { at, subject } = {}) {
+// the nudge asks for. Refused for a mail already older than the age bound,
+// which no reader would answer with anyway. And refused for a mail no newer
+// than the marker already on disk, which is what keeps a backfill re-reading
+// the same message -- or a second mailbox carrying a copy of it -- from
+// rewriting the file on every pass.
+export function noteExportReady(home, { at } = {}, { now = Date.now } = {}) {
   const at_ = usableHome(home);
   if (at_ === null) return false;
   const ts = Number(at);
   if (!Number.isFinite(ts)) return false;
+  if (now() - ts > EXPORT_READY_MAX_AGE_MS) return false;
   if (exportInstalled(at_)) return false;
-  const existing = readExportReady(at_);
+  const existing = readExportReady(at_, { now });
   if (existing !== null && existing.at >= ts) return false;
   const path = markerPath(at_);
   const tmp = `${path}.${process.pid}.tmp`;
-  const body = { at: ts, subject: typeof subject === 'string' ? subject : null };
+  const body = { at: ts };
   try {
     mkdirSync(importDir(at_), { recursive: true, mode: 0o700 });
     // Owner-only and atomic, like every other small file this package writes:

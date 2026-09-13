@@ -60,8 +60,8 @@
 import { homedir } from 'node:os';
 import { createGmailClient } from '../lib/gmailClient.mjs';
 import { GMAIL_SCOPE, accountsWithScope } from '../lib/googleAccounts.mjs';
-import { DEFAULT_MAX_BODY_BYTES, messageToRow, normalizeAddresses } from '../lib/mailRows.mjs';
-import { noteExportReady } from '../lib/linkedinExport.mjs';
+import { DEFAULT_MAX_BODY_BYTES, messageToRow, parseAddressHeader } from '../lib/mailRows.mjs';
+import { EXPORT_READY_MAX_AGE_MS, noteExportReady } from '../lib/linkedinExport.mjs';
 
 const DEFAULT_BACKFILL_DAYS = 30;
 // Forward scans stay bounded so a first run cannot monopolize the daemon.
@@ -158,6 +158,15 @@ const OWED_DRAIN_GETS = Math.floor(MAX_MESSAGES_PER_ACCOUNT / 2);
 // connector already owns -- the same place the per-account cursors themselves
 // live, and never a log line.
 const ACCOUNTS_SEEN_KEY = 'mail:accounts-seen';
+// WHEN THIS INSTALL FIRST READ ANY MAIL AT ALL, and the only thing it is used
+// for is the export-ready nudge (review finding 7). A first pass reads
+// DEFAULT_BACKFILL_DAYS behind now, so without a floor a brand-new install
+// would badge "your export is ready -- open the email" off a four-week-old mail
+// whose download LinkedIn expired weeks ago. Mail from before this install
+// existed is mail the owner already dealt with, one way or another; only what
+// arrives from here on is news. Written once, never moved, and read by nothing
+// else -- the corpus cursors above are what decide what gets FETCHED.
+const FIRST_PASS_KEY = 'mail:first-pass-at';
 function previousAccounts(state) {
   try {
     const parsed = JSON.parse(state.getCursor(ACCOUNTS_SEEN_KEY) ?? '[]');
@@ -259,53 +268,73 @@ export function gmailMessageToParsed(message) {
 // have; this is a second, smaller reading of the same message.
 //
 // THE SENDER IS THE HALF THAT IS TIGHT, and it is checked first for that
-// reason: `linkedin.com` itself or a subdomain of it (`e.linkedin.com`,
-// `bounce.linkedin.com` -- the notification traffic moves between them), and
-// never a domain that merely ENDS in the string, which is what an anchored
-// `.linkedin.com` suffix keeps out of `notlinkedin.com`.
+// reason: the ADDRESS's domain must be `linkedin.com` itself or a subdomain of
+// it (`e.linkedin.com`, `bounce.linkedin.com` -- the notification traffic moves
+// between them), never a domain that merely ends in the string, which is what
+// an anchored suffix keeps out of `notlinkedin.com`.
+//
+// THE ADDRESS, NOT THE DISPLAY NAME: parseAddressHeader treats angle brackets
+// as authoritative, so `"LinkedIn <noreply@linkedin.com>" <x@attacker.com>`
+// reads as x@attacker.com, which is what it is.
+//
+// AND EXACTLY ONE OF THEM (review finding 16). This used to ask whether ANY
+// address in `From` was LinkedIn's, and `From: <a@attacker.com>,
+// <b@linkedin.com>` is a legal header that passes such a test. A real `From`
+// carries one address; a mail that carries two is not the one this is looking
+// for, whichever order they are in.
 const LINKEDIN_SENDER = /^(?:[a-z0-9-]+\.)*linkedin\.com$/u;
 function fromLinkedin(raw) {
-  return normalizeAddresses(raw).some((address) => {
-    const at = address.lastIndexOf('@');
-    return at !== -1 && LINKEDIN_SENDER.test(address.slice(at + 1));
-  });
+  const addresses = parseAddressHeader(raw);
+  if (addresses.length !== 1) return false;
+  const address = String(addresses[0]).toLowerCase();
+  const at = address.lastIndexOf('@');
+  return at !== -1 && LINKEDIN_SENDER.test(address.slice(at + 1));
 }
 
 // THE SUBJECT IS THE HALF THAT CANNOT BE TIGHT, because LinkedIn writes it
 // several ways and has changed it before: "Your LinkedIn data is ready",
-// "Your download is ready". So the test is `ready` AND (`data` OR `download`)
-// -- the smallest rule both of those known subjects satisfy.
+// "Your download is ready".
 //
-// NOT "data AND ready-or-download", which is the obvious reading of the same
-// three words and which "Your download is ready" FAILS: there is no `data` in
-// it. The availability word is the one that must always be present; what it is
-// about may be called either thing. Word-bounded, so "already" is not "ready"
-// and "metadata" is not "data".
+// ~~`ready` AND (`data` OR `download`), in any order~~ WAS ALSO TRUE OF
+// LINKEDIN'S MARKETING (review finding 8). "Ready to grow your network?
+// Download the app", from e.linkedin.com, satisfied every clause of it -- and
+// the cost model that version wrote down ("a badge the owner dismisses by
+// looking at their mail") was wrong, because nothing dismisses the marker
+// except installing an export.
 //
-// A false positive costs a badge the owner dismisses by looking at their mail;
-// a false negative costs the whole feature, silently. The sender gate is what
-// makes that trade safe -- only LinkedIn's own mail is ever examined.
+// ORDER IS WHAT SEPARATES THEM. LinkedIn's own sentence is about a thing that
+// belongs to the owner and is now finished -- YOUR (data|download) ... is
+// READY -- and the marketing sentence puts the availability word first and the
+// possessive after it. So the three words must appear in that order, which the
+// two known subjects do and "Ready to grow your network? Download the app"
+// does not. Word-bounded, so "already" is not "ready" and "metadata" is not
+// "data".
+//
+// Plus a short blocklist for the recurring mail that could still stumble into
+// the shape ("your weekly ... is ready"), because a false positive is a badge
+// nothing can clear and a false negative is one mail this pass did not act on.
+const READY_SHAPE = /\byour\b[\s\S]*?\b(?:data|downloads?)\b[\s\S]*?\bready\b/u;
+const NOT_THE_EXPORT = /\b(?:explore|insights?|weekly|newsletter)\b/u;
 function subjectSaysReady(subject) {
   const text = typeof subject === 'string' ? subject.toLowerCase() : '';
-  if (!/\bready\b/u.test(text)) return false;
-  return /\bdata\b/u.test(text) || /\bdownloads?\b/u.test(text);
+  return READY_SHAPE.test(text) && !NOT_THE_EXPORT.test(text);
 }
 
-// `{ at, subject }` for a mail that says the export is downloadable, else null.
+// `{ at }` for a mail that says the export is downloadable, else null.
 // Exported for the fixture test: this is a rule about wording, and a rule about
 // wording that nothing pins is a rule that drifts.
 //
 // The timestamp is Gmail's internalDate where the caller has one -- the same
 // value every cursor in this file compares -- and the parsed date otherwise.
-// SUBJECT ONLY beyond that: no body, no link, no sender. See lib/
-// linkedinExport.mjs for why the marker holds so little.
+// NOTHING ELSE TRAVELS: not the subject, not the body, not the sender. See
+// lib/linkedinExport.mjs for why the marker holds one number.
 export function linkedinExportReadyNote(parsed, ts) {
   if (!fromLinkedin(parsed?.from) || !subjectSaysReady(parsed?.subject)) return null;
   const at = Number.isFinite(ts) ? Number(ts)
     : parsed?.date instanceof Date ? parsed.date.getTime()
     : Number.NaN;
   if (!Number.isFinite(at)) return null;
-  return { at, subject: typeof parsed?.subject === 'string' ? parsed.subject : null };
+  return { at };
 }
 
 // Per-account settings still come from the connectors config, but the config
@@ -376,6 +405,15 @@ export function createMailSource({
       // another, and the marker names one event whoever received it.
       let exportReady = null;
       let exportReadySeen = 0;
+      // The two bounds on what may become a nudge, resolved once: nothing from
+      // before this install started reading, and nothing the reader would have
+      // stopped answering for anyway (EXPORT_READY_MAX_AGE_MS). See
+      // FIRST_PASS_KEY, and lib/linkedinExport.mjs for the age bound's other
+      // half, which is the load-bearing one.
+      const firstPassRaw = Number(state.getCursor(FIRST_PASS_KEY));
+      const firstPassAt = Number.isFinite(firstPassRaw) && firstPassRaw > 0 ? firstPassRaw : now();
+      if (firstPassAt !== firstPassRaw) state.setCursor(FIRST_PASS_KEY, String(firstPassAt));
+      const exportReadyFloor = Math.max(firstPassAt, now() - EXPORT_READY_MAX_AGE_MS);
       const failures = [];
       const yearly = ctx.history === true && ctx.historyWindow?.year ? ctx.historyWindow : null;
       let historyDone = true;
@@ -884,7 +922,7 @@ export function createMailSource({
                   // expired. Every forward path comes through here: the fresh
                   // window and both gap drains all run this same loop.
                   const note = linkedinExportReadyNote(parsed, internal);
-                  if (note !== null) {
+                  if (note !== null && note.at >= exportReadyFloor) {
                     exportReadySeen += 1;
                     if (exportReady === null || note.at > exportReady.at) exportReady = note;
                   }
@@ -1157,11 +1195,14 @@ export function createMailSource({
       // copy of it -- rewrites nothing.
       //
       // COUNTS ONLY IN THE LOG (connectors/AGENTS.md): how many such mails this
-      // pass saw and whether the marker moved. The subject goes in the marker,
-      // which is a file in the owner's own import folder; the log is a second
-      // corpus if anything quotable ever reaches it.
+      // pass saw and whether the marker moved. Neither the subject nor the
+      // sender goes anywhere -- not into the log, and not into the marker,
+      // which holds the timestamp alone.
       if (exportReady !== null) {
-        const noted = noteExportReady(home, exportReady);
+        // THE PASS'S OWN CLOCK, not the wall clock: every other bound in this
+        // run is measured against ctx.now, and the age gate inside
+        // noteExportReady has to agree with the floor computed above.
+        const noted = noteExportReady(home, exportReady, { now });
         log.info('mail_linkedin_export_ready', {
           connector: 'mail', seen: exportReadySeen, noted: noted ? 1 : 0,
         });

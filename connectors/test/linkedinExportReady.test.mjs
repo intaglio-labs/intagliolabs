@@ -6,9 +6,10 @@
 // screen went on saying the export was missing.
 //
 // What is pinned here is the whole chain and nothing outside it: which mail
-// counts, that a real forward pass leaves the marker, what the marker is
-// allowed to hold, when it must NOT be written, that importing the export
-// removes it, and that connect's tile relays the timestamp.
+// counts, which LinkedIn mail deliberately does not, that a real forward pass
+// leaves the marker, that the marker holds one number, when it must NOT be
+// written, when it stops being worth saying, that importing the export removes
+// it, and that connect's tile relays the timestamp.
 //
 // Every fixture synthetic; the repo is public.
 
@@ -20,10 +21,13 @@ import { join } from 'node:path';
 
 import { createMailSource, linkedinExportReadyNote } from '../sources/mail.mjs';
 import { createLinkedinSource } from '../sources/linkedin.mjs';
-import { connectionsPath, exportReadyAt, markerPath, readExportReady } from '../lib/linkedinExport.mjs';
+import {
+  EXPORT_READY_MAX_AGE_MS, connectionsPath, exportReadyAt, markerPath, readExportReady,
+} from '../lib/linkedinExport.mjs';
 import { LINKEDIN_EXPORT_ID, readStatus } from '../../connect/lib/status.mjs';
 
 const TOKEN = 'ab'.repeat(32); // 64 hex chars, deliberately not a real secret
+const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 8, 13);
 const READY_TS = NOW - 3_600_000;
 
@@ -33,8 +37,8 @@ function tempHome(t) {
   return home;
 }
 
-function memoryState() {
-  const values = new Map();
+function memoryState(seed = {}) {
+  const values = new Map(Object.entries(seed).map(([k, v]) => [k, String(v)]));
   return {
     getCursor: (key) => values.get(key) ?? null,
     setCursor: (key, value) => values.set(key, String(value)),
@@ -80,37 +84,41 @@ const gmailMessage = (id, ts, { from, subject, body = 'a body with a https://lin
   },
 });
 
-async function runMail(home, messages, { log = { info() {}, warn() {} } } = {}) {
+const ready = (id, ts) => gmailMessage(id, ts, {
+  from: 'LinkedIn <noreply@linkedin.com>', subject: 'Your LinkedIn data is ready',
+});
+const chatter = (id, ts) => gmailMessage(id, ts, { from: 'friend@example.test', subject: 'lunch?' });
+
+async function runMail(home, messages, { at = NOW, state = memoryState(), log = { info() {}, warn() {} } } = {}) {
   const source = createMailSource({
     accountsForScope: () => [{ email: 'owner@example.test' }],
     makeClient: () => inbox(messages),
     sleep: async () => {},
   });
-  const ingested = [];
   await source.run({
-    state: memoryState(),
+    state,
     config: {},
     home,
-    now: () => NOW,
-    ingest: async (rows) => { ingested.push(...rows); return { inserted: rows.length, updated: 0, unchanged: 0 }; },
+    now: () => at,
+    ingest: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
     log,
   });
-  return ingested;
+  return state;
 }
 
 // --- WHICH MAIL COUNTS -----------------------------------------------------
 //
-// The sender is the tight half and the subject is the half that cannot be:
-// LinkedIn writes it several ways and has changed it before.
+// The sender is the tight half. The subject cannot be tight — LinkedIn writes
+// it several ways and has changed it before — so what separates its own mail
+// from its marketing is the ORDER of the words rather than the words.
 
-test('both wordings LinkedIn actually uses are recognised, and the note carries the subject only', () => {
+test('both wordings LinkedIn actually uses are recognised, and the note is one number', () => {
   for (const subject of ['Your LinkedIn data is ready', 'Your download is ready']) {
     const note = linkedinExportReadyNote(parsedMail('LinkedIn <noreply@linkedin.com>', subject), READY_TS);
     assert.ok(note, `"${subject}" is LinkedIn telling the owner their archive is downloadable`);
     assert.equal(note.at, READY_TS);
-    assert.equal(note.subject, subject);
-    assert.deepEqual(Object.keys(note).sort(), ['at', 'subject'],
-      'the note is a timestamp and a subject line: no body, no link, no sender');
+    assert.deepEqual(Object.keys(note), ['at'],
+      'a timestamp, and nothing else: no subject, no body, no link, no sender');
   }
   // Notification traffic moves between subdomains, and all of it is LinkedIn.
   assert.ok(linkedinExportReadyNote(
@@ -118,25 +126,22 @@ test('both wordings LinkedIn actually uses are recognised, and the note carries 
   ));
 });
 
-test('a domain that merely ends in the string is not LinkedIn', () => {
-  // The anchored subdomain test is the whole difference between "LinkedIn said
-  // so" and "anybody who can register notlinkedin.com said so".
-  assert.equal(
-    linkedinExportReadyNote(parsedMail('noreply@notlinkedin.com', 'Your LinkedIn data is ready'), READY_TS),
-    null
-  );
-  assert.equal(
-    linkedinExportReadyNote(parsedMail('friend@example.test', 'Your data is ready'), READY_TS),
-    null
-  );
-});
-
-test('LinkedIn mail that is not about the export is left alone', () => {
+test('LinkedIn marketing is not LinkedIn saying your export is ready', () => {
+  // THE FAILING INPUT THIS RULE WAS REWRITTEN FOR. Every word the first version
+  // asked for is in this subject — ready, download — and it is sent from the
+  // same subdomain the notifications come from. A false positive here is not a
+  // badge the owner shrugs off: nothing clears the marker but importing an
+  // export or waiting out a fortnight.
+  assert.equal(linkedinExportReadyNote(
+    parsedMail('noreply@e.linkedin.com', 'Ready to grow your network? Download the app'), READY_TS
+  ), null);
   for (const subject of [
+    'Your weekly data digest is ready',        // recurring mail in the right shape
+    'Your insights report is ready to download',
+    'Explore your data — the new download is ready',
+    'Your download is being prepared',         // no availability word yet
+    'Your profile is already up to date',      // "already" is not "ready"
     'You have 3 new messages',
-    'Your download is being prepared',   // no availability word yet
-    'Your profile is already up to date', // "already" is not "ready"
-    'Ready for your next role?',          // no data, no download
   ]) {
     assert.equal(
       linkedinExportReadyNote(parsedMail('noreply@linkedin.com', subject), READY_TS), null,
@@ -145,28 +150,53 @@ test('LinkedIn mail that is not about the export is left alone', () => {
   }
 });
 
+test('the sender gate is the address, exactly one of them, and the real domain', () => {
+  // A domain that merely ends in the string is anybody who can register it.
+  assert.equal(
+    linkedinExportReadyNote(parsedMail('noreply@notlinkedin.com', 'Your LinkedIn data is ready'), READY_TS),
+    null
+  );
+  // The display name is not the sender, and a second address does not make a
+  // mail LinkedIn's: a real `From` carries one.
+  assert.equal(linkedinExportReadyNote(
+    parsedMail('"LinkedIn noreply@linkedin.com" <x@attacker.test>', 'Your LinkedIn data is ready'), READY_TS
+  ), null);
+  assert.equal(linkedinExportReadyNote(
+    parsedMail('<a@attacker.test>, <b@linkedin.com>', 'Your LinkedIn data is ready'), READY_TS
+  ), null);
+  assert.equal(linkedinExportReadyNote(
+    parsedMail('<b@linkedin.com>, <a@attacker.test>', 'Your LinkedIn data is ready'), READY_TS
+  ), null, 'nor in the other order: the first address is not a vote');
+  assert.equal(
+    linkedinExportReadyNote(parsedMail('friend@example.test', 'Your data is ready'), READY_TS), null
+  );
+});
+
 // --- A REAL PASS -----------------------------------------------------------
 
-test('a forward pass over the mail leaves the marker, and the log says counts only', async (t) => {
+test('a mail that arrives while the reader is running leaves the marker, and the log says counts only', async (t) => {
   const home = tempHome(t);
   const events = [];
-  await runMail(home, [
-    gmailMessage('m0', NOW - 60_000, { from: 'friend@example.test', subject: 'lunch?' }),
-    gmailMessage('m1', READY_TS, {
-      from: 'LinkedIn <noreply@linkedin.com>', subject: 'Your LinkedIn data is ready',
-    }),
-  ], { log: { info: (event, fields) => events.push({ event, fields }), warn() {} } });
+  const log = { info: (event, fields) => events.push({ event, fields }), warn() {} };
 
-  const marker = readExportReady(home);
+  // Pass one: an ordinary inbox. This is the install.
+  const state = await runMail(home, [chatter('m0', NOW - DAY)], { at: NOW, log });
+  assert.equal(exportReadyAt(home), null);
+
+  // The owner asks LinkedIn for their data, and an hour later it answers.
+  const arrived = NOW + 3_600_000;
+  await runMail(home, [chatter('m0', NOW - DAY), ready('m1', arrived)],
+    { at: arrived + 3_600_000, state, log });
+
+  const marker = readExportReady(home, { now: () => arrived + 3_600_000 });
   assert.ok(marker, 'the mail connector noticed and left the note');
-  assert.equal(marker.at, READY_TS, "the mail's own timestamp, which is what the screen dates it by");
-  assert.equal(marker.subject, 'Your LinkedIn data is ready');
+  assert.equal(marker.at, arrived, "the mail's own timestamp, which is what the screen dates it by");
 
-  // THE FILE HOLDS NOTHING ELSE. The body of that mail carries a download link;
-  // a link copied out of a mail is a credential-shaped thing this marker has no
-  // business holding, and the mail itself is in the corpus where deletion works.
+  // THE FILE HOLDS ONE NUMBER. The body of that mail carries a download link
+  // and the subject is a string an outsider chose; no surface reads either, so
+  // neither is kept.
   const raw = JSON.parse(readFileSync(markerPath(home), 'utf8'));
-  assert.deepEqual(Object.keys(raw).sort(), ['at', 'subject']);
+  assert.deepEqual(Object.keys(raw), ['at']);
   assert.equal(JSON.stringify(raw).includes('linkedin.example'), false, 'no link, no body');
   assert.equal(statSync(markerPath(home)).mode & 0o777, 0o600, 'owner-only, like every small file here');
 
@@ -180,19 +210,59 @@ test('a forward pass over the mail leaves the marker, and the log says counts on
 
 test('no such mail, no marker', async (t) => {
   const home = tempHome(t);
-  await runMail(home, [gmailMessage('m0', NOW - 60_000, { from: 'friend@example.test', subject: 'lunch?' })]);
+  await runMail(home, [chatter('m0', NOW - 60_000)]);
   assert.equal(exportReadyAt(home), null);
   assert.equal(existsSync(markerPath(home)), false);
 });
+
+// --- RECENCY ---------------------------------------------------------------
+//
+// LinkedIn's download expires in days. A sentence that sends the owner back to
+// a mail has to be about a mail whose link can still be followed.
+
+test('a first pass reads a month back and badges none of it', async (t) => {
+  const home = tempHome(t);
+  // The failing install: a Mac whose inbox already holds "your data is ready"
+  // from before Hazlie existed. The first forward window covers 30 days, so the
+  // reader does see it — and an export requested before this install is one the
+  // owner already dealt with, or one whose link is dead.
+  await runMail(home, [ready('m1', NOW - 28 * DAY), ready('m2', NOW - 3 * DAY)]);
+  assert.equal(exportReadyAt(home), null,
+    'nothing from before the first pass is news, however recent');
+  assert.equal(existsSync(markerPath(home)), false);
+});
+
+test('a mail older than the age bound is never recorded, even on a long-running install', async (t) => {
+  const home = tempHome(t);
+  // An install that has been reading for two months, so the first-pass floor is
+  // long past and the age bound is the only thing left holding the line.
+  const state = memoryState({ 'mail:first-pass-at': NOW - 60 * DAY });
+  await runMail(home, [ready('m1', NOW - 20 * DAY)], { state });
+  assert.equal(exportReadyAt(home), null, 'twenty days is past any download LinkedIn still honours');
+
+  await runMail(home, [ready('m1', NOW - 20 * DAY), ready('m2', NOW - 2 * DAY)], { state });
+  assert.equal(exportReadyAt(home, { now: () => NOW }), NOW - 2 * DAY, 'and two days is not');
+});
+
+test('the marker goes quiet on its own once the link it points at is dead', (t) => {
+  const home = tempHome(t);
+  mkdirSync(join(home, '.hazlie', 'imports', 'linkedin'), { recursive: true });
+  writeFileSync(markerPath(home), JSON.stringify({ at: NOW }));
+
+  assert.equal(exportReadyAt(home, { now: () => NOW + DAY }), NOW, 'the day after, it still stands');
+  assert.equal(exportReadyAt(home, { now: () => NOW + EXPORT_READY_MAX_AGE_MS + DAY }), null,
+    'a fortnight later it says nothing: the read gate is what retires a marker nobody rewrites');
+});
+
+// --- THE END OF THE NUDGE --------------------------------------------------
 
 test('the nudge is not written once the export is in place', async (t) => {
   const home = tempHome(t);
   mkdirSync(join(home, '.hazlie', 'imports', 'linkedin'), { recursive: true });
   writeFileSync(connectionsPath(home), 'First Name,Last Name\n');
 
-  await runMail(home, [gmailMessage('m1', READY_TS, {
-    from: 'noreply@linkedin.com', subject: 'Your LinkedIn data is ready',
-  })]);
+  const state = memoryState({ 'mail:first-pass-at': NOW - 60 * DAY });
+  await runMail(home, [ready('m1', NOW - 3_600_000)], { state });
 
   assert.equal(existsSync(markerPath(home)), false,
     'the owner has already done the thing the nudge asks for');
@@ -201,10 +271,9 @@ test('the nudge is not written once the export is in place', async (t) => {
 
 test('importing the export removes a marker left behind', async (t) => {
   const home = tempHome(t);
-  await runMail(home, [gmailMessage('m1', READY_TS, {
-    from: 'noreply@linkedin.com', subject: 'Your LinkedIn data is ready',
-  })]);
-  assert.equal(exportReadyAt(home), READY_TS);
+  const state = memoryState({ 'mail:first-pass-at': NOW - 60 * DAY });
+  await runMail(home, [ready('m1', NOW - 3_600_000)], { state });
+  assert.equal(exportReadyAt(home, { now: () => NOW }), NOW - 3_600_000);
 
   // The owner opens the mail, downloads the archive, drops the file. The
   // linkedin connector's next pass is what sees it.
@@ -219,7 +288,7 @@ test('importing the export removes a marker left behind', async (t) => {
 
 // --- THE SURFACE -----------------------------------------------------------
 
-test("connect's LinkedIn tile carries the timestamp, and never the subject", (t) => {
+test("connect's LinkedIn tile carries the timestamp, and only while it is worth saying", (t) => {
   const home = tempHome(t);
   const secrets = join(home, '.hazlie', 'secrets');
   mkdirSync(secrets, { recursive: true, mode: 0o700 });
@@ -229,15 +298,20 @@ test("connect's LinkedIn tile carries the timestamp, and never the subject", (t)
   const find = () => readStatus({ home }).find((row) => row.id === LINKEDIN_EXPORT_ID);
   assert.equal(find().linkedinExportReady, null, 'nothing has said the export is ready');
 
+  // The tile reads the real clock, so these markers are dated against it.
+  const fresh = Date.now() - DAY;
   mkdirSync(join(home, '.hazlie', 'imports', 'linkedin'), { recursive: true });
-  writeFileSync(markerPath(home), JSON.stringify({ at: READY_TS, subject: 'Your LinkedIn data is ready' }));
+  writeFileSync(markerPath(home), JSON.stringify({ at: fresh }));
   const waiting = find();
-  assert.equal(waiting.linkedinExportReady, READY_TS,
+  assert.equal(waiting.linkedinExportReady, fresh,
     'the tile can now say "your export is ready — open the email" instead of repeating itself');
   assert.equal(waiting.connected, false, 'ready to fetch is not imported');
-  assert.equal(JSON.stringify(waiting).includes('data is ready'), false,
-    'the subject stays on the owner\'s own disk');
 
+  writeFileSync(markerPath(home), JSON.stringify({ at: Date.now() - EXPORT_READY_MAX_AGE_MS - DAY }));
+  assert.equal(find().linkedinExportReady, null,
+    'and it stops pointing at a download that has expired');
+
+  writeFileSync(markerPath(home), JSON.stringify({ at: fresh }));
   writeFileSync(connectionsPath(home), 'First Name,Last Name\n');
   const imported = find();
   assert.equal(imported.connected, true);
