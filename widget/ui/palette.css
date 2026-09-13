@@ -1355,6 +1355,11 @@ body.widget.spotlight-widget .dream { display: none; }
   color: var(--hazelnut-light);
   display: flex; align-items: center; justify-content: center;
 }
+/* .gear sets `display: flex` two rules up, and a class beats the UA's
+   `[hidden]` attribute rule — so without this the People button's
+   `monthsBtn.hidden = true` (widget.js) would change the property and nothing
+   on screen. Same lesson as .wchat[hidden] above and .ob-prog[hidden] below. */
+.gear[hidden] { display: none; }
 .gear:hover { border-color: rgba(197, 165, 109, 0.7); }
 .gear svg { width: 15px; height: 15px; }
 

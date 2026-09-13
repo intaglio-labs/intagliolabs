@@ -336,20 +336,41 @@ test('voice verbs are inert and say why', () => {
   assert.match(speak.slice(0, 200), /guard Features\.on\("voice"\)/u);
 });
 
-// THE PEOPLE REVIEW IS A KEEP, AND THE TIMELINE WAS ITS ONLY DOOR.
-// openPeople is in the `people-months` capability list and nowhere else the
-// widget can reach, so returning early here would have made "Same person?"
-// unreachable — and a wrong merge is a wrong card.
-test('with the timeline off, the People button opens the People review instead', () => {
+// ~~THE PEOPLE REVIEW IS A KEEP, AND THE TIMELINE WAS ITS ONLY DOOR.~~
+// It was, and the routing this test used to pin — timeline off, People button
+// opens the "Same person?" review instead — was right while find-pairs was a
+// keep. The surface review (2026-09-13) settled the other way: the review IS
+// the find-pairs window the owner asked to take off the bar, so with `timeline`
+// off the button is HIDDEN (widget.js, before the first paint) and the verb it
+// used to post returns early. Rewritten rather than deleted, because the pages
+// and their grants are still there and the next reader is owed the reason.
+test('with the timeline off, the People button is gone and its verb opens nothing', () => {
   const fn = main.slice(main.indexOf('func openMonths()'));
-  const head = fn.slice(0, 1400);
-  assert.match(head, /Features\.peopleButtonOpensPeopleDirectly/u);
-  assert.match(head, /openPeople\(\)/u,
-    'the button must still reach the review, not return into nothing');
-  const gateAt = head.indexOf('peopleButtonOpensPeopleDirectly');
+  const head = fn.slice(0, 1600);
+  assert.match(head, /guard Features\.shouldBuildTimelinePanel\(Features\.current\) else/u,
+    'openMonths must read the same flag that decides whether the panel exists');
+  const gateAt = head.indexOf('shouldBuildTimelinePanel');
   const buildAt = head.indexOf('monthsPanel = makePanel');
   assert.ok(gateAt > 0 && (buildAt === -1 || gateAt < buildAt),
     'the gate must sit before the panel is built');
+  // The early return must not route anywhere — reaching openPeople() here is
+  // exactly the behaviour that was removed.
+  const gate = head.slice(gateAt, head.indexOf('\n    }', gateAt));
+  assert.match(gate, /\breturn\b/u, 'the gate must return, not fall through');
+  assert.doesNotMatch(gate, /openPeople\(\)/u,
+    'the People review is not a door the button keeps any more');
+  // And the button itself: hidden before the first paint, revealed only by the
+  // registry's answer, the same shape as the chat pill beside it.
+  assert.match(widgetJs, /monthsBtn\.hidden = true;/u,
+    'the People button must be hidden synchronously, not after the bridge answers');
+  assert.match(widgetJs, /monthsBtn\.hidden = !timelineFeatureOn;/u,
+    "and revealed only when the registry says `timeline` is on");
+  assert.match(widgetJs, /if \(!timelineFeatureOn\) return;/u,
+    'a press landing before the answer must not open the popup either');
+  // .gear sets `display: flex`, so the attribute alone would change nothing on
+  // screen. This is the rule that makes `hidden` mean hidden.
+  assert.match(palette, /\.gear\[hidden\] \{ display: none; \}/u,
+    'a class that sets display beats [hidden] — palette.css must say otherwise');
 });
 
 // A hidden page posting nothing needs no grant change, and the lists are

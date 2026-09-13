@@ -1106,22 +1106,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // time. (It absorbed the constellation/sky list, retired 2026-08-24 —
   // people-sky.css survives as this popup's base stylesheet.)
   func openMonths() {
-    // THE BUTTON KEEPS ITS DOOR, IT JUST CHANGES WHAT IS BEHIND IT.
+    // ~~THE BUTTON KEEPS ITS DOOR, IT JUST CHANGES WHAT IS BEHIND IT.~~ It used
+    // to route here to openPeople() when the timeline was off, so that the
+    // "Same person?" review — reachable only from inside the timeline — kept a
+    // door. That was the right call while find-pairs was a KEEP. It is not one
+    // any more: the review IS the find-pairs window the owner asked to have off
+    // the surface, so the door it was keeping is the door being closed.
     //
-    // The gear row's "People" button posts openMonths, and the People popup —
-    // the "Same person?" review, which the repackaging plan KEEPS, because a
-    // wrong merge is a wrong card — is reachable today only from inside this
-    // timeline (openPeople is in `people-months`' capability list and nowhere
-    // else the widget can reach). Turning the timeline off and returning early
-    // would have left the button inert and the review unreachable in the same
-    // move.
+    // The button itself is hidden with the same flag in widget.js, before the
+    // first paint. This is the second half of the same gate, because the page
+    // can post a verb the button no longer offers.
     //
-    // Routed here in native rather than in widget.js on purpose: the page keeps
-    // posting the same verb, so Bridge.swift's capability allowlists do not
-    // change and no page gains a door it did not have.
-    if Features.peopleButtonOpensPeopleDirectly(Features.current) {
-      NSLog("Intaglio Labs: the timeline is off — the People button opens the People review")
-      openPeople()
+    // NOT DELETED: people.html, people.js, Bridge.pageCapabilities["people"] and
+    // openPeople() below all stay where they are, unreachable rather than gone.
+    // If find-pairs should ever be separable from the timeline, that is the
+    // moment to add an `identity` flag — in ops/features.json, Features.swift
+    // and connectors/lib/features.mjs together, never one of the three.
+    guard Features.shouldBuildTimelinePanel(Features.current) else {
+      NSLog("Intaglio Labs: the timeline is off — the People button opens nothing")
       return
     }
     if let p = monthsPanel, p.isVisible {

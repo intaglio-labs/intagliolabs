@@ -699,7 +699,23 @@ gearBtn.addEventListener('click', () => {
   hzPost('openConnections');
 });
 
-document.getElementById('months').addEventListener('click', () => {
+// THE PEOPLE BUTTON FOLLOWS THE `timeline` FLAG, and it is the whole reason
+// the button is gated rather than the page behind it. With `timeline` off the
+// door behind this button is the duplicate-pair review, which is the "find
+// pairs" window the owner asked to have taken off the surface — so the button
+// opens nothing worth opening and a button that opens nothing is worse than no
+// button. No new registry key: adding one costs three files in one commit (see
+// ops/FEATURES.md) and this needs no distinction the registry does not already
+// make.
+//
+// The press is gated as well as the pixels. The button is hidden below before
+// the first paint, so this is belt and braces rather than the mechanism — but
+// `timeline` is answered asynchronously, and a press that lands before the
+// answer must not open the popup either.
+const monthsBtn = document.getElementById('months');
+let timelineFeatureOn = false;
+monthsBtn.addEventListener('click', () => {
+  if (!timelineFeatureOn) return;
   hzPost('openMonths');
 });
 
@@ -741,12 +757,22 @@ hzApplyPrefs();
 // [hidden] LOSES TO A CLASS THAT SETS display — palette.css says so at §2837
 // and .wchat sets position/display of its own, so the attribute alone is not
 // enough. The rules are written there explicitly; do not drop them.
+//
+// The People button is hidden on the same terms and for the same reason (see
+// its click handler above): with `timeline` off there is nothing behind it, and
+// drawing it for one frame on every launch is a door that visibly appears and
+// then is taken away. palette.css carries a `.gear[hidden]` rule because .gear
+// sets `display: flex` and would otherwise beat the attribute — the same trap
+// this comment's first paragraph records for .wchat.
 chatBtn.hidden = true;
 winput.hidden = true;
+monthsBtn.hidden = true;
 hzFeatures().then((set) => {
   const chatOn = hzFeatureOn(set, 'chat');
   chatBtn.hidden = !chatOn;
   winput.hidden = !chatOn;
+  timelineFeatureOn = hzFeatureOn(set, 'timeline');
+  monthsBtn.hidden = !timelineFeatureOn;
   voiceFeatureOn = hzFeatureOn(set, 'voice');
   // The bar's width is part of what native anchors side panels against, and it
   // just changed by the whole pill.

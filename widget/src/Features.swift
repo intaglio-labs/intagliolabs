@@ -157,12 +157,15 @@ enum Features {
   /// Build the timeline (people-months) panel.
   static func shouldBuildTimelinePanel(_ f: FeatureSet) -> Bool { f.timeline }
 
-  /// With the timeline off, the gear row's People button has nowhere to go —
-  /// and the People popup ("Same person?" review) is a KEEP, reachable today
-  /// only through the timeline's own openPeople. So the button routes straight
-  /// to People instead of opening nothing. Native-side routing on purpose: the
-  /// page keeps posting `openMonths` and no bridge capability changes.
-  static func peopleButtonOpensPeopleDirectly(_ f: FeatureSet) -> Bool { !f.timeline }
+  /// ~~`peopleButtonOpensPeopleDirectly`: with the timeline off, route the
+  /// People button straight to the "Same person?" review, which was a KEEP and
+  /// had no other door.~~ Gone with the surface review (2026-09-13): the review
+  /// IS the duplicate-pair window the owner asked to take off the bar, so the
+  /// button follows `timeline` in both halves now — hidden in widget.js before
+  /// the first paint, and `openMonths()` returning early in main.swift. The
+  /// pages and their bridge grants stay, unreachable rather than deleted; a
+  /// later `identity` flag is what would separate find-pairs from the timeline.
+  /// `shouldBuildTimelinePanel` is the one gate both halves read.
 
   /// Run a distillation pass. ANDed with the existing ~/.hazlie/distill.enabled
   /// marker, never replacing it: the marker is the "no in-app way to review
