@@ -38,14 +38,31 @@ const MAX_LENGTH = 400;
 
 export function helperDiagnostic(stderr) {
   const text = typeof stderr === 'string' ? stderr : '';
-  const at = text.lastIndexOf(HELPER_PREFIX);
-  if (at === -1) return null;
-  const [first, ...rest] = text.slice(at + HELPER_PREFIX.length).split('\n');
-  const lines = [first];
-  for (const line of rest) {
-    if (!/^\s+\S/u.test(line)) break; // node starts at column zero
-    lines.push(line);
+  // THE PREFIX ONLY COUNTS AT THE START OF A LINE (round-8 finding 6).
+  //
+  // Searched across the whole buffer, any unprefixed line that merely CONTAINS
+  // `gcal-auth: ` opened the quote -- and node hands out exactly that shape:
+  //
+  //   Error: ENOENT: no such file or directory, open gcal-auth: /Users/…json
+  //       at Object.readFileSync (node:fs:…)
+  //
+  // The match landed inside that error's own message, and node's stack frames
+  // are indented, so the continuation rule below then quoted them too: the
+  // absolute path to the owner's credential plus two frames of internals, onto
+  // their screen. Precisely what "the prefix is the permission" forbids.
+  // console.error writes its own line, so a real diagnostic always starts at
+  // column zero and nothing of the helper's is lost by insisting on it.
+  const lines = text.split('\n');
+  let at = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].startsWith(HELPER_PREFIX)) { at = i; break; }
   }
-  const said = lines.join(' ').replace(/\s+/gu, ' ').trim();
-  return said === '' ? null : said.slice(0, MAX_LENGTH);
+  if (at === -1) return null;
+  const said = [lines[at].slice(HELPER_PREFIX.length)];
+  for (const line of lines.slice(at + 1)) {
+    if (!/^\s+\S/u.test(line)) break; // node starts at column zero
+    said.push(line);
+  }
+  const message = said.join(' ').replace(/\s+/gu, ' ').trim();
+  return message === '' ? null : message.slice(0, MAX_LENGTH);
 }

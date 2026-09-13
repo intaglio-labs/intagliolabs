@@ -10,6 +10,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { start, openDb } from '../server/hermes.mjs';
+// A NAMESPACE IMPORT for the memo helper, deliberately: a named import of an
+// export the module does not have is a LINK error, and that fails this whole
+// file with one unhelpful line instead of letting the one test that reaches
+// for it say what it found.
+import * as hermes from '../server/hermes.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from '../server/relationship/owe.mjs';
 import { produceBatch } from '../server/relationship/producer.mjs';
 
@@ -1265,4 +1270,98 @@ test('the counts are measured together, mode beside any', async () => {
     assert.equal(out.counts.any, 1);
     assert.equal(out.reason, 'pool-exhausted-mode');
   });
+});
+
+// EVERY CARD REPLY SAYS WHERE THE CARD CAME FROM (round-8 finding 1).
+//
+// `servedMode` was set on the full serve and not on the PEEK -- and the peek is
+// what the widen button calls. So the panel's one-off hand-off read undefined
+// on every press, opened under the standing mode, and filtered out the very
+// card it had just teased: press "show me anyone, just this once", get the
+// card, then "nothing to review" with the investor chip still lit.
+//
+// The contract, pinned once for all four shapes: provenance (`servedMode`) and
+// the standing pick (`mode`) on every card reply, `oneOff` when the request
+// named its own mode.
+test('peek and serve both carry the card\'s provenance and the standing pick', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:contract any', 'Contract Any', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    // A ONE-OFF PEEK: the case the hand-off exists for.
+    const widePeek = await (await call('GET', '/admin/relationship/card?peek=1&mode=any')).json();
+    assert.equal(widePeek.peek, true);
+    assert.equal(widePeek.card.personKey, 'name:contract any');
+    assert.equal(widePeek.servedMode, 'any',
+      'without this the panel opens on the standing mode and drops the teased card');
+    assert.equal(widePeek.mode, 'investor', 'and the standing pick is still reported');
+    assert.equal(widePeek.oneOff, true);
+
+    // A ONE-OFF SERVE of the same card: the same two fields, same values.
+    const wideServe = await (await call('GET', '/admin/relationship/card?mode=any')).json();
+    assert.equal(wideServe.card.personKey, 'name:contract any');
+    assert.equal(wideServe.servedMode, 'any');
+    assert.equal(wideServe.mode, 'investor');
+    assert.equal(wideServe.oneOff, true);
+  });
+});
+
+test('a standing peek reports its own mode, and no oneOff', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:contract standing', 'Contract Standing', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'any' });
+    const peek = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(peek.card.personKey, 'name:contract standing');
+    assert.equal(peek.servedMode, 'any', 'the card was produced under the standing mode');
+    assert.equal(peek.mode, 'any');
+    assert.equal(peek.oneOff, undefined, 'nothing was asked for, so nothing is one-off');
+  });
+});
+
+test('an Owe peek has no mode to report, and says so rather than guessing', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedOweOpenLoopCandidate(db, 'name:contract owe', 'Contract Owe', now);
+    // Owe goes first when neither kind has been shown (CARD_PRODUCERS order).
+    const peek = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(peek.card.kind, 'owe');
+    assert.equal(peek.servedMode, null,
+      'an Owe card carries no mode and needs none: nothing filters it by one');
+    assert.equal(typeof peek.mode, 'string', 'the standing pick is still reported beside it');
+  });
+});
+
+// A POOL WE COULD NOT COUNT IS NOT A COUNT OF ZERO (round-8 finding 10).
+//
+// The memo write used to happen after the catch as well as after a reading, so
+// one transient failure inside eligiblePool pinned "the house is empty" until
+// the next refill stamped a new `at` -- a whole retry window on the screen
+// whose only job is to say how it is going.
+//
+// Unit, not route: making eligiblePool throw from outside takes the PRODUCER
+// down with it and the route answers a different branch entirely.
+test('a pool that could not be counted is not remembered as an empty one', () => {
+  const db = openDb(':memory:');
+  const now = Date.now();
+  seedReconnectCandidateMode(db, 'name:flaky any', 'Flaky Any', now);
+  const rel = { refill: { 'reconnect:investor': { at: 1_000, empty: true } } };
+
+  let failing = true;
+  const flaky = {
+    prepare(sql) {
+      if (failing) { failing = false; throw new Error('database is locked'); }
+      return db.prepare(sql);
+    },
+  };
+
+  assert.equal(hermes.modeEmptyCounts(flaky, rel, 'investor', 'reconnect:investor', now), null,
+    'this request cannot say, so it says nothing');
+  assert.equal(rel.modeCounts, undefined, 'and nothing was learned, so nothing is remembered');
+
+  assert.deepEqual(hermes.modeEmptyCounts(flaky, rel, 'investor', 'reconnect:investor', now),
+    { mode: 0, any: 1 },
+    'the next request counts again rather than being served the failure back');
+  assert.ok(rel.modeCounts, 'a real reading IS remembered, which is what the memo is for');
 });

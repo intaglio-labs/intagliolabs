@@ -3369,7 +3369,10 @@ function relationshipProducerConfig(policy) {
 // actually ran and reused for every poll it throttles. The staleness that buys
 // is bounded by the retry window itself -- a minute on the first load, which is
 // the only load where the pool moves fast enough to matter.
-function modeEmptyCounts(db, rel, mode, refillKey, now) {
+// Exported for its MEMO CONTRACT, which is the half of this that a route test
+// cannot reach: making eligiblePool throw from outside takes the producer down
+// with it, and the route then answers a different branch entirely.
+export function modeEmptyCounts(db, rel, mode, refillKey, now) {
   if (mode !== 'founder' && mode !== 'investor') return null;
   const at = rel.refill?.[refillKey]?.at ?? null;
   const cached = rel.modeCounts;
@@ -3383,7 +3386,13 @@ function modeEmptyCounts(db, rel, mode, refillKey, now) {
     // and needs no second scan to answer.
     if (forAny > 0) counts = { mode: eligiblePool(db, { mode, now }).length, any: forAny };
   } catch {
-    counts = null; // a pool this route cannot count is not a claim it can make
+    // A POOL WE COULD NOT COUNT IS NOT A COUNT OF ZERO, AND IS NOT MEMOISED AS
+    // ONE (round-8 finding 10). The write below used to happen on this path
+    // too, pinning "the house is empty" until the next refill stamps a new
+    // `at` -- a whole retry window, on the screen whose only job is to say how
+    // it is going, bought by one transient failure. Answering null for this
+    // request costs the sentence once; recording it costs the window.
+    return null;
   }
   rel.modeCounts = { key: refillKey, at, counts };
   return counts;
@@ -4291,16 +4300,30 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       if (peek) {
         // The tease only: who and why-in-numbers, never the receipt. The
         // widget renders name plus quiet/overdue days on the orb's title.
-        send(res, 200, { peek: true, mode: relationshipMode(rel, policy), card: {
-          personKey: card.personKey, name: card.name, kind: card.kind,
-          snapshot_id: card.snapshot_id,
-          evidence: {
-            dormancyDays: card.evidence?.dormancyDays ?? null,
-            overdueDays: card.evidence?.overdueDays ?? null,
-            owe_kind: card.evidence?.owe_kind ?? null,
+        send(res, 200, { peek: true, mode: relationshipMode(rel, policy),
+          // WHERE THE TEASED CARD CAME FROM, on the peek as on the serve
+          // (round-8 finding 1). The panel's one-off hand-off reads exactly
+          // this field off exactly this reply -- the peek is what the widen
+          // button calls -- so leaving it to the full serve made the whole
+          // chain unreachable: the owner pressed "show me anyone, just this
+          // once", got the card teased, and the panel then opened under the
+          // standing mode and filtered that very card out of its own answer.
+          // Same rule as the serve reply: the card's own provenance, null when
+          // it has none (an Owe card carries no mode and needs none -- nothing
+          // filters it by one).
+          servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? null) : null,
+          card: {
+            personKey: card.personKey, name: card.name, kind: card.kind,
+            snapshot_id: card.snapshot_id,
+            evidence: {
+              dormancyDays: card.evidence?.dormancyDays ?? null,
+              overdueDays: card.evidence?.overdueDays ?? null,
+              owe_kind: card.evidence?.owe_kind ?? null,
+            },
           },
-        }, ...(askedMode === null ? {} : { oneOff: true }),
-        ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}) }, cors);
+          ...(askedMode === null ? {} : { oneOff: true }),
+          ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
+        }, cors);
         return;
       }
       // Resolve the quote from the LIVE row. Row gone or edited: the receipt

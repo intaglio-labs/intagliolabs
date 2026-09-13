@@ -85,3 +85,38 @@ test('a helper that will not stop talking is cut off', () => {
   const said = helperDiagnostic(`gcal-auth: ${'x'.repeat(2_000)}\n`);
   assert.equal(said.length, 400, 'a diagnostic past a few hundred characters is not being read');
 });
+
+// THE PREFIX ONLY COUNTS AT THE START OF A LINE (round-8 finding 6).
+//
+// Searched across the whole buffer, the prefix could be found INSIDE an
+// unprefixed line -- and node writes exactly that shape whenever the thing it
+// failed on is a path with the helper's name in it. The stack frames that
+// follow are indented, so the continuation rule then quoted those too: the
+// absolute path to the owner's credential, plus two frames of node internals,
+// onto their screen.
+test('a prefix inside an error message does not open the quote', () => {
+  const said = helperDiagnostic(
+    'Error: ENOENT: no such file or directory, open gcal-auth: '
+    + '/Users/rishab/.hazlie/secrets/google-client-work.json\n'
+    + '    at Object.readFileSync (node:fs:441:20)\n'
+    + '    at /Users/rishab/Desktop/Projects/intagliolabs/ops/gcal-auth.mjs:118:20\n'
+  );
+  assert.equal(said, null,
+    'nothing on this stream was written for an owner, so nothing is repeated');
+});
+
+test('a real diagnostic is still found when node has talked around it', () => {
+  // The counterweight: anchoring must not cost the message itself. The helper's
+  // line is at column zero whatever surrounds it, because console.error writes
+  // its own line.
+  const said = helperDiagnostic(
+    'Error: ENOENT, open gcal-auth: /Users/rishab/.hazlie/secrets/x.json\n'
+    + '    at Object.readFileSync (node:fs:441:20)\n'
+    + 'gcal-auth: OAuth client "work" is not usable: google client file must not be\n'
+    + '  accessible by group or other users\n'
+  );
+  assert.match(said, /^OAuth client "work" is not usable/u);
+  assert.match(said, /accessible by group or other users/u, 'continuations still count');
+  assert.doesNotMatch(said, /\.hazlie\/secrets\/x\.json/u, 'and the stack above it does not');
+  assert.doesNotMatch(said, /readFileSync/u);
+});
