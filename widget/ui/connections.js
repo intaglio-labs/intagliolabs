@@ -282,6 +282,174 @@ function settingRow({ name, note, hint, on, message }) {
   return el;
 }
 
+// A setting that is a STATEMENT rather than a control: a name and the fact,
+// with no switch beside it. Used for something the owner sets somewhere else —
+// the row's job is to stop settings from reading as though the product has no
+// such thing, and to say where it actually lives.
+function factRow({ name, value, note }) {
+  const el = document.createElement('div');
+  el.className = 'setting';
+  const text = document.createElement('div');
+  text.className = 'setting-text';
+  const label = document.createElement('span');
+  label.className = 'setting-name';
+  label.textContent = name;
+  text.appendChild(label);
+  if (note) {
+    const sub = document.createElement('span');
+    sub.className = 'setting-note';
+    sub.textContent = note;
+    text.appendChild(sub);
+  }
+  const said = document.createElement('span');
+  said.className = 'setting-value setting-said';
+  said.textContent = value;
+  el.append(text, said);
+  return el;
+}
+
+// A setting whose control is a BUTTON, because what it does happens once
+// instead of being on or off. The press is awaited and the button is dead while
+// it runs: both of these reach native, and one of them is deleting things.
+function actionRow({ name, note, label, danger = false, onPress }) {
+  const el = document.createElement('div');
+  el.className = 'setting';
+  const text = document.createElement('div');
+  text.className = 'setting-text';
+  const title = document.createElement('span');
+  title.className = 'setting-name';
+  title.textContent = name;
+  const sub = document.createElement('span');
+  sub.className = 'setting-note';
+  sub.textContent = note;
+  text.append(title, sub);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'setting-btn' + (danger ? ' setting-btn-danger' : '');
+  btn.textContent = label;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      // `say` rewrites the row's own note, which is where the owner is already
+      // looking. A toast somewhere else would be a second place to watch for
+      // the answer to a button they just pressed.
+      await onPress({ say: (line) => { sub.textContent = line; fitConnections(); } });
+    } catch {
+      sub.textContent = 'that did not go through — try again.';
+      fitConnections();
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  el.append(text, btn);
+  return el;
+}
+
+// THE ONE SWITCH THAT DECIDES WHETHER ANYTHING LEAVES THIS MAC, and until now
+// it had no home outside the setup flow: `setEngine` was granted to onboarding
+// alone, so once the flow was finished the owner could neither see the answer
+// nor change it. Same copy as onboarding screen 5 on purpose — two wordings for
+// one privacy switch is two promises, and only one of them can be the one that
+// was read.
+const ENGINE_LABEL = 'use your claude subscription for reading and drafting';
+const ENGINE_PRIVACY = "when this is on, excerpts of your messages go to anthropic's servers "
+  + 'to be read. when it is off, nothing leaves this Mac.';
+const ENGINE_TIMING = 'turning it off applies to the next person it reads about — one already '
+  + 'being written finishes with what it started.';
+// What a probe that is not `ok` means, in the same voice as the rest of this
+// panel. NEVER a raw error string: see onboarding's statusCell for the same
+// rule, and the review item that asked for it.
+const ENGINE_STATE_COPY = {
+  missing: 'no claude on this Mac, so it reads with the local model instead.',
+  auth: 'claude is installed but not signed in. open it, sign in, then check again.',
+  limit: 'claude is installed and signed in, but your plan is rate-limited right now.',
+  upgrade: 'this claude is too old for the way i call it.',
+  slow: 'claude did not answer. it may be busy — check again in a moment.',
+  busy: 'still checking…',
+  error: 'claude is here but it did not answer the way i expected.',
+};
+
+function engineRow() {
+  const el = document.createElement('div');
+  el.className = 'setting';
+  const text = document.createElement('div');
+  text.className = 'setting-text';
+  const label = document.createElement('span');
+  label.className = 'setting-name';
+  label.textContent = ENGINE_LABEL;
+  const privacy = document.createElement('span');
+  privacy.className = 'setting-note';
+  privacy.textContent = ENGINE_PRIVACY;
+  const state = document.createElement('span');
+  state.className = 'setting-note';
+  // ONE BUSY WORD, the same one onboarding's engine screen uses — see
+  // connect-affordances.test.mjs, which rejects a new verb per call site. The
+  // label above already says what is being checked.
+  state.textContent = 'checking…';
+  text.append(label, privacy, state);
+
+  // The control slot holds one of two things and never both: the switch, once a
+  // probe has come back ok, or a "check again" pill while it has not.
+  const control = document.createElement('span');
+  control.className = 'setting-control';
+  el.append(text, control);
+
+  const sw = document.createElement('button');
+  sw.type = 'button';
+  sw.className = 'switch';
+  sw.setAttribute('role', 'switch');
+  sw.title = 'claude subscription';
+  sw.appendChild(Object.assign(document.createElement('span'), { className: 'knob' }));
+  const paintSwitch = (on) => {
+    sw.classList.toggle('on', on);
+    sw.setAttribute('aria-checked', String(on));
+    sw.setAttribute('aria-label', on
+      ? 'Reading with your Claude subscription'
+      : 'Reading on this Mac only');
+  };
+  sw.addEventListener('click', async () => {
+    const next = !sw.classList.contains('on');
+    paintSwitch(next);
+    try {
+      await hzPost('setEngine', { engine: next ? 'claude-cli' : 'local' });
+    } catch {
+      // Nothing was written, so the switch must not claim otherwise — this is
+      // the switch where a lie is a privacy claim.
+      paintSwitch(!next);
+    }
+  });
+
+  const again = document.createElement('button');
+  again.type = 'button';
+  again.className = 'setting-btn';
+  again.textContent = 'check again';
+  again.addEventListener('click', () => { probe(); });
+
+  // THE SWITCH IS OFFERED ONLY WHEN THE PROBE WORKED. "you have it" and "it
+  // works" are different questions, and only the second one may put a switch on
+  // screen that sends message excerpts off this Mac — onboarding's own rule.
+  function paint(out) {
+    const st = out && out.state;
+    if (st === 'ok') {
+      state.textContent = ENGINE_TIMING;
+      paintSwitch(out.engine === 'claude-cli');
+      control.replaceChildren(sw);
+    } else {
+      state.textContent = ENGINE_STATE_COPY[st] || ENGINE_STATE_COPY.error;
+      control.replaceChildren(again);
+    }
+    fitConnections();
+  }
+  function probe() {
+    state.textContent = 'checking…';
+    control.replaceChildren();
+    hzPost('engineProbe').then(paint).catch(() => paint({ state: 'error' }));
+  }
+  probe();
+  return el;
+}
+
 // A setting that holds a NUMBER. Stacked rather than in a row — a slider in
 // the space a switch occupies has about 30px of travel in a 312px popup.
 //
@@ -582,6 +750,22 @@ async function renderSettings() {
     return; // no bridge, nothing to toggle
   }
   const rows = [];
+  // FIRST, BECAUSE IT IS THE ONLY ONE ABOUT DATA LEAVING THIS MAC. Everything
+  // below it is about how the app behaves; this one is about where the words
+  // go. It paints itself asynchronously — a probe runs the claude binary and
+  // can take seconds, and settings must not wait on it to draw.
+  rows.push(engineRow());
+  // The mode picker is NOT duplicated here, deliberately: it lives on the card,
+  // which is where you change your mind about it. But a new owner reading
+  // settings saw no sign the product had modes at all, so the row says it does
+  // and says where. Read-only text and no value asserted: nothing native knows
+  // the standing mode without asking the reader for a card, and a settings row
+  // that guesses which mode is on would be worse than one that does not say.
+  rows.push(factRow({
+    name: 'who it looks for',
+    value: 'on the card',
+    note: 'anyone, founders or investors — the three chips at the top of the reconnect card.',
+  }));
   // The motion row only appears when the system setting it overrides is
   // actually on. With Reduce Motion off it would do nothing, and a control
   // that does nothing is worse than no control.
@@ -619,12 +803,59 @@ async function renderSettings() {
   // does, not where you re-watch its introduction, and the one control here
   // that took over the whole screen was the one nobody wanted twice.
   //
-  // This page's `openOnboarding` grant and the bridge case behind it went too,
-  // because bridge-capabilities.test.mjs holds the map to exactly what the
-  // pages call: an ungranted case is an orphan and a granted-but-uncalled verb
-  // is a re-widened surface, and it fails on both. main.swift keeps its own
-  // openOnboarding, so first run and the two paths that still reach it — a
-  // resumed flow, and the `onboarding` URL scheme — are unchanged.
+  // The grant behind it — and `markHandheld`, which no page ever called — went
+  // with the surface review (2026-09-13), along with both bridge cases.
+  // ~~"This page's `openOnboarding` grant and the bridge case behind it went
+  // too"~~ was written here at the time and was NOT true: the grant and the
+  // case both survived, so the settings page kept a door into the setup flow
+  // that nothing on it could open. bridge-capabilities.test.mjs holds the map
+  // to exactly what the pages call — an ungranted case is an orphan and a
+  // granted-but-uncalled verb is a re-widened surface — and it was the comment,
+  // not the test, that was wrong. main.swift keeps its own openOnboarding, so
+  // first run and the two paths that still reach it (a resumed flow, and the
+  // `onboarding` URL scheme) are unchanged.
+
+  // LAST, AND IN THIS ORDER. Leaving is the bottom of a settings panel
+  // everywhere else, and the reversible one goes above the one that is not.
+  //
+  // THE APP IS LSUIElement: no menu bar, no ⌘Q, no status item. Before these
+  // two rows the only ways to stop it were Activity Monitor and a shell script
+  // in a repo, which on somebody else's Mac means it cannot be turned off at
+  // all — the worst thing on the surface, and the reason these are here.
+  rows.push(actionRow({
+    name: 'quit',
+    // TRUE, AND CHECKED AGAINST WHAT ACTUALLY HAPPENS (main.swift
+    // applicationWillTerminate): the reader is this app's own child and stops
+    // with it, while hermes, connect and the model server are launch agents and
+    // keep running. Saying "everything keeps running" would be the comfortable
+    // sentence and the wrong one.
+    note: 'closes this window and the app. what it has already read stays, and the '
+      + 'services behind it keep running — but nothing new is read until you open it again.',
+    label: 'quit',
+    onPress: async () => { await hzPost('quitApp'); },
+  }));
+  rows.push(actionRow({
+    name: 'uninstall',
+    note: 'stops and removes the background services and deletes the app. everything it '
+      + 'has read is left where it is, and the next screen says exactly what will happen.',
+    label: 'uninstall',
+    danger: true,
+    onPress: async ({ say }) => {
+      const out = await hzPost('uninstallApp');
+      // Native asks first, with an alert listing what is actually on this Mac.
+      // A cancel is an answer, not a failure, and must leave the row as it was.
+      if (!out || out.cancelled === true) return;
+      if (out.state === 'partial') {
+        const failures = Array.isArray(out.failures) ? out.failures : [];
+        say(`some of it could not be removed: ${failures.join('; ')}`);
+        return;
+      }
+      // The app is quitting behind this line, so it is the last thing the owner
+      // reads — and it has to name what was KEPT, because nothing else will get
+      // the chance to.
+      say(`removed. everything it read is still in ${out.dataKept || 'your home folder'}.`);
+    },
+  }));
   settings.replaceChildren(...rows);
 }
 renderSettings();

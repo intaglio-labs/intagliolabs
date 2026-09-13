@@ -89,10 +89,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // rather than "it could call everything". The check is cheap because the
   // message already arrives with its webView.
   //
-  // Derived from what each page actually calls (grep hzPost across widget/ui);
-  // `markHandheld` has no caller today and is listed under connections because
-  // that is the surface it is about. A case missing from every list here is a
-  // test failure, not a silent 404 -- see widget/test/bridge-capabilities.test.mjs.
+  // Derived from what each page actually calls (grep hzPost across widget/ui).
+  // ~~`markHandheld` has no caller today and is listed under connections
+  // because that is the surface it is about.~~ That was the exception this
+  // header warns about, kept for a page that never called it: it went with
+  // `openOnboarding` in the surface review (2026-09-13), dispatch case and all.
+  // A case missing from every list here is a test failure, not a silent 404 --
+  // see widget/test/bridge-capabilities.test.mjs.
   static let sharedActions: Set<String> = [
     // bridge.js is loaded by every page, so these two are everyone's.
     "prefs", "fitContent",
@@ -114,7 +117,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "setPerformance", "setKeepAwake",
-                    "openOnboarding", "markHandheld",
+                    // The one switch that decides whether excerpts leave this
+                    // Mac. It lived only in onboarding, so once the flow was
+                    // done the owner could never see or change it again.
+                    "engineProbe", "setEngine",
+                    // Leaving, and leaving for good: quit has no other door in
+                    // an LSUIElement app with no menu bar, and uninstall was a
+                    // shell script in a repo the owner will never find.
+                    "quitApp", "uninstallApp",
                     "activity",
                     "openFullDiskAccess", "startSources",
                     // In-panel API-key walkthroughs and Google OAuth.
@@ -901,9 +911,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } catch {
         reply(webView, id, ["state": "error", "error": "copy failed: \(error.localizedDescription)"])
       }
-    case "openOnboarding":
-      delegate?.openOnboarding()
-      reply(webView, id, ["state": "ok"])
+    // ~~case "openOnboarding"~~ and ~~case "markHandheld"~~ were removed with
+    // the settings grants that were their only door (2026-09-13). Onboarding
+    // still opens from native -- first run, a resumed flow and the `onboarding`
+    // URL scheme all call main.swift's own openOnboarding -- and nothing ever
+    // called markHandheld. A handled case no page may call is dead code that
+    // looks live, and this file's own header says a granted-but-uncalled verb
+    // is a re-widened surface; both directions now agree.
     case "onboardingDone":
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.
@@ -919,14 +933,47 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // load cannot burn the intro unseen.
       Bridge.connectorsIntroDone = true
       reply(webView, id, ["state": "ok"])
-    case "markHandheld":
-      // A connector kind that has now been walked through once.
-      let kind = String((payload["id"] as? String ?? "").prefix(64))
-      if !kind.isEmpty, kind.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) {
-        var list = Bridge.handheld
-        if !list.contains(kind) { list.append(kind); Bridge.handheld = list }
-      }
+    // LEAVING, AND LEAVING FOR GOOD. Both of these are settings rows, and both
+    // exist because this app is LSUIElement: no menu bar, no ⌘Q, no status
+    // item. Until they landed, the only ways to stop it were Activity Monitor
+    // and a shell script in a repo.
+    case "quitApp":
+      // THE REPLY GOES FIRST. terminate() tears this webview down with the app,
+      // so a reply sent after it never arrives and the page is left awaiting a
+      // promise that cannot settle -- which is the last frame the owner sees.
       reply(webView, id, ["state": "ok"])
+      // The services keep running: the launch agents are hermes, connect and
+      // the model server, and none of them is this process. The READER is this
+      // app's own child and stops with it (applicationWillTerminate), which is
+      // what the row says.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { NSApp.terminate(nil) }
+
+    case "uninstallApp":
+      // NATIVE ASKS, NOT THE PAGE. A destructive confirm drawn in a webview is
+      // a dialog the page could style, mistime or skip; an NSAlert is the one
+      // the owner already trusts, and Uninstall.confirm lists what is actually
+      // on this Mac rather than a generic sentence.
+      let plan = Uninstall.plan()
+      guard Uninstall.confirm(services: plan.services, apps: plan.apps) else {
+        reply(webView, id, ["state": "ok", "cancelled": true])
+        return
+      }
+      let outcome = Uninstall.run()
+      reply(webView, id, [
+        "state": outcome.failures.isEmpty ? "ok" : "partial",
+        "services": outcome.services,
+        "apps": outcome.apps,
+        "failures": outcome.failures,
+        "dataKept": outcome.dataKept,
+      ])
+      // A HALF-UNINSTALL STAYS ON SCREEN. Quitting on a failure takes the
+      // window away along with the only account of what did not happen —
+      // /Applications can refuse a delete, and the owner needs to be told
+      // rather than left with an app that is still there and no explanation.
+      if outcome.failures.isEmpty {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { NSApp.terminate(nil) }
+      }
+
     case "prefs":
       reply(webView, id, [
         "state": "ok",

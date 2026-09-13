@@ -310,7 +310,12 @@ test('Settings mounts its controls without the retired memory-review row', () =>
   assert.match(connections, /rows\.push\(settingRow\(/u);
   assert.match(connections, /settings\.replaceChildren\(\.\.\.rows\)/u);
   assert.doesNotMatch(connections, /modelRow|local model size|model-pick/u);
-  assert.doesNotMatch(connections, /actionRow|what i have learned|openMemoryReview/u);
+  // ~~`actionRow` was in this list~~ — it was the helper the retired row was
+  // built with, and banning the NAME banned the shape. Settings has rows whose
+  // control is a button again (quit, uninstall, 2026-09-13) and they use a
+  // helper of that name. What the row must not come back as is the memory
+  // review itself, which is what the two markers below actually name.
+  assert.doesNotMatch(connections, /what i have learned|openMemoryReview/u);
   assert.doesNotMatch(swift, /openMemoryReview/u);
 });
 

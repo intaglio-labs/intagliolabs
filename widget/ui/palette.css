@@ -1962,6 +1962,32 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 }
 .setting-name { font-weight: 700; font-size: 12px; }
 .setting-note { font-size: 10px; line-height: 1.4; color: var(--muted); }
+/* A row whose control is a button rather than a switch: quit, uninstall, and
+   "check again" on the engine row. Same pill as the connector cards' .hold-ok,
+   which is the only button shape this panel has — a second one would read as a
+   different KIND of thing rather than as the same thing in a new place. */
+.setting-btn {
+  flex: 0 0 auto;
+  min-height: 22px; padding: 3px 12px;
+  line-height: 1.5;
+  border: 1px solid rgba(197, 165, 109, 0.4); border-radius: 999px;
+  background: rgba(20, 20, 18, 0.9); color: var(--hazelnut-light);
+  font: inherit; font-size: 10px; letter-spacing: 0.1em;
+  cursor: pointer;
+}
+.setting-btn:hover { border-color: rgba(197, 165, 109, 0.75); }
+.setting-btn:disabled { opacity: 0.5; cursor: default; }
+/* The destructive one. A warmer border and nothing else: it is one press away
+   from a native alert that spells out every step, so the row does not need to
+   shout — it needs to look like a different kind of press. */
+.setting-btn-danger { border-color: rgba(214, 122, 96, 0.55); color: #e0a08c; }
+.setting-btn-danger:hover { border-color: rgba(214, 122, 96, 0.9); }
+/* Where a row's control lives when it can be swapped out — the engine row puts
+   either its switch or its "check again" pill here. */
+.setting-control { flex: 0 0 auto; display: inline-flex; align-items: center; }
+/* A stated fact, not a control: right-aligned like a read-out, and quieter
+   than the switch it sits in place of. */
+.setting-said { color: var(--hazelnut-light); opacity: 0.85; }
 /* The switch borrows the connector dot's palette: off is a hollow ring,
    on is phosphor — the same two states the charms already teach. */
 .switch {

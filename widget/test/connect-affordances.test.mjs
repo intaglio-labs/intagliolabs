@@ -110,6 +110,10 @@ test('busy labels are drawn from a small fixed set', () => {
     'sending…',
     'starting…',
     'checking the local connection…',
+    // The engine row's probe (settings, 2026-09-13) asks the claude binary
+    // whether it answers. Same word onboarding's engine screen uses, which is
+    // the point of this list: one busy word per idea, not one per call site.
+    'checking…',
   ]);
   for (const [file, text] of Object.entries(src)) {
     for (const m of text.matchAll(/\.textContent = '([^']*…)'/gu)) {
