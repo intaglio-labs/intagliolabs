@@ -37,12 +37,17 @@ function tempHome(t) {
   return home;
 }
 
-function memoryState(seed = {}) {
+// `ranSince` is the install's oldest run_log row, which is how the connector
+// dates an install whose cursor predates the key (see installFirstPassAt).
+// Absent means a state store with no database behind it, the same shape every
+// other fixture in this package hands a source.
+function memoryState(seed = {}, { ranSince = null } = {}) {
   const values = new Map(Object.entries(seed).map(([k, v]) => [k, String(v)]));
   return {
     getCursor: (key) => values.get(key) ?? null,
     setCursor: (key, value) => values.set(key, String(value)),
     deleteCursor: (key) => values.delete(key),
+    ...(ranSince === null ? {} : { db: { prepare: () => ({ get: () => ({ ts: ranSince }) }) } }),
   };
 }
 
@@ -113,7 +118,16 @@ async function runMail(home, messages, { at = NOW, state = memoryState(), log = 
 // from its marketing is the ORDER of the words rather than the words.
 
 test('both wordings LinkedIn actually uses are recognised, and the note is one number', () => {
-  for (const subject of ['Your LinkedIn data is ready', 'Your download is ready']) {
+  for (const subject of [
+    'Your LinkedIn data is ready',
+    'Your download is ready',
+    // Wider than the two the rule was first written from, because a rule
+    // calibrated on two samples that can only fail silently is a rule nobody
+    // can correct. The order is what stays tight.
+    'Your LinkedIn data archive is ready',
+    'Your archive is available',
+    'Your export is ready to download',
+  ]) {
     const note = linkedinExportReadyNote(parsedMail('LinkedIn <noreply@linkedin.com>', subject), READY_TS);
     assert.ok(note, `"${subject}" is LinkedIn telling the owner their archive is downloadable`);
     assert.equal(note.at, READY_TS);
@@ -246,6 +260,65 @@ test('a mail two days old is still not news when the install is one day old', as
   // And the same mailbox one mail later, this one genuinely new.
   await runMail(home, [ready('m1', NOW - 2 * DAY), ready('m2', NOW - 3_600_000)], { state });
   assert.equal(exportReadyAt(home, { now: () => NOW }), NOW - 3_600_000);
+});
+
+test('an install that has been reading for months is not re-dated by the upgrade', async (t) => {
+  const home = tempHome(t);
+  // THE UPGRADE CASE. The anchor's key is absent on a fresh install and on the
+  // first pass of every existing install after the build that introduced it,
+  // and those are not the same machine. Taking "now" for both would throw away
+  // a "your data is ready" this owner received two days ago and has not acted
+  // on — the mail rejected on the re-scan, and the marker it already wrote
+  // swept. run_log is the install's own memory of having read anything.
+  const state = memoryState({}, { ranSince: NOW - 60 * DAY });
+  await runMail(home, [ready('m1', NOW - 2 * DAY)], { state });
+
+  assert.equal(exportReadyAt(home, { now: () => NOW }), NOW - 2 * DAY,
+    'the upgrade is not the install, and a two-day-old mail is still news');
+  assert.equal(state.getCursor('mail:first-pass-at'), String(NOW - 60 * DAY),
+    'and the anchor it writes is when this Mac started reading, not when this build did');
+});
+
+test('an install with no run history at all is dated now, which is what a fresh Mac is', async (t) => {
+  const home = tempHome(t);
+  const state = memoryState();
+  await runMail(home, [ready('m1', NOW - 2 * DAY)], { state });
+  assert.equal(exportReadyAt(home, { now: () => NOW }), null);
+  assert.equal(state.getCursor('mail:first-pass-at'), String(NOW));
+});
+
+test('the pass says what it saw on both sides of every gate', async (t) => {
+  const home = tempHome(t);
+  const seenLines = () => events.filter((e) => e.event === 'mail_linkedin_export_ready');
+  const events = [];
+  const log = { info: (event, fields) => events.push({ event, fields }), warn() {} };
+
+  // A LINKEDIN MAIL THE RULE DID NOT RECOGNISE. Before this the pass said
+  // nothing, which is what "LinkedIn never wrote" says too — and telling those
+  // apart is the whole reason the subject rule can be corrected at all.
+  await runMail(home, [gmailMessage('m1', NOW - 60_000, {
+    from: 'noreply@linkedin.com', subject: 'You have 3 new messages',
+  })], { state: memoryState({ 'mail:first-pass-at': NOW - 60 * DAY }), log });
+  assert.deepEqual(seenLines()[0]?.fields, {
+    connector: 'mail', seen: 1, matched: 0, floored: 0, noted: 0,
+  });
+
+  // AND ONE IT RECOGNISED AND THEN TURNED AWAY.
+  events.length = 0;
+  await runMail(home, [ready('m2', NOW - 20 * DAY)],
+    { state: memoryState({ 'mail:first-pass-at': NOW - 60 * DAY }), log });
+  assert.deepEqual(seenLines()[0]?.fields, {
+    connector: 'mail', seen: 1, matched: 1, floored: 1, noted: 0,
+  });
+  assert.equal(existsSync(markerPath(home)), false);
+
+  // Counts, on every one of those lines, and never a word out of the mail --
+  // asserted over the FIELDS, since the event's own name is about the feature
+  // rather than about anybody's inbox.
+  assert.doesNotMatch(
+    JSON.stringify(events.map((e) => e.fields)),
+    /3 new messages|Your LinkedIn|noreply|@linkedin/iu
+  );
 });
 
 test('a marker this install would not have written is retired by the next pass', async (t) => {

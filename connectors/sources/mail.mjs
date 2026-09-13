@@ -167,6 +167,36 @@ const ACCOUNTS_SEEN_KEY = 'mail:accounts-seen';
 // arrives from here on is news. Written once, never moved, and read by nothing
 // else -- the corpus cursors above are what decide what gets FETCHED.
 const FIRST_PASS_KEY = 'mail:first-pass-at';
+
+// WHEN THIS INSTALL STARTED READING, for the floor above. Written once and
+// never moved afterwards -- an anchor that can advance is not an anchor.
+//
+// THE VALUE IS NOT ALWAYS "NOW" (review finding 9). The key is absent on a
+// genuinely fresh install AND on the first pass of every EXISTING install after
+// the upgrade that introduced it, and those two are not the same machine.
+// Taking now() for both would move the floor forward over an install that
+// received "your data is ready" two days ago and has not acted on it yet: the
+// mail is rejected on the re-scan and the marker it already wrote is swept.
+// run_log is this install's own memory of having read anything at all, so its
+// oldest row is when this Mac started reading, and that is the honest answer
+// for the upgrade case. now() remains the answer when there is no run history
+// either, which is the fresh install it was written for.
+//
+// Through `state.db` because there is no reader for this on the state API and
+// one verb for one query is not worth a seam; guarded because the fixtures hand
+// this function a cursor store with no database behind it, and a floor of now()
+// is the safe direction.
+function installFirstPassAt(state, now) {
+  const stored = Number(state.getCursor(FIRST_PASS_KEY));
+  if (Number.isFinite(stored) && stored > 0) return { at: stored, fresh: false };
+  let oldest = Number.NaN;
+  try {
+    oldest = Number(state.db?.prepare('SELECT MIN(started_ts) AS ts FROM run_log').get()?.ts);
+  } catch {
+    oldest = Number.NaN;
+  }
+  return { at: Number.isFinite(oldest) && oldest > 0 ? oldest : now(), fresh: true };
+}
 function previousAccounts(state) {
   try {
     const parsed = JSON.parse(state.getCursor(ACCOUNTS_SEEN_KEY) ?? '[]');
@@ -303,21 +333,36 @@ function fromLinkedin(raw) {
 // except installing an export.
 //
 // ORDER IS WHAT SEPARATES THEM. LinkedIn's own sentence is about a thing that
-// belongs to the owner and is now finished -- YOUR (data|download) ... is
-// READY -- and the marketing sentence puts the availability word first and the
-// possessive after it. So the three words must appear in that order, which the
-// two known subjects do and "Ready to grow your network? Download the app"
-// does not. Word-bounded, so "already" is not "ready" and "metadata" is not
-// "data".
+// belongs to the owner and is now finished -- YOUR (data|download|archive|
+// export) ... is (READY|AVAILABLE) -- and the marketing sentence puts the
+// availability word first and the possessive after it. So the words must
+// appear in that order, which every known subject does and "Ready to grow your
+// network? Download the app" does not. Word-bounded, so "already" is not
+// "ready" and "metadata" is not "data".
 //
-// Plus a short blocklist for the recurring mail that could still stumble into
-// the shape ("your weekly ... is ready"), because a false positive is a badge
-// nothing can clear and a false negative is one mail this pass did not act on.
-const READY_SHAPE = /\byour\b[\s\S]*?\b(?:data|downloads?)\b[\s\S]*?\bready\b/u;
+// THE NOUNS AND THE VERBS ARE BOTH SETS, and deliberately wider than the two
+// subjects this was first written from (review finding 11). "Your LinkedIn
+// data archive is ready" and "Your archive is available" are the same sentence
+// in LinkedIn's other moods, and a rule calibrated on two samples that only
+// ever fails SILENTLY is a rule nobody can correct. The order and the
+// blocklist are what stay tight, because both are observable: the pass now
+// logs how many LinkedIn mails it saw against how many matched (see the
+// counters in run), so a rule that is too tight shows up as a gap rather than
+// as nothing at all.
+const READY_SHAPE =
+  /\byour\b[\s\S]*?\b(?:data|downloads?|archives?|exports?)\b[\s\S]*?\b(?:ready|available)\b/u;
 const NOT_THE_EXPORT = /\b(?:explore|insights?|weekly|newsletter)\b/u;
 function subjectSaysReady(subject) {
   const text = typeof subject === 'string' ? subject.toLowerCase() : '';
   return READY_SHAPE.test(text) && !NOT_THE_EXPORT.test(text);
+}
+
+// Is this LinkedIn writing at all? Split out from the note below so a pass can
+// count what it SAW separately from what it matched (review finding 10): "no
+// LinkedIn mail in the window" and "LinkedIn wrote and the subject rule did not
+// recognise it" are different problems, and they used to be the same silence.
+export function isLinkedinSender(parsed) {
+  return fromLinkedin(parsed?.from);
 }
 
 // `{ at }` for a mail that says the export is downloadable, else null.
@@ -404,19 +449,27 @@ export function createMailSource({
       // owner may have requested the export from one address and read it in
       // another, and the marker names one event whoever received it.
       let exportReady = null;
-      let exportReadySeen = 0;
+      // BOTH SIDES OF EVERY GATE, because this feature's whole history is
+      // producing nothing and being indistinguishable from finding nothing
+      // (review finding 10). `seen` is LinkedIn mail in the window at all,
+      // `matched` is how much of it the subject rule recognised, `floored` is
+      // how much it recognised and then rejected as too old. A rule that has
+      // gone too tight is `seen` far above `matched`; a floor doing its job is
+      // `floored`. Counts only -- never a subject, never a sender.
+      const exportMail = { seen: 0, matched: 0, floored: 0 };
       // The two bounds on what may become a nudge, resolved once: nothing from
       // before this install started reading, and nothing the reader would have
       // stopped answering for anyway (EXPORT_READY_MAX_AGE_MS). See
       // FIRST_PASS_KEY, and lib/linkedinExport.mjs for the age bound's other
       // half, which is the load-bearing one.
-      // THE INSTANT THIS PASS STARTED, by the wall clock, written before a
-      // single message is read -- so the floor can never be derived from the
-      // window being scanned, and a pass that dies mid-scan still leaves the
-      // anchor behind for the next one.
-      const firstPassRaw = Number(state.getCursor(FIRST_PASS_KEY));
-      const firstPassAt = Number.isFinite(firstPassRaw) && firstPassRaw > 0 ? firstPassRaw : now();
-      if (firstPassAt !== firstPassRaw) state.setCursor(FIRST_PASS_KEY, String(firstPassAt));
+      // THE INSTANT THIS INSTALL STARTED READING, by the wall clock, resolved
+      // and written before a single message is read -- so the floor can never
+      // be derived from the window being scanned, and a pass that dies mid-scan
+      // still leaves the anchor behind for the next one. See
+      // installFirstPassAt for why it is not simply now().
+      const anchor = installFirstPassAt(state, now);
+      const firstPassAt = anchor.at;
+      if (anchor.fresh) state.setCursor(FIRST_PASS_KEY, String(firstPassAt));
       const exportReadyFloor = Math.max(firstPassAt, now() - EXPORT_READY_MAX_AGE_MS);
       // AND THE SAME FLOOR APPLIED TO WHAT IS ALREADY ON DISK. A marker this
       // install would not write is one it should not be standing on: a build
@@ -932,10 +985,14 @@ export function createMailSource({
                   // owner to a mail whose archive LinkedIn has long since
                   // expired. Every forward path comes through here: the fresh
                   // window and both gap drains all run this same loop.
-                  const note = linkedinExportReadyNote(parsed, internal);
-                  if (note !== null && note.at >= exportReadyFloor) {
-                    exportReadySeen += 1;
-                    if (exportReady === null || note.at > exportReady.at) exportReady = note;
+                  if (isLinkedinSender(parsed)) {
+                    exportMail.seen += 1;
+                    const note = linkedinExportReadyNote(parsed, internal);
+                    if (note !== null) {
+                      exportMail.matched += 1;
+                      if (note.at < exportReadyFloor) exportMail.floored += 1;
+                      else if (exportReady === null || note.at > exportReady.at) exportReady = note;
+                    }
                   }
                   const row = toRow(parsed, {
                     account: account.email,
@@ -1205,17 +1262,19 @@ export function createMailSource({
       // backfill re-reading the same message -- or a second mailbox holding a
       // copy of it -- rewrites nothing.
       //
-      // COUNTS ONLY IN THE LOG (connectors/AGENTS.md): how many such mails this
-      // pass saw and whether the marker moved. Neither the subject nor the
-      // sender goes anywhere -- not into the log, and not into the marker,
-      // which holds the timestamp alone.
-      if (exportReady !== null) {
+      // AND THE LINE IS WRITTEN WHENEVER LINKEDIN WROTE AT ALL, not only when
+      // something was recorded: seen/matched/floored are the three numbers that
+      // tell "LinkedIn never mailed" from "the rule did not recognise it" from
+      // "the floor turned it away". COUNTS ONLY (connectors/AGENTS.md) --
+      // neither the subject nor the sender goes anywhere, not into the log and
+      // not into the marker, which holds the timestamp alone.
+      if (exportMail.seen > 0) {
         // THE PASS'S OWN CLOCK, not the wall clock: every other bound in this
         // run is measured against ctx.now, and the age gate inside
         // noteExportReady has to agree with the floor computed above.
-        const noted = noteExportReady(home, exportReady, { now });
+        const noted = exportReady !== null && noteExportReady(home, exportReady, { now });
         log.info('mail_linkedin_export_ready', {
-          connector: 'mail', seen: exportReadySeen, noted: noted ? 1 : 0,
+          connector: 'mail', ...exportMail, noted: noted ? 1 : 0,
         });
       }
 
