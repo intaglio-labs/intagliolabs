@@ -1337,7 +1337,10 @@ function sprintSentence() {
 //
 // Same sentence here and on the card (reconnect.js), because it is the same
 // fact: two wordings for one cause is two explanations, and the owner only gets
-// to believe one.
+// to believe one. It is BUILT in bridge.js rather than spelled out on either
+// page, so the two cannot drift -- and it has two forms now, because a hold
+// that never ends is a promise this screen should stop making. See
+// hzModeHoldLine.
 //
 // IT DOES NOT ARRIVE ON THE REASON YOU WOULD EXPECT. The flag rides
 // `pool-exhausted`, not `pool-exhausted-mode` — hermes suppresses the latter
@@ -1346,8 +1349,6 @@ function sprintSentence() {
 // first version of this branch lived in the `pool-exhausted-mode` path and was
 // therefore unreachable: the sentence existed, the tests passed, and nothing
 // could ever have painted it. See peekCard.
-const linkedInPendingLine = (mode) =>
-  `${mode} cards start when your linkedin export lands`;
 const linkedInPending = (out) =>
   out?.modeFallback === 'linkedin-pending'
   && typeof out?.mode === 'string' && out.mode.length > 0
@@ -1355,7 +1356,7 @@ const linkedInPending = (out) =>
 
 function paintModeShortfall(out) {
   if (linkedInPending(out)) {
-    loadMode.textContent = linkedInPendingLine(out.mode);
+    loadMode.textContent = hzModeHoldLine(out.mode, out.heldSince);
     loadMode.hidden = false;
     // AND NO OFFER TO WIDEN, because the widening has already happened. Under
     // the fallback hermes is serving from `any` already, so "show me anyone,

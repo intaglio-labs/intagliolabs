@@ -44,6 +44,8 @@ const onboardingHtml = read('widget/ui/onboarding.html');
 const connectionsJs = read('widget/ui/connections.js');
 const reconnectJs = read('widget/ui/reconnect.js');
 const reconnectHtml = read('widget/ui/reconnect.html');
+// Loaded by every page, which is where a sentence two surfaces must share lives.
+const bridgeJs = read('widget/ui/bridge.js');
 
 /// Comments in these files describe the very behaviour being pinned — and, by
 /// house convention, the sentence each one replaced. A naive `includes` finds
@@ -312,7 +314,8 @@ test('the card says why the lit chip is not the card in hand', () => {
   const show = /function showModeFallback\(out\) \{([\s\S]*?)\n\}/u.exec(reconnectJs)?.[1] ?? '';
   assert.ok(show, 'showModeFallback() not found');
   assert.match(show, /out\?\.modeFallback === 'linkedin-pending'/u);
-  assert.match(show, /cards start when your linkedin export lands/u);
+  // The words come from the shared builder; the pin on them is below.
+  assert.match(show, /hzModeHoldLine\(mode, out\?\.heldSince\)/u);
   // 'any' needs no export, so the sentence would be false for it.
   assert.match(show, /mode !== 'any'/u);
   // Under the chips, which is what the line is about, and outside #rcCard,
@@ -394,7 +397,7 @@ test('screen 6 says the same thing instead of blaming the history', () => {
   const paint = /function paintModeShortfall\(out\) \{([\s\S]*?)\n\}/u.exec(onboardingJs)?.[1] ?? '';
   assert.ok(paint, 'paintModeShortfall() not found');
   assert.match(paint, /linkedInPending\(out\)/u);
-  assert.match(onboardingJs, /cards start when your linkedin export lands/u);
+  assert.match(paint, /hzModeHoldLine\(out\.mode, out\.heldSince\)/u);
   // It replaces that sentence rather than joining it: the shortfall line is
   // returned from before the "nobody quiet" text is built.
   const pendingAt = paint.indexOf('linkedInPending(out)');
@@ -406,12 +409,102 @@ test('screen 6 says the same thing instead of blaming the history', () => {
 test('the card and the first-load screen say it in the same words', () => {
   // Two wordings for one cause is two explanations, and the owner only gets to
   // believe one of them.
-  const line = /cards start when your linkedin export lands/u;
-  assert.match(reconnectJs, line);
-  assert.match(onboardingJs, line);
-  const shape = /\$\{mode\} cards start when your linkedin export lands/u;
-  assert.match(reconnectJs, shape);
-  assert.match(onboardingJs, shape);
+  //
+  // ONE BUILDER, NOT TWO COPIES THAT HAPPEN TO MATCH TODAY. The sentence grew a
+  // second clause and then a whole second form, and each of those was a chance
+  // for the two surfaces to drift. It lives in bridge.js, which every page
+  // loads, and neither page spells it out any more.
+  assert.match(bridgeJs, /function hzModeHoldLine\(/u);
+  for (const [name, page] of [['reconnect.js', reconnectJs], ['onboarding.js', onboardingJs]]) {
+    assert.match(page, /hzModeHoldLine\(/u, `${name} does not use the shared builder`);
+    assert.doesNotMatch(code(page), /cards start when your linkedin export lands/u,
+      `${name} spells the sentence out itself, which is how two surfaces drift`);
+  }
+});
+
+test('the held line says what IS happening, not only what is not', () => {
+  // Hiding the widen button was right -- under the hold the server is already
+  // serving from `any`, so the button asks the owner to choose what they are
+  // being given -- but it left both surfaces stating a shortfall with no control
+  // and no account of what was being done instead (review finding 21). The card
+  // beside the sentence is not empty: it is somebody, from everyone.
+  assert.match(bridgeJs,
+    /\$\{mode\} cards start when your linkedin export lands — showing anyone for now/u);
+});
+
+// THE BUILDER IS PURE, SO IT CAN BE RUN RATHER THAN READ.
+//
+// Everything else about these pages is a source scan, because they need a
+// webview. This one is a string function of a mode and a number, so its own
+// source text is lifted out of bridge.js and executed — a rule that LOOKS right
+// and answers wrong fails here rather than on somebody's screen a week into a
+// hold.
+// Lifted inside the test rather than at import: a builder that is not there
+// yet must fail ONE assertion, not the whole file, or the other pins in here
+// stop reporting.
+function liftHoldLine() {
+  const constant = /const HZ_HOLD_EXPIRES_MS = [^;]+;/u.exec(bridgeJs)?.[0];
+  const builder = /function hzModeHoldLine\([\s\S]*?\n\}/u.exec(bridgeJs)?.[0];
+  assert.ok(constant && builder, 'hzModeHoldLine is no longer liftable from bridge.js');
+  // eslint-disable-next-line no-new-func
+  return new Function(`${constant}\n${builder}\nreturn hzModeHoldLine;`)();
+}
+
+test('the sentence ages, and only on a clock that was actually sent', () => {
+  const holdLine = liftHoldLine();
+  const now = Date.UTC(2026, 8, 20);
+  const day = 24 * 60 * 60 * 1000;
+
+  // The ordinary hold: the file is coming, and meanwhile there is a card.
+  assert.equal(holdLine('investor', now - day, now),
+    'investor cards start when your linkedin export lands — showing anyone for now');
+  assert.equal(holdLine('founder', now - 6 * day, now),
+    'founder cards start when your linkedin export lands — showing anyone for now');
+
+  // A week of waiting is the owner who pressed `later` and meant it. The
+  // sentence stops promising an event and names the surface that can still fix
+  // it, because screen 6's widen button is gone and the chips are elsewhere.
+  assert.equal(holdLine('investor', now - 8 * day, now),
+    'your linkedin export never arrived — showing anyone; add it in settings');
+
+  // THE BOUNDARY IS STRICTLY GREATER, so the seventh day still promises.
+  assert.match(holdLine('investor', now - 7 * day, now), /showing anyone for now$/u);
+  assert.match(holdLine('investor', now - 7 * day - 1, now), /never arrived/u);
+
+  // A CLOCK THAT WAS NOT SENT IS NOT A CLOCK OF ZERO. hermes omits the field
+  // when it cannot read one, and Number(null) is 0 — which is 1970, and would
+  // have told every held owner their export never arrived.
+  for (const missing of [undefined, null, '', NaN, 'soon']) {
+    assert.match(holdLine('investor', missing, now), /showing anyone for now$/u,
+      `a heldSince of ${String(missing)} must not age the sentence`);
+  }
+});
+
+test('a hold that has outlived its own promise stops making it', () => {
+  // "cards start WHEN your linkedin export lands" is a promise about an event,
+  // and for the owner who pressed `later` and never imports it is false. After a
+  // week the sentence says so, and names the one place that can still fix it --
+  // the widen button is gone from screen 6 and the chips are on a surface the
+  // owner has not been sent to.
+  assert.match(bridgeJs,
+    /your linkedin export never arrived — showing anyone; add it in settings/u);
+  const builder = /function hzModeHoldLine\(([\s\S]*?)\n\}/u.exec(bridgeJs)?.[1] ?? '';
+  assert.ok(builder, 'hzModeHoldLine() not found');
+  assert.match(bridgeJs, /const HZ_HOLD_EXPIRES_MS = 7 \* 24 \* 60 \* 60 \* 1000;/u,
+    'seven days, in the milliseconds hermes sends');
+  assert.match(builder, /now - since > HZ_HOLD_EXPIRES_MS/u);
+  assert.match(builder, /heldSince/u);
+  // A CLOCK THAT WAS NOT SENT IS NOT A CLOCK OF ZERO. hermes omits `heldSince`
+  // when it cannot read one, and a page treating that as 0 would read it as 1970
+  // and tell every held owner their export never arrived.
+  // Positive AS WELL AS finite. `Number(null)` is 0, which is finite; the
+  // executable test below is what caught that, against a comment here claiming
+  // isFinite already handled it.
+  assert.match(builder, /Number\.isFinite\(since\) && since > 0/u);
+  const neverAt = builder.indexOf('never arrived');
+  const landsAt = builder.indexOf('lands — showing anyone for now');
+  assert.ok(neverAt > -1 && landsAt > neverAt,
+    'the ordinary form has to be what an unreadable or recent clock falls back to');
 });
 
 // -------------------------------------------------- the export is ready

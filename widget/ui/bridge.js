@@ -558,6 +558,51 @@ function hzConnectorFeature(set, name) {
   return value === true || value === false || value === 'optional' ? value : undefined;
 }
 
+// WHY THE LIT CHIP IS NOT THE CARD IN HAND, in one sentence, for the two
+// surfaces that have to say it.
+//
+// founder and investor are decided from the LinkedIn export's job titles, so on
+// a Mac with no export there is nobody to BE either. hermes serves from `any`
+// instead and says so with `modeFallback: 'linkedin-pending'` — and both the
+// reconnect card and onboarding's first-load screen have to explain that, or the
+// picker reads as broken: the investor chip is lit, the card is somebody's
+// cousin, and the obvious conclusion is that the chips do nothing.
+//
+// IT LIVES HERE BECAUSE IT IS ONE FACT. Two pages spelling out one sentence is
+// two explanations that agree right up until somebody edits one of them, and
+// this sentence has now grown a clause and then a whole second form. bridge.js
+// is loaded by every page; neither page writes the words any more.
+//
+// THE SECOND CLAUSE (review finding 21). Under the hold, onboarding hides its
+// "show me anyone, just this once" button — correctly, because the server is
+// already serving from `any` and the button would be asking the owner to choose
+// what they are being given. That left a sentence stating a shortfall, with
+// nothing to press and no account of what was happening instead. What IS
+// happening is the interesting half: the card beside it is not empty.
+//
+// THE SECOND FORM. "cards start WHEN your linkedin export lands" is a promise
+// about an event, and for the owner who pressed `later` and never imports it is
+// false — the hold has no other end. After a week the sentence stops promising
+// and names the one surface that can still change it, because the widen button
+// is gone from screen 6 and the chips are in a panel this owner has never been
+// sent to.
+const HZ_HOLD_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000;
+
+function hzModeHoldLine(mode, heldSince, now = Date.now()) {
+  // A CLOCK THAT WAS NOT SENT IS NOT A CLOCK OF ZERO. hermes omits `heldSince`
+  // when it cannot read one — its own comment says absence of a claim is not a
+  // claim — and `Number(null)` and `Number('')` are both 0, which is finite,
+  // reads as 1970, and would have told every held owner their export never
+  // arrived. `isFinite` alone was written here with a comment claiming it
+  // handled exactly this; the test that runs the function is what found that it
+  // did not. Positive as well as finite: a timestamp is a real moment.
+  const since = Number(heldSince);
+  if (Number.isFinite(since) && since > 0 && now - since > HZ_HOLD_EXPIRES_MS) {
+    return 'your linkedin export never arrived — showing anyone; add it in settings';
+  }
+  return `${mode} cards start when your linkedin export lands — showing anyone for now`;
+}
+
 function hzApplyPrefs() {
   hzPost('prefs')
     .then((d) => {

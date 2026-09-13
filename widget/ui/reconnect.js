@@ -93,7 +93,10 @@ function showOneOff(out) {
 // any more than a one-off look is.
 //
 // Same sentence as onboarding screen 6 (paintModeShortfall), because it is the
-// same fact, and two wordings for one cause is two explanations.
+// same fact, and two wordings for one cause is two explanations. It is BUILT in
+// bridge.js rather than spelled out here, so the two cannot drift -- and it has
+// two forms now, because a hold with no end is a promise this line should stop
+// making. See hzModeHoldLine.
 //
 // Cleared on every answer, like showOneOff: it describes one reply and must
 // never outlive it.
@@ -103,7 +106,7 @@ function showModeFallback(out) {
   const mode = typeof out?.mode === 'string' ? out.mode : '';
   const show = out?.modeFallback === 'linkedin-pending' && mode !== '' && mode !== 'any';
   line.hidden = !show;
-  line.textContent = show ? `${mode} cards start when your linkedin export lands` : '';
+  line.textContent = show ? hzModeHoldLine(mode, out?.heldSince) : '';
 }
 
 function renderModes() {
