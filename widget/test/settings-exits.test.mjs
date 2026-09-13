@@ -25,6 +25,12 @@ const connectors = read('src/Connectors.swift');
 const onboardingHtml = read('ui/onboarding.html');
 const palette = read('ui/palette.css');
 
+// COMMENTS STRIPPED. This repository keeps what it removed, struck through, in
+// the comment above the thing that replaced it — so a scan for a retired name
+// finds its own gravestone unless the prose is taken out first.
+const bare = (text) => text.replace(/\/\/[^\n]*/gu, '');
+const bareCss = (text) => text.replace(/\/\*[\s\S]*?\*\//gu, '');
+
 const connectionsGrants = (() => {
   const block = /"connections": \[([\s\S]*?)\],\n {4}\/\//u.exec(bridge);
   assert.ok(block, 'the connections capability list was not found');
@@ -154,9 +160,21 @@ test('the daily-card row reads the config, and asserts nothing when it cannot', 
   assert.match(row, /cfg\?\.mode/u);
   assert.match(row, /Number\.isInteger\(cfg\?\.capPerDay\)/u,
     'a cap that is not a whole number is not a cap');
-  assert.match(row, /n === 1 \? 'one card a day'/u, 'and "1 cards a day" never ships');
+  // THE REAL NUMBER, NEVER A WORD FOR IT. ~~`n === 1 ? 'one card a day' : ...`~~
+  // spelled the singular out, so an owner whose config says 50 read a row that
+  // looked hard-coded to "one card a day" and could not tell the difference
+  // between a setting and a sentence.
+  assert.match(row, /bits\.push\(`\$\{cfg\.capPerDay\} a day`\)/u,
+    'the cap is printed as the digit the config holds');
+  assert.doesNotMatch(bare(row), /one card a day/u,
+    'no spelled-out cap may ship — it reads as a hard-coded one');
+  // The engine is STILL said here, for an owner who cannot see the switch above
+  // (no claude on this Mac, or a probe that failed) — but as the row's hover,
+  // not as a third clause on a line that is already a mode and a number.
   assert.match(row, /configEngine\(cfg\) === 'claude-cli' \? 'reading with claude' : 'reading on this Mac'/u,
     'the row says which way the engine is set, for an owner who cannot see the switch');
+  assert.match(row, /el\.title = `\$\{CARD_HELP\} \$\{engine\}\.`/u,
+    'and it says it on the hover, where it costs the column no height');
   // ABSENT IS NOT UNKNOWN: the route sends `engine: null` for a key that has
   // never been written, and an absent key IS the loopback model (engines.mjs).
   // Only a reply that never came is unknown.
@@ -167,24 +185,29 @@ test('the daily-card row reads the config, and asserts nothing when it cannot', 
   // A reader that is still starting up must not be reported as a setting.
   assert.match(row, /bits\.length > 0 \? bits\.join\(' · '\) : '—'/u,
     'nothing known must render as nothing known, never as a default');
-  assert.match(row, /three chips at the top/u, 'and it points at where the picker lives');
-  // THE SHAPE, because the first version of this row was unreadable on the
-  // panel it ships in (run 6): its value wore .setting-value — the right-hand
-  // read-out built to hold a NUMBER for the size slider — while carrying a
-  // ~47-character sentence. As a sibling flex item that width competed with
-  // the text column, which carries min-width: 0 and therefore lost: the label
-  // rendered one word per line with the value printed across the description.
+  assert.ok(connections.includes('three chips at the top'),
+    'and it points at where the picker lives');
+  // THE SHAPE. This row was unreadable on the panel it ships in (run 6): its
+  // value wore .setting-value — the right-hand read-out built to hold a NUMBER
+  // for the size slider — while carrying a ~47-character sentence, and as a
+  // sibling flex item that width competed with the text column, which carries
+  // min-width: 0 and therefore lost. It was fixed by stacking label, value and
+  // description in the column.
   //
-  // Every row in this panel puts its words in the text column and its CONTROL
-  // beside it. This row has no control, so all three lines go in the column.
-  assert.match(row, /text\.append\(label, said, note\);\s*\n\s*el\.append\(text\);/u,
-    'label, value and description stack inside the text column');
-  assert.doesNotMatch(row, /el\.append\(text, said\)/u,
-    'the value must not be a right-hand slot competing with the description');
-  assert.doesNotMatch(row, /className = 'setting-value/u,
-    '.setting-value is the slider read-out, and this value is a sentence');
-  assert.match(palette, /\.setting-said \{[\s\S]{0,200}overflow-wrap: anywhere;/u,
-    'and it wraps rather than pushing the row wider than the panel');
+  // The description is GONE now (2026-09-13) and the stack with it: there is no
+  // second party to the width fight, and the row is a label and a value on one
+  // line like every other row here. What must hold is that neither of them can
+  // wrap: the value shrinks and ellipsizes first, the label after it.
+  assert.match(row, /el\.append\(label, said\);/u, 'label left, value right, one line');
+  assert.doesNotMatch(bare(row), /className = 'setting-note'/u,
+    'no paragraph under this label — the sentence is the row title');
+  assert.doesNotMatch(bare(row), /className = 'setting-value/u,
+    '.setting-value was the slider read-out, and it is gone with the slider');
+  assert.match(palette, /\.setting-said \{[\s\S]{0,240}text-overflow: ellipsis;/u,
+    'and it ellipsizes rather than pushing the row onto a second line');
+  assert.doesNotMatch(/\.setting-said \{[^}]*\}/u.exec(bareCss(palette))?.[0] ?? '',
+    /overflow-wrap/u,
+    'wrapping was the fix for a stacked row; this one may not wrap at all');
   // No absolute positioning anywhere in the rows: the panel measures its own
   // content height to size the window, and an out-of-flow row is invisible to
   // that measurement.
@@ -197,9 +220,9 @@ test('the daily-card row reads the config, and asserts nothing when it cannot', 
 });
 
 test('the new rows have a control shape to render into', () => {
-  // .setting-btn is the pill quit, uninstall and "check again" all wear. A row
-  // whose button has no rule is a button that inherits the panel's default and
-  // reads as text.
+  // .setting-btn is the pill quit, uninstall and "check" all wear. A row whose
+  // button has no rule is a button that inherits the panel's default and reads
+  // as text.
   assert.match(palette, /^\.setting-btn \{/mu);
   assert.match(palette, /^\.setting-btn-danger \{/mu);
   assert.match(palette, /^\.setting-control \{/mu);
@@ -337,7 +360,7 @@ test('"reading now" is not claimed for a config that was never written', () => {
 
 test('the busy-probe retry does not exhaust itself for the session', () => {
   const row = /function engineRow\(configPromise\)([\s\S]*?)\n\}/u.exec(connections)?.[1] ?? '';
-  assert.match(row, /busyRetries = 0;[\s\S]{0,600}state\.textContent = 'checking…'/u,
+  assert.match(row, /busyRetries = 0;[\s\S]{0,600}control\.replaceChildren\(busy\)/u,
     'a manual press starts the budget again');
   assert.match(row, /if \(out\?\.state !== 'busy'\) busyRetries = 0;/u,
     'and any real answer resets it');
@@ -349,4 +372,152 @@ test('the engine row’s timing line reads correctly in both directions', () => 
   assert.ok(timing, 'ENGINE_TIMING was not found');
   assert.doesNotMatch(timing, /turning it off/u, 'the same sentence is shown when it is turned on');
   assert.match(timing, /the next person it reads about/u, 'and it still says what it means');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE LINE PER ROW.
+//
+// The owner opened Settings on 2026-09-13 and said "what the fuck are these
+// settings??? so much fucking text??". The screenshot is nine cards in a 312px
+// window, four of which are a control; the rest is prose — a paragraph under
+// every label, plus "?" bubbles hiding a second paragraph behind each of two
+// of them. One row printed its name one word per line for eleven lines.
+//
+// The rule now: a bold name on the left, the control on the right, and nothing
+// underneath. Explanation lives in the row's `title`, which is a native hover
+// that costs the column no height. The one exception is uninstall — the press
+// that cannot be taken back keeps one short line on the surface.
+//
+// Three ways this regresses, so three pins: a builder growing a paragraph
+// again, a row shipping without its hover, and a label growing until the row
+// wraps. The third is the one that cannot be seen in a diff, so it is computed.
+
+const builders = (name) => {
+  const at = connections.indexOf(`function ${name}(`);
+  assert.ok(at > 0, `${name} was not found`);
+  // To the next top-level function, which is where every builder here ends.
+  const rest = connections.slice(at + 1);
+  const end = rest.indexOf('\nfunction ');
+  return rest.slice(0, end === -1 ? rest.length : end);
+};
+const ROW_BUILDERS = ['settingRow', 'cardConfigRow', 'engineRow', 'performanceRow', 'actionRow'];
+
+test('no settings row has a paragraph under it, except uninstall', () => {
+  // .setting-note is THE paragraph class. Exactly one builder may still make
+  // one, and only one row may pass it anything to say.
+  const makers = [...bare(connections).matchAll(/className = 'setting-note'/gu)];
+  assert.equal(makers.length, 1, 'only one builder may create a note line');
+  assert.ok(builders('actionRow').includes("className = 'setting-note'"),
+    'and it is actionRow, because `say` narrates an uninstall into that line');
+  for (const name of ROW_BUILDERS.filter((n) => n !== 'actionRow')) {
+    assert.doesNotMatch(bare(builders(name)), /setting-note/u,
+      `${name} must not put a line under its label`);
+  }
+  // ONE `note:` IN THE WHOLE PANEL. quit's sentence moved to its hover with
+  // everything else; uninstall's did not, and what it kept is nine words.
+  const render = /async function renderSettings\(\) \{([\s\S]*?)settings\.replaceChildren/u
+    .exec(connections)?.[1] ?? '';
+  const notes = [...render.matchAll(/\n\s*note: ([A-Z_]+),/gu)].map((m) => m[1]);
+  assert.deepEqual(notes, ['UNINSTALL_NOTE'],
+    'uninstall is the only row that may say anything under its label');
+  const copy = /const UNINSTALL_NOTE = '([^']*)';/u.exec(connections)?.[1] ?? '';
+  assert.ok(copy, 'UNINSTALL_NOTE was not found');
+  assert.ok(copy.split(/\s+/u).length <= 9, `the one surviving line is ${copy.split(/\s+/u).length} words`);
+  assert.match(copy, /data stays/u, 'and it spends them on the promise that matters');
+  // An empty note must occupy nothing: it is built for every action row so
+  // `say` has somewhere to write, and quit's is empty until something fails.
+  assert.match(palette, /\.setting-note:empty \{ display: none; \}/u);
+});
+
+test('the "?" bubbles are gone, copy and all', () => {
+  for (const gone of ['infoHint', 'settingHint', 'setting-hint']) {
+    assert.ok(!bare(connections).includes(gone), `${gone} must not survive the paragraph cull`);
+    assert.ok(!bareCss(palette).includes(`.${gone}`), `${gone} must not keep a rule either`);
+  }
+  // The COPY survived, on the rows it explained. A cull that dropped the
+  // sentences would have taken the answers with the icons.
+  assert.ok(connections.includes('maxx does more work in each pass'),
+    'the performance explanation is the row hover now');
+  assert.ok(connections.includes('It still allows manual sleep and lid-close.'),
+    'and so is keep-awake"s');
+  assert.ok(connections.includes('Your Mac is importing and indexing everything privately.'),
+    'and the estimate answers "why is this taking so long" on its own hover');
+});
+
+test('every row carries its explanation as a hover', () => {
+  for (const name of ROW_BUILDERS) {
+    assert.match(builders(name), /\.title = /u, `${name} must set a title`);
+  }
+  const render = /async function renderSettings\(\) \{([\s\S]*?)settings\.replaceChildren/u
+    .exec(connections)?.[1] ?? '';
+  // Every row built from the generic builders is handed one. A row with no
+  // hover is a control with no explanation anywhere at all now.
+  const calls = [...render.matchAll(/(settingRow|actionRow)\(\{([\s\S]*?)\n  \}\)\)/gu)];
+  assert.ok(calls.length >= 4, 'the generic rows were not found');
+  for (const [, fn, body] of calls) {
+    assert.match(body, /\n\s*help: /u, `a ${fn} is missing its help text`);
+  }
+});
+
+// The panel is 312px and cannot grow sideways: fitConnections only ever tells
+// native a HEIGHT. So a label that outgrows its row does not widen anything —
+// it wraps, which is the failure this whole change is about, and it cannot be
+// seen by reading the diff. The arithmetic is exact rather than approximate
+// because the panel is monospace: every glyph is one advance.
+test('no row can wrap at the width this panel actually is', () => {
+  // .win: 20px padding + 1px border a side. .setting: 8px padding + 1px border
+  // a side. The row's own flex gap between name and control is 10px.
+  const ROW_INNER = 312 - 2 * (20 + 1) - 2 * (8 + 1);
+  const GAP = 10;
+  // IBM Plex Mono is neither bundled nor installed, so `--mono` resolves to
+  // ui-monospace (SF Mono, 0.600 em) and falls back to Menlo (0.60205 em).
+  // Budget with the wider of the two.
+  const ADV = 0.60205;
+  const text = (t, px, tracking = 0) => t.length * (px * ADV + tracking);
+  const name = (t) => text(t, 12);                 // .setting-name
+  const said = (t) => text(t, 11);                 // .setting-said
+  const warn = (t) => text(t, 10);                 // .setting-said.setting-warn
+  const pill = (t) => text(t, 10, 1) + 2 * 12 + 2; // .setting-btn: padding + border
+  const SWITCH = 34;                               // .switch
+  // Every row this panel can render, with its widest control. The value rows
+  // are given a realistic worst case rather than today's config.
+  const rows = [
+    ['claude reads & drafts', SWITCH],
+    ['claude reads & drafts', pill('check')],
+    ['claude reads & drafts', said('checking…')],
+    // The failure marker shares the row WITH the switch, plus the slot's gap.
+    ['claude reads & drafts', warn('unsaved') + 8 + SWITCH],
+    ['daily card', said('investor · 100 a day')],
+    ['animations', SWITCH],
+    ['sounds', SWITCH],
+    ['keep mac awake', SWITCH],
+    ['use less power', SWITCH],
+    ['quit', pill('quit')],
+    ['uninstall', pill('uninstall')],
+    ['activity', said('~ 12.5 HRS LEFT')],
+  ];
+  for (const [label, control] of rows) {
+    assert.ok(connections.includes(`'${label}'`),
+      `"${label}" is not a label this panel renders — retire it from the budget`);
+    const used = name(label) + GAP + control;
+    assert.ok(used <= ROW_INNER,
+      `"${label}" needs ${Math.ceil(used)}px of ${ROW_INNER}px — it will wrap`);
+  }
+  // And the label may not wrap even if something does outgrow the row. The rule
+  // is on .setting-name itself: quit and uninstall keep a text column between
+  // the row and their name, so a child selector would miss exactly the two rows
+  // that have something else in that column.
+  const rule = /\n\.setting-name \{[^}]*\}/u.exec(palette)?.[0] ?? '';
+  assert.match(rule, /white-space: nowrap;/u);
+  assert.match(rule, /text-overflow: ellipsis;/u);
+  assert.match(palette, /\.setting > \.setting-name \{ flex: 1 1 auto; min-width: 0; \}/u,
+    'and it takes the room the control does not');
+});
+
+test('the activity row is the one row that stacks, and it is capped', () => {
+  // It is a header and a live list, so it cannot be one line. What it can be is
+  // bounded: three task lines, and the rest reachable by scrolling.
+  assert.match(connections, /el\.className = 'setting setting-col activity-setting'/u);
+  assert.match(palette, /\.activity-list \{\s*\n\s*max-height: 55px;/u,
+    'three 15px lines and two 5px gaps — the cap is the whole point');
 });

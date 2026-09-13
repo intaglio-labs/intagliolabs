@@ -41,19 +41,36 @@ test('startup does not call the retired Hermes performance-file bridge', () => {
 });
 
 test('Settings exposes the owner language and validates the bridge value', () => {
-  assert.match(settings, /name\.textContent = 'performance'/u);
-  assert.match(settings, /modeLabel\.textContent = full \? 'maxx' : 'use less power'/u);
+  // THE ROW IS NAMED FOR WHAT ITS SWITCH TURNS ON (owner, 2026-09-13). It was
+  // called "performance" with a "maxx / use less power" read-out printed beside
+  // the switch to say which way it was set — a name that asked a question and a
+  // second piece of text that answered it, for one control. Named this way the
+  // switch is the answer: ON is less power.
+  assert.match(settings, /name\.textContent = 'use less power'/u);
+  assert.doesNotMatch(settings, /modeLabel/u,
+    'the read-out beside the switch is gone; the switch says it');
   assert.match(settings, /sw\.setAttribute\('role', 'switch'\)/u);
+  // ON THE SCREEN ONLY. What is stored and sent did not move with the name: the
+  // press still asks for the OTHER mode, and full_speed / less_power are still
+  // the two values on the wire.
   assert.match(settings, /const requested = active === FULL \? LESS : FULL/u);
+  assert.match(settings, /const less = active === LESS;/u);
+  assert.match(settings, /sw\.classList\.toggle\('on', less\)/u,
+    'on means less power, or the row is named for the opposite of what it does');
+  assert.match(settings, /less \? 'Processing: use less power' : 'Processing: maxx'/u,
+    'and a screen reader gets the mode by name, since there is no read-out left');
   // A stored pre-rename value must not read as the opposite setting.
   assert.match(settings, /v === 'god_mode' \? FULL : LESS/u);
   assert.doesNotMatch(settings, /performance-pick/u);
   assert.match(settings, /name: 'keep mac awake'/u);
-  assert.match(settings, /function settingHint\(label, copy\)/u);
-  assert.match(settings, /Why leave \$\{label\} on\?/u);
-  // The hint states the difference instead of recommending a side.
+  // ~~settingHint: the "?" bubble~~ went with every other paragraph in that
+  // panel (2026-09-13). The copy did not: it is the row's hover now, which is
+  // what these two lines check.
+  assert.doesNotMatch(settings.replace(/\/\/[^\n]*/gu, ''), /settingHint/u);
   assert.match(settings, /maxx does more work in each pass/u);
   assert.match(settings, /Both keep running on battery; neither one stops/u);
+  assert.match(settings, /el\.title = PERFORMANCE_HELP;/u,
+    'and it is reachable from the row it explains');
   assert.doesNotMatch(settings, /God Mode|god mode/u,
     'the retired performance name must not remain in user-facing Settings copy');
   assert.match(settings, /It still allows manual sleep and lid-close/u);

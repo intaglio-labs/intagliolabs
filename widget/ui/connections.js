@@ -175,89 +175,67 @@ new MutationObserver(() => {
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
 
-let settingHintSerial = 0;
+// ~~infoHint / settingHint: a round "?" beside a label that opened a pop-over
+// of explanation, and .setting-note, the paragraph under every label.~~ Both
+// yeeted (owner, 2026-09-13, opening this panel: "what the fuck are these
+// settings??? so much fucking text??"). The screenshot he was looking at is
+// nine cards tall and only four of them are a control — the rest is prose.
+//
+// EVERY ROW IS ONE LINE NOW: a bold name on the left, its control on the
+// right, nothing underneath. The copy was not deleted — each sentence is the
+// `title` of the row it explained, which is hover-only and costs the column no
+// height. The constants below are that copy, named rather than inlined so the
+// ones that are PROMISES can still be found and compared against the screen
+// that made them (ENGINE_PRIVACY is word-for-word onboarding's).
+//
+// The one exception is uninstall, which keeps a single short line on the
+// surface: it is the one press here that cannot be taken back.
+const CARD_HELP = 'change who it looks for on the card itself — the three chips at the top.';
+const SOUNDS_HELP = 'presses, sending and replies make a sound.';
+const MOTION_HELP = 'reduce motion is on for this Mac. this puts back only this app\u2019s own movement.';
+const AWAKE_HELP = 'Keeps imports and local indexing moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.';
+const PERFORMANCE_HELP = 'maxx does more work in each pass and asks macOS for foreground priority, '
+  + 'so imports and local indexing finish sooner. Using less power does the same work '
+  + 'in smaller passes at background priority — slower, but the machine stays quiet. '
+  + 'Both keep running on battery; neither one stops.';
+const ESTIMATE_HELP = 'Your Mac is importing and indexing everything privately. More chats and years mean more time.';
+// TRUE, AND CHECKED AGAINST WHAT ACTUALLY HAPPENS (main.swift
+// applicationWillTerminate): the reader is this app's own child and stops with
+// it, while hermes, connect and the model server are launch agents and keep
+// running. Saying "everything keeps running" would be the comfortable sentence
+// and the wrong one.
+const QUIT_HELP = 'closes this window and the app. what it has already read stays, and the '
+  + 'services behind it keep running — but nothing new is read until you open it again.';
+const UNINSTALL_HELP = 'stops and removes the background services and deletes the app. everything it '
+  + 'has read is left where it is, and the next screen says exactly what will happen.';
+// THE ONE LINE LEFT ON THE SURFACE, under the one irreversible row. Seven
+// words, and the count is not the constraint the wording is fighting: the row
+// is 252px of monospace, so a line here is 41 characters and this is 41. "its"
+// and "your" were the two words that could go without taking a fact with them.
+const UNINSTALL_NOTE = 'removes the app and services. data stays.';
 
-// A small, keyboard-accessible explanation. CSS reveals it on hover/focus;
-// click pins it until another click, Escape, or an outside press. The copy is
-// textContent only.
-function infoHint(copy, ariaLabel) {
-  const wrap = document.createElement('span');
-  wrap.className = 'setting-hint';
-  const button = document.createElement('button');
-  button.className = 'setting-hint-icon';
-  button.type = 'button';
-  button.textContent = '?';
-  button.setAttribute('aria-label', ariaLabel);
-  button.setAttribute('aria-expanded', 'false');
-  const tip = document.createElement('span');
-  tip.className = 'setting-hint-copy';
-  tip.id = `setting-hint-${settingHintSerial += 1}`;
-  tip.setAttribute('role', 'tooltip');
-  tip.textContent = copy;
-  button.setAttribute('aria-describedby', tip.id);
-
-  const close = () => {
-    wrap.classList.remove('open');
-    button.setAttribute('aria-expanded', 'false');
-  };
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const open = !wrap.classList.contains('open');
-    document.querySelectorAll('.setting-hint.open').forEach((other) => {
-      other.classList.remove('open');
-      other.querySelector('.setting-hint-icon')?.setAttribute('aria-expanded', 'false');
-    });
-    wrap.classList.toggle('open', open);
-    button.setAttribute('aria-expanded', String(open));
-  });
-  button.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') close();
-  });
-  document.addEventListener('click', (event) => {
-    if (!wrap.contains(event.target)) close();
-  });
-  wrap.append(button, tip);
-  return wrap;
-}
-
-// Setting hints share one question; other surfaces can use infoHint with an
-// accessible label that actually matches what their icon explains.
-function settingHint(label, copy) {
-  return infoHint(copy, `Why leave ${label} on?`);
-}
-
-// One row per setting: a name, a line of context, and a switch. Generic
-// because there are two of them now and they differ only in wording, in which
-// bridge message they send, and in whether they are shown at all.
-function settingRow({ name, note, hint, on, message }) {
+// One row per setting, and it is ONE LINE: the name, and the switch. Generic
+// because there are three of them now and they differ only in wording, in
+// which bridge message they send, and in whether they are shown at all.
+//
+// `help` is the row's hover, never a line under it — see the note above.
+function settingRow({ name, help, on, message }) {
   const el = document.createElement('div');
   el.className = 'setting';
+  if (help) el.title = help;
 
-  const text = document.createElement('div');
-  text.className = 'setting-text';
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = name;
-  const labelLine = document.createElement('span');
-  labelLine.className = 'setting-label-line';
-  labelLine.appendChild(label);
-  if (hint) labelLine.appendChild(settingHint(name, hint));
-  text.appendChild(labelLine);
-  // The note is optional now — both switch rows shed theirs (owner,
-  // 2026-08-25): "Reduce Motion is on for this Mac" and "presses, sending
-  // and replies" explained controls whose names already say it.
-  if (note) {
-    const sub = document.createElement('span');
-    sub.className = 'setting-note';
-    sub.textContent = note;
-    text.appendChild(sub);
-  }
 
   const sw = document.createElement('button');
   sw.className = 'switch' + (on ? ' on' : '');
   sw.setAttribute('role', 'switch');
   sw.setAttribute('aria-checked', String(on));
-  sw.title = name;
+  // NO TITLE ON THE CONTROL. The row owns the hover; a second one on the
+  // switch would answer a different sentence depending on where the pointer
+  // happened to land.
+  sw.setAttribute('aria-label', name);
   const knob = document.createElement('span');
   knob.className = 'knob';
   sw.appendChild(knob);
@@ -278,7 +256,7 @@ function settingRow({ name, note, hint, on, message }) {
     }
   });
 
-  el.append(text, sw);
+  el.append(label, sw);
   return el;
 }
 
@@ -320,8 +298,11 @@ function configEngine(cfg) {
 function cardConfigRow(configPromise) {
   const el = document.createElement('div');
   el.className = 'setting';
-  const text = document.createElement('div');
-  text.className = 'setting-text';
+  // The picker is NOT duplicated here, deliberately: it lives on the card,
+  // which is where you change your mind about it. This row exists because a
+  // new owner reading settings saw no sign the product had modes at all — and
+  // saying so takes a hover, not four lines of the column.
+  el.title = CARD_HELP;
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = 'daily card';
@@ -332,49 +313,42 @@ function cardConfigRow(configPromise) {
   // keeps one busy word per idea rather than one per row
   // (connect-affordances.test.mjs).
   said.textContent = '';
-  const note = document.createElement('span');
-  note.className = 'setting-note';
-  // The picker is NOT duplicated here, deliberately: it lives on the card,
-  // which is where you change your mind about it. This row exists because a new
-  // owner reading settings saw no sign the product had modes at all.
-  note.textContent = 'change who it looks for on the card itself — the three chips at the top.';
-  // ALL THREE INSIDE THE TEXT COLUMN, and the value is NOT a right-hand slot.
+  // LABEL LEFT, VALUE RIGHT, one line.
   //
-  // It was one, wearing .setting-value — the read-out built for the size
-  // slider, which holds a number. This value is a sentence: "investor · one
-  // card a day · reading on this Mac" is ~47 characters, and as a sibling flex
-  // item its content width competed with the text column for a 312px panel.
-  // The column lost (it carries min-width: 0, so it may shrink to nothing) and
-  // the row rendered its label one word per line with the value printed across
-  // the description. Live on run 6.
-  //
-  // Every other row here puts its words in this column and its CONTROL beside
-  // it. This row has no control, so it is label, value, description, stacked —
-  // .setting-text is already a column flex, so each takes its own line.
-  text.append(label, said, note);
-  el.append(text);
+  // It was label, value and a description stacked in a text column, because
+  // the value had been a right-hand slot and lost a width fight with the
+  // description on a 312px panel (run 6, the row printing one word per line).
+  // The description is gone — it is this row's `title` now — so the fight has
+  // no second party: the value is the only thing beside the label, it is
+  // nowrap and right-aligned, and the label ellipsizes before either wraps.
+  el.append(label, said);
 
-  const cap = (n) => (n === 1 ? 'one card a day' : `${n} cards a day`);
   configPromise.then((cfg) => {
     const bits = [];
     if (typeof cfg?.mode === 'string' && cfg.mode) bits.push(cfg.mode);
-    if (Number.isInteger(cfg?.capPerDay) && cfg.capPerDay > 0) bits.push(cap(cfg.capPerDay));
-    // The engine in words, because this row is where an owner who cannot see
-    // the switch below (no claude on this Mac, or a probe that failed) finds
-    // out which way it is set.
-    //
-    // ABSENT IS NOT UNKNOWN. The route answers `engine: null` when the config
-    // key has never been written, and engines.mjs reads an absent key as the
-    // loopback model — so on a fresh install "nothing is set" IS "nothing
-    // leaves this Mac", and rendering it as a shrug would leave the one fact
-    // this row exists to state unstated on exactly the machines that have just
-    // been set up. An answer with no engine key is still an answer; only a
-    // reply that never came is unknown, and that is `cfg` itself being null.
-    if (cfg) bits.push(configEngine(cfg) === 'claude-cli' ? 'reading with claude' : 'reading on this Mac');
+    // THE REAL NUMBER, ALWAYS. ~~`n === 1 ? 'one card a day' : ...`~~ — the
+    // singular was a word where every other reading of this row is a digit,
+    // and it read as a hard-coded "one" to an owner whose config says 50.
+    if (Number.isInteger(cfg?.capPerDay) && cfg.capPerDay > 0) bits.push(`${cfg.capPerDay} a day`);
     // NOTHING IS ASSERTED WHEN NOTHING ANSWERED. A reader that is still
     // starting up must not be reported as a setting: an em dash says "not
     // known", where a default would say "investor" to somebody on 'any'.
     said.textContent = bits.length > 0 ? bits.join(' · ') : '—';
+    // THE ENGINE IN WORDS, in the hover rather than as a third clause on the
+    // line (owner: no third clause — the engine is the toggle above). It is
+    // still SAID somewhere, because this row is where an owner who cannot see
+    // that toggle (no claude on this Mac, or a probe that failed) finds out
+    // which way it is set.
+    //
+    // ABSENT IS NOT UNKNOWN. The route answers `engine: null` when the config
+    // key has never been written, and engines.mjs reads an absent key as the
+    // loopback model — so on a fresh install "nothing is set" IS "nothing
+    // leaves this Mac". An answer with no engine key is still an answer; only
+    // a reply that never came is unknown, and that is `cfg` itself being null.
+    if (cfg) {
+      const engine = configEngine(cfg) === 'claude-cli' ? 'reading with claude' : 'reading on this Mac';
+      el.title = `${CARD_HELP} ${engine}.`;
+    }
     fitConnections();
   });
   return el;
@@ -383,18 +357,32 @@ function cardConfigRow(configPromise) {
 // A setting whose control is a BUTTON, because what it does happens once
 // instead of being on or off. The press is awaited and the button is dead while
 // it runs: both of these reach native, and one of them is deleting things.
-function actionRow({ name, note, label, danger = false, onPress }) {
+function actionRow({ name, help, note, label, danger = false, onPress }) {
+  // THE NOTE RUNS THE FULL WIDTH, under the name and the button rather than
+  // beside them. Squeezed into the column left over by a 90px pill it had
+  // about 25 characters a line, which turned one sentence into three lines —
+  // and made native's live uninstall narration, which lands in this same
+  // element, unreadable at the moment it matters most. With an empty note the
+  // row is its head and nothing else, which is one line.
   const el = document.createElement('div');
-  el.className = 'setting';
+  el.className = 'setting setting-col';
+  if (help) el.title = help;
   const text = document.createElement('div');
-  text.className = 'setting-text';
+  text.className = 'setting-head';
   const title = document.createElement('span');
   title.className = 'setting-name';
   title.textContent = name;
+  // THE ONLY LINE LEFT UNDER A LABEL IN THIS PANEL, and only uninstall passes
+  // one: it is the press that cannot be taken back, so what it keeps is said
+  // on the surface rather than on a hover nobody is obliged to try.
+  //
+  // The element is built for every row regardless, because `say` writes into
+  // it — quit's one failure sentence, and uninstall's step-by-step narration
+  // from native — and a row that cannot report what just happened is worse
+  // than a row with a line under it. Empty, it renders as nothing (`:empty`).
   const sub = document.createElement('span');
   sub.className = 'setting-note';
-  sub.textContent = note;
-  text.append(title, sub);
+  sub.textContent = note || '';
 
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -414,7 +402,8 @@ function actionRow({ name, note, label, danger = false, onPress }) {
       btn.disabled = false;
     }
   });
-  el.append(text, btn);
+  text.append(title, btn);
+  el.append(text, sub);
   return el;
 }
 
@@ -438,7 +427,11 @@ const START_REFUSED = {
 // nor change it. Same copy as onboarding screen 5 on purpose — two wordings for
 // one privacy switch is two promises, and only one of them can be the one that
 // was read.
-const ENGINE_LABEL = 'use your claude subscription for reading and drafting';
+// THREE WORDS AND AN AMPERSAND (owner, 2026-09-13). The sentence this used to
+// be — "use your claude subscription for reading and drafting" — wrapped to two
+// lines at 312px before the panel had said anything at all. What it means is
+// the hover, and the hover is the privacy promise itself.
+const ENGINE_LABEL = 'claude reads & drafts';
 const ENGINE_PRIVACY = "when this is on, excerpts of your messages go to anthropic's servers "
   + 'to be read. when it is off, nothing leaves this Mac.';
 // NEUTRAL ABOUT THE DIRECTION, because the row shows it after a press either
@@ -458,37 +451,55 @@ const ENGINE_STATE_COPY = {
   busy: 'still checking…',
   error: 'claude is here but it did not answer the way i expected.',
 };
+// A WRITE THAT DID NOT LAND. The switch snapping back is what the owner sees;
+// these say why on the hover. Neither may imply anything was stored.
+const ENGINE_NO_SAVE_AUTH = 'i could not reach the part of me that keeps this. nothing changed.';
+const ENGINE_NO_SAVE = 'that did not save — the reader may still be starting up. nothing changed.';
+const ENGINE_UNKNOWN = 'claude is here, but i cannot tell how this is set right now.';
 
 function engineRow(configPromise) {
   const el = document.createElement('div');
   el.className = 'setting';
-  const text = document.createElement('div');
-  text.className = 'setting-text';
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = ENGINE_LABEL;
-  const privacy = document.createElement('span');
-  privacy.className = 'setting-note';
-  privacy.textContent = ENGINE_PRIVACY;
-  const state = document.createElement('span');
-  state.className = 'setting-note';
-  // ONE BUSY WORD, the same one onboarding's engine screen uses — see
-  // connect-affordances.test.mjs, which rejects a new verb per call site. The
-  // label above already says what is being checked.
-  state.textContent = 'checking…';
-  text.append(label, privacy, state);
 
-  // The control slot holds one of two things and never both: the switch, once a
-  // probe has come back ok, or a "check again" pill while it has not.
+  // EVERY SENTENCE THIS ROW USED TO PRINT, on the hover. It had two lines
+  // under its label at all times — the privacy promise and a live state line —
+  // which is four lines of a nine-row panel spent on one switch. The words did
+  // not change; where they live did. The promise is always in there, because
+  // it is the one this panel is answerable for.
+  const say = (line) => { el.title = line ? `${ENGINE_PRIVACY} ${line}` : ENGINE_PRIVACY; };
+  say('');
+
+  // The control slot holds the busy word while a probe is in flight, then the
+  // switch once one has come back ok, or a "check" pill when it has not — and
+  // the switch keeps a one-word marker beside it if a write did not land.
   const control = document.createElement('span');
   control.className = 'setting-control';
-  el.append(text, control);
+  el.append(label, control);
+
+  // ONE BUSY WORD, the same one onboarding's engine screen uses — see
+  // connect-affordances.test.mjs, which rejects a new verb per call site.
+  const busy = document.createElement('span');
+  busy.className = 'setting-said';
+  busy.textContent = 'checking…';
+
+  // A FAILED WRITE IS SAID ON THE ROW, not only on its hover. The snap back
+  // below is the first half of the report, and it is not enough on its own: a
+  // switch that springs back with nothing beside it is a switch the owner
+  // presses again, and this is the one control in the panel where what the
+  // owner believes about it IS a privacy claim. One word, in the slot a value
+  // would use, next to the switch rather than under it — the reason is the
+  // hover, the fact is on the row. Cleared by the next answer of any kind.
+  const warn = document.createElement('span');
+  warn.className = 'setting-said setting-warn';
+  warn.textContent = 'unsaved';
 
   const sw = document.createElement('button');
   sw.type = 'button';
   sw.className = 'switch';
   sw.setAttribute('role', 'switch');
-  sw.title = 'claude subscription';
   sw.appendChild(Object.assign(document.createElement('span'), { className: 'knob' }));
   const paintSwitch = (on) => {
     sw.classList.toggle('on', on);
@@ -503,7 +514,8 @@ function engineRow(configPromise) {
     const out = await hzPost('setEngine', { engine: next ? 'claude-cli' : 'local' })
       .catch(() => null);
     if (landed(out)) {
-      state.textContent = ENGINE_TIMING;
+      control.replaceChildren(sw);
+      say(ENGINE_TIMING);
       return;
     }
     // NOTHING WAS WRITTEN, so the switch must not claim otherwise — this is the
@@ -512,16 +524,17 @@ function engineRow(configPromise) {
     // {state:'down'} and RESOLVES, so the `catch` this replaces caught nothing
     // and the switch stayed where the owner put it while the config did not.
     paintSwitch(!next);
-    state.textContent = out?.state === 'auth'
-      ? 'i could not reach the part of me that keeps this. nothing changed.'
-      : 'that did not save — the reader may still be starting up. nothing changed.';
-    fitConnections();
+    control.replaceChildren(warn, sw);
+    say(out?.state === 'auth' ? ENGINE_NO_SAVE_AUTH : ENGINE_NO_SAVE);
   });
 
   const again = document.createElement('button');
   again.type = 'button';
   again.className = 'setting-btn';
-  again.textContent = 'check again';
+  // 'check', not 'check again': at 312px the label above is 21 monospace
+  // characters and the row has about 100px left for a control. The longer pill
+  // did not fit beside it, and the row may not wrap.
+  again.textContent = 'check';
   again.addEventListener('click', () => { probe({ manual: true }); });
 
   // THE SWITCH IS OFFERED ONLY WHEN THE PROBE WORKED. "you have it" and "it
@@ -534,10 +547,16 @@ function engineRow(configPromise) {
   // back as the real answer. The probe carries the configured engine and so
   // does GET /admin/config/card, so the second answers when the first does not;
   // with neither able to say, there is no switch, exactly as with no probe.
+  //
+  // THE "CAN'T TELL" STATE IS A CONTROL, NOT A SENTENCE (owner, 2026-09-13),
+  // and the control is the pill rather than a disabled switch: a switch drawn
+  // disabled still draws a POSITION, and the position it would draw is off —
+  // the exact false privacy answer the paragraph above exists to refuse. The
+  // pill says the same "not now" and keeps the one verb that can change it.
   async function paint(out) {
     const st = out && out.state;
     if (st !== 'ok') {
-      state.textContent = ENGINE_STATE_COPY[st] || ENGINE_STATE_COPY.error;
+      say(ENGINE_STATE_COPY[st] || ENGINE_STATE_COPY.error);
       control.replaceChildren(again);
       fitConnections();
       return;
@@ -545,12 +564,12 @@ function engineRow(configPromise) {
     const fromProbe = typeof out.engine === 'string' ? out.engine : null;
     const engine = fromProbe ?? configEngine(await configPromise);
     if (engine !== 'claude-cli' && engine !== 'local') {
-      state.textContent = 'claude is here, but i cannot tell how this is set right now.';
+      say(ENGINE_UNKNOWN);
       control.replaceChildren(again);
       fitConnections();
       return;
     }
-    state.textContent = ENGINE_TIMING;
+    say(ENGINE_TIMING);
     paintSwitch(engine === 'claude-cli');
     control.replaceChildren(sw);
     fitConnections();
@@ -568,8 +587,7 @@ function engineRow(configPromise) {
   // get out of. Any answer that is not `busy` resets it too.
   function probe({ manual = false } = {}) {
     if (manual) busyRetries = 0;
-    state.textContent = 'checking…';
-    control.replaceChildren();
+    control.replaceChildren(busy);
     hzPost('engineProbe')
       .then((out) => {
         if (out?.state !== 'busy') busyRetries = 0;
@@ -585,117 +603,40 @@ function engineRow(configPromise) {
   return el;
 }
 
-// A setting that holds a NUMBER. Stacked rather than in a row — a slider in
-// the space a switch occupies has about 30px of travel in a 312px popup.
-//
-// No end labels under the track: the live read-out in the head already says
-// where the thumb is, and two more numbers underneath were saying the same
-// thing twice in a 312px popup.
-//
-// `input` fires continuously while dragging and `change` once on release, and
-// both are wired on purpose: the first is what makes the widget resize under
-// the thumb so the size can be CHOSEN by looking at it, the second is what
-// commits. Only `change` persists, so a drag across the whole range writes
-// UserDefaults once instead of forty times.
-function rangeRow({ name, note, value, min, max, step, message, format }) {
-  const el = document.createElement('div');
-  el.className = 'setting setting-col';
-
-  const head = document.createElement('div');
-  head.className = 'setting-head';
-  const label = document.createElement('span');
-  label.className = 'setting-name';
-  label.textContent = name;
-  const read = document.createElement('span');
-  read.className = 'setting-value';
-  read.textContent = format(value);
-  head.append(label, read);
-
-  const sub = document.createElement('span');
-  sub.className = 'setting-note';
-  sub.textContent = note;
-
-  const input = document.createElement('input');
-  input.type = 'range';
-  input.className = 'setting-range';
-  input.min = String(min);
-  input.max = String(max);
-  input.step = String(step);
-  input.value = String(value);
-  input.title = name;
-
-  // Applied live but not stored. If the bridge refuses it the read-out would
-  // be lying, so it is only trusted once the reply comes back.
-  // COALESCED TO ONE PER FRAME. `input` fires as fast as the mouse moves, and
-  // each one costs a window resize plus a full relayout of three zoomed
-  // pages — dragging the thumb across the range queued dozens of them and the
-  // first pull visibly stuttered. The read-out still updates on every event,
-  // because that is just text; only the expensive half is throttled. Skipping
-  // an unchanged value matters too: a slider held still between steps keeps
-  // firing.
-  let pending = null;
-  let applied = value;
-  input.addEventListener('input', () => {
-    read.textContent = format(Number(input.value));
-    if (pending !== null) return;
-    pending = requestAnimationFrame(() => {
-      pending = null;
-      const v = Number(input.value);
-      if (v === applied) return;
-      applied = v;
-      hzPost(message, { value: v, commit: false }).catch(() => {});
-    });
-  });
-  input.addEventListener('change', () => {
-    applied = Number(input.value);
-    hzPost(message, { value: Number(input.value) })
-      .then((d) => {
-        // Native clamps; if it came back different, the control has to say so
-        // rather than keep showing a value that was not stored.
-        if (d && typeof d.scale === 'number') {
-          input.value = String(d.scale);
-          read.textContent = format(d.scale);
-        }
-      })
-      .catch(() => {});
-  });
-
-  el.append(head, sub, input);
-  return el;
-}
+// ~~rangeRow: a setting that holds a NUMBER — a full-width track under its
+// label, with a live read-out and a line of explanation.~~ The size slider was
+// yeeted (owner, 2026-08-24: everything runs at 100%) and this builder stayed
+// behind uncalled for three weeks. It is deleted here rather than kept
+// "in case": it was the last thing in this file that put a paragraph under a
+// label, and a panel whose rule is one line per row cannot carry a dormant
+// exception to it. renderSettings still snaps a stored non-1 scale back to 1,
+// which is the only part of the slider era that has to survive.
 
 // One explicit performance switch replaces the old implicit charger/thermal
 // policy. Both settings keep processing — only pass size and process priority
 // change, and neither reads the charger.
 //
-// The high-throughput label remains the owner's compact "maxx" name. The low
-// side says what it does: use less power. The hint carries the concrete
-// difference rather than making either label do too much work.
+// THE ROW IS NAMED FOR WHAT THE SWITCH TURNS ON (owner, 2026-09-13: "use less
+// power" — the toggle IS the answer). ~~A row called "performance" with a
+// "maxx / use less power" read-out printed beside its switch~~: the name asked
+// a question the read-out then had to answer, which is two pieces of text for
+// one control. Named this way the switch means what it says — ON is less
+// power — and needs nothing beside it.
+//
+// THE POLARITY FLIPPED WITH THE NAME, AND ONLY ON SCREEN. What is stored and
+// sent is untouched: `setPerformance` still writes full_speed / less_power,
+// and a preference written before the rename still resolves rather than
+// silently reading as the other setting. The owner's compact "maxx" name for
+// the high-throughput side survives in the hover and in the accessible name.
 function performanceRow(selected) {
   const el = document.createElement('div');
-  el.className = 'setting performance-setting';
+  el.className = 'setting';
+  el.title = PERFORMANCE_HELP;
 
-  const text = document.createElement('div');
-  text.className = 'setting-text';
   const name = document.createElement('span');
   name.className = 'setting-name';
-  name.textContent = 'performance';
-  const labelLine = document.createElement('span');
-  labelLine.className = 'setting-label-line';
-  labelLine.append(name, settingHint(
-    'performance',
-    'maxx does more work in each pass and asks macOS for foreground priority, '
-    + 'so imports and local indexing finish sooner. Using less power does the same work '
-    + 'in smaller passes at background priority — slower, but the machine stays quiet. '
-    + 'Both keep running on battery; neither one stops.'
-  ));
-  text.append(labelLine);
+  name.textContent = 'use less power';
 
-  const control = document.createElement('div');
-  control.className = 'performance-toggle';
-  const modeLabel = document.createElement('span');
-  modeLabel.className = 'performance-mode-label';
-  modeLabel.setAttribute('aria-live', 'polite');
   const sw = document.createElement('button');
   sw.className = 'switch';
   sw.type = 'button';
@@ -711,17 +652,13 @@ function performanceRow(selected) {
   const normalise = (v) => (v === FULL || v === 'god_mode' ? FULL : LESS);
   let active = normalise(selected);
   const paint = () => {
-    const full = active === FULL;
-    modeLabel.textContent = full ? 'maxx' : 'use less power';
-    sw.classList.toggle('on', full);
-    sw.setAttribute('aria-checked', String(full));
+    const less = active === LESS;
+    sw.classList.toggle('on', less);
+    sw.setAttribute('aria-checked', String(less));
     // The accessible name says what the switch DOES, since a screen reader user
-    // gets no hint text alongside it.
+    // gets no hover alongside it.
     sw.setAttribute('aria-label',
-      full ? 'Processing: maxx' : 'Processing: use less power');
-    sw.title = full
-      ? 'maxx: larger passes, foreground priority'
-      : 'Smaller passes, background priority';
+      less ? 'Processing: use less power' : 'Processing: maxx');
   };
   sw.addEventListener('click', async () => {
     const previous = active;
@@ -737,9 +674,8 @@ function performanceRow(selected) {
     paint();
   });
   paint();
-  control.append(modeLabel, sw);
 
-  el.append(text, control);
+  el.append(name, sw);
   return el;
 }
 
@@ -765,24 +701,20 @@ function activityRow() {
   const estimate = document.createElement('span');
   estimate.className = 'activity-estimate';
   estimate.hidden = true;
-  const estimateLine = document.createElement('span');
-  estimateLine.className = 'activity-estimate-line';
-  estimateLine.hidden = true;
-  estimateLine.append(estimate, infoHint(
-    'Your Mac is importing and indexing everything privately. More chats and years mean more time.',
-    'Why is this taking so long?'
-  ));
-  head.append(name, estimateLine);
+  // ~~a "?" beside the total, opening "why is this taking so long?"~~ The
+  // question is worth answering and the icon was not: the answer is this
+  // read-out's own hover now, on the very thing being asked about.
+  estimate.title = ESTIMATE_HELP;
+  head.append(name, estimate);
   const list = document.createElement('div');
   list.className = 'activity-list';
   el.append(head, list);
 
-  const gb = (bytes) => `${(Number(bytes || 0) / 1e9).toFixed(1)} GB`;
+  const gb = (bytes) => `${(Number(bytes || 0) / 1e9).toFixed(1)}`;
   const paint = (data) => {
     const total = data && typeof data.estimate === 'string' ? data.estimate.trim() : '';
     estimate.textContent = total;
     estimate.hidden = !total;
-    estimateLine.hidden = !total;
     const latestItems = data && Array.isArray(data.items) ? data.items : [];
     // The queue stays intact: the first row is current and the remaining real
     // scheduled work follows in order. Current + next two fit; more scroll here.
@@ -853,7 +785,9 @@ function activityRow() {
         const text = document.createElement('span');
         if (item.kind === 'model') {
           const verb = item.phase === 'verifying' ? 'verifying' : 'downloading';
-          text.textContent = `${verb} ${item.tier || 'local model'} · ${gb(item.got)} of ${gb(item.total)}`;
+          // `1.2/4.0 GB`, not `1.2 GB of 4.0 GB`: the list is three lines in a
+          // 252px column and this one ellipsized mid-number.
+          text.textContent = `${verb} ${item.tier || 'local model'} · ${gb(item.got)}/${gb(item.total)}`;
         } else {
           text.textContent = item.label || 'processing locally';
         }
@@ -963,6 +897,7 @@ async function renderSettings() {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     rows.push(settingRow({
       name: 'animations',
+      help: MOTION_HELP,
       on: p && p.motion === true,
       message: 'setMotion',
     }));
@@ -971,12 +906,13 @@ async function renderSettings() {
   // the only place they can be turned off.
   rows.push(settingRow({
     name: 'sounds',
+    help: SOUNDS_HELP,
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));
   rows.push(settingRow({
     name: 'keep mac awake',
-    hint: 'Keeps imports and local indexing moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
+    help: AWAKE_HELP,
     on: p && p.keepAwake === true,
     message: 'setKeepAwake',
   }));
@@ -1013,22 +949,22 @@ async function renderSettings() {
   // two rows the only ways to stop it were Activity Monitor and a shell script
   // in a repo, which on somebody else's Mac means it cannot be turned off at
   // all — the worst thing on the surface, and the reason these are here.
+  // NO LINE UNDER IT. Quitting is one press and one keystroke away from being
+  // undone — reopen the app — so what it does is the hover, and the row is the
+  // word and the button.
   rows.push(actionRow({
     name: 'quit',
-    // TRUE, AND CHECKED AGAINST WHAT ACTUALLY HAPPENS (main.swift
-    // applicationWillTerminate): the reader is this app's own child and stops
-    // with it, while hermes, connect and the model server are launch agents and
-    // keep running. Saying "everything keeps running" would be the comfortable
-    // sentence and the wrong one.
-    note: 'closes this window and the app. what it has already read stays, and the '
-      + 'services behind it keep running — but nothing new is read until you open it again.',
+    help: QUIT_HELP,
     label: 'quit',
     onPress: async () => { await hzPost('quitApp'); },
   }));
+  // THE ONE ROW THAT KEEPS A LINE, because it is the one press that cannot be
+  // taken back. Nine words, and the half of them that matter are the promise
+  // that the data stays; the rest of what happens is the hover.
   rows.push(actionRow({
     name: 'uninstall',
-    note: 'stops and removes the background services and deletes the app. everything it '
-      + 'has read is left where it is, and the next screen says exactly what will happen.',
+    help: UNINSTALL_HELP,
+    note: UNINSTALL_NOTE,
     label: 'uninstall',
     danger: true,
     onPress: async ({ say }) => {

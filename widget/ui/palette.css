@@ -1728,42 +1728,27 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   background: rgba(20, 20, 18, 0.88);
   border: 1px solid rgba(234, 234, 234, 0.10);
 }
+/* ONE LINE PER ROW (owner, 2026-09-13). The name takes the free space and the
+   control sits against the right edge. The no-wrap rule is on .setting-name
+   itself rather than on this selector, because the two action rows keep a text
+   column between the row and their name and would otherwise be the only rows
+   that could still wrap. If a name ever outgrows the room it ellipsizes — the
+   hover carries the sentence either way. */
+.setting > .setting-name { flex: 1 1 auto; min-width: 0; }
+/* Only uninstall still has anything under its name, so this column is one
+   element tall the rest of the time; `say` writes quit's failure and
+   uninstall's narration into it. Empty, it must take no room at all, or every
+   action row carries the flex gap of a line that is not there. */
 .setting-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
-.setting-label-line { display: inline-flex; align-items: center; gap: 5px; }
-.setting-hint { position: relative; display: inline-flex; flex: 0 0 auto; z-index: 8; }
-/* Every closed icon shares the base layer. Lift only the hint being read so
-   later settings rows cannot paint their icons or card surfaces over its box. */
-.setting-hint:hover,
-.setting-hint:focus-within,
-.setting-hint.open { z-index: 30; }
-.setting-hint-icon {
-  width: 15px; height: 15px; padding: 0; border-radius: 50%;
-  border: 1px solid rgba(197, 165, 109, 0.42);
-  background: rgba(10, 10, 9, 0.8); color: var(--hazelnut-light);
-  font: inherit; font-size: 9px; line-height: 1; font-weight: 700;
-  display: inline-flex; align-items: center; justify-content: center;
-  cursor: help;
-}
-.setting-hint-icon:hover,
-.setting-hint-icon:focus-visible {
-  border-color: var(--hazelnut); color: var(--fg); outline: none;
-}
-.setting-hint-copy {
-  position: absolute; top: calc(100% + 6px); left: 50%;
-  width: min(220px, calc(100vw - 64px)); padding: 7px 9px;
-  border: 1px solid rgba(197, 165, 109, 0.32); border-radius: 8px;
-  background: rgba(14, 14, 12, 0.98); color: var(--secondary);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.48);
-  font-size: 10px; line-height: 1.45; font-weight: 400;
-  opacity: 0; visibility: hidden; pointer-events: none;
-  transform: translate(-40%, -2px);
-  transition: opacity 0.14s ease, transform 0.14s ease, visibility 0.14s;
-}
-.setting-hint:hover .setting-hint-copy,
-.setting-hint:focus-within .setting-hint-copy,
-.setting-hint.open .setting-hint-copy {
-  opacity: 1; visibility: visible; transform: translate(-40%, 0);
-}
+.setting-note:empty { display: none; }
+/* ~~.setting-hint / .setting-hint-icon / .setting-hint-copy: a round "?" after
+   a label, revealing a bordered pop-over on hover, focus or click, with its own
+   stacking rules so a later row's icon could not paint over the box being
+   read.~~ Every one of them is gone with the paragraphs (owner, 2026-09-13).
+   The copy they held is each row's `title` now: the same words, no icon to
+   notice, no pop-over to lay out, and no height in a column that had nine
+   cards in a 500px window. The z-index dance died with the icons — a native
+   tooltip is not in this document's stacking context at all. */
 /* The connectors intro (its banner and promo pulse) was yeeted 2026-08-22 —
    see connections.js; the hint hand-holds below are the only guidance now. */
 /* The hand-hold: a connector's first press opens the tall version of its
@@ -1919,51 +1904,26 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   background: rgba(20, 20, 18, 0.9); color: var(--hazelnut-light);
   font-size: 10px; letter-spacing: 0.1em;
 }
-/* A setting that holds a NUMBER rather than a yes/no. It stacks instead of
-   sitting in a row: a full-width track under the label, because a slider
-   squeezed into the space a 34px switch occupies has no usable travel in a
-   312px popup. */
+/* THE ONE ROW THAT IS NOT ONE LINE: activity, which is a header and a live
+   list of what the machine is doing. (It was written for the size slider's
+   full-width track; the slider and its builder are both gone, and the list is
+   what stacks here now.) The list caps itself at three lines — see
+   .activity-list — so the exception stays four lines tall at most. */
 .setting.setting-col { flex-direction: column; align-items: stretch; gap: 6px; }
-.setting-head { display: flex; align-items: baseline; gap: 8px; }
+/* center, not baseline: this row carries a pill button beside its name in the
+   action rows, and a button has no baseline worth aligning a label to. */
+.setting-head { display: flex; align-items: center; gap: 8px; }
 .setting-head .setting-name { flex: 1; }
-/* The live read-out. Tabular so the row does not jitter as the number
-   changes under the thumb — the whole point of it is to be watched while
-   dragging. */
-.setting-value {
-  font-size: 11px; font-weight: 700; color: var(--hazelnut-light);
-  font-variant-numeric: tabular-nums;
+/* ~~.setting-value, .setting-range and its thumb, .setting-ticks: the size
+   slider's read-out and track.~~ The slider was yeeted 2026-08-24 and its
+   builder followed on 2026-09-13; nothing renders any of these. */
+.setting-name {
+  font-weight: 700; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.setting-range {
-  -webkit-appearance: none; appearance: none;
-  width: 100%; height: 18px;
-  background: none; cursor: ew-resize;
-}
-.setting-range::-webkit-slider-runnable-track {
-  height: 4px; border-radius: 999px;
-  background: rgba(234, 234, 234, 0.14);
-  border: 1px solid rgba(234, 234, 234, 0.08);
-}
-/* Same hazelnut gradient as the send button and the CTA — this is the one
-   control in the popup you push around, so it gets the accent. The negative
-   margin centres a 14px thumb on a 4px track; -webkit-slider-thumb has no
-   transform box of its own to do it with. */
-.setting-range::-webkit-slider-thumb {
-  -webkit-appearance: none; appearance: none;
-  width: 14px; height: 14px; border-radius: 50%;
-  margin-top: -6px;
-  background: linear-gradient(180deg, #e5d6bb, #c5a56d);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
-}
-.setting-range:active::-webkit-slider-thumb { transform: scale(1.15); }
-/* The scale ticks, so the ends of the travel say what they are. */
-.setting-ticks {
-  display: flex; justify-content: space-between;
-  font-size: 9px; color: var(--muted); margin-top: -2px;
-}
-.setting-name { font-weight: 700; font-size: 12px; }
 .setting-note { font-size: 10px; line-height: 1.4; color: var(--muted); }
 /* A row whose control is a button rather than a switch: quit, uninstall, and
-   "check again" on the engine row. Same pill as the connector cards' .hold-ok,
+   "check" on the engine row. Same pill as the connector cards' .hold-ok,
    which is the only button shape this panel has — a second one would read as a
    different KIND of thing rather than as the same thing in a new place. */
 .setting-btn {
@@ -1983,19 +1943,29 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 .setting-btn-danger { border-color: rgba(214, 122, 96, 0.55); color: #e0a08c; }
 .setting-btn-danger:hover { border-color: rgba(214, 122, 96, 0.9); }
 /* Where a row's control lives when it can be swapped out — the engine row puts
-   either its switch or its "check again" pill here. */
-.setting-control { flex: 0 0 auto; display: inline-flex; align-items: center; }
-/* A stated fact, not a control: right-aligned like a read-out, and quieter
-   than the switch it sits in place of. */
-/* A stated fact on its own line inside the row's text column — NOT the
-   right-hand read-out .setting-value is: that one holds a number for the size
-   slider, and this one holds a sentence. As a sibling of .setting-text its
-   content width competed with the description for a 312px panel and the
-   description lost, one word per line, with this printed over it. */
+   its busy word, then either its switch or its "check" pill, here. */
+.setting-control { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; }
+/* A write that did not land, beside the control that did not take. Warm like
+   the uninstall pill, and small: it shares a 252px row with a 21-character
+   label and a 34px switch, and the row may not wrap. */
+.setting-warn { font-size: 10px; color: #e0a08c; opacity: 1; }
+/* A STATED FACT WHERE A CONTROL WOULD BE: the daily card's setting, and the
+   engine row's busy word while its probe is out. Right-aligned against the
+   edge the switches line up on, and quieter than they are.
+
+   It spent one version inside a text column instead, wrapping freely
+   (overflow-wrap: anywhere), because as a right-hand sibling its ~47-character
+   sentence fought the row's description for a 312px panel and the description
+   — min-width: 0 — lost, rendering the label one word per line. There is no
+   description any more, and the value is a fifth of the length: it sits where
+   it always should have, shrinks before the label does, and ellipsizes rather
+   than wrapping, because a row here is one line. */
 .setting-said {
+  flex: 0 1 auto; min-width: 0;
+  text-align: right;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 11px; font-weight: 600;
   color: var(--hazelnut-light); opacity: 0.85;
-  overflow-wrap: anywhere;
 }
 /* The switch borrows the connector dot's palette: off is a hollow ring,
    on is phosphor — the same two states the charms already teach. */
@@ -2449,13 +2419,10 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .ob-cta:hover { filter: brightness(1.06); }
 .ob-cta:active { transform: scale(1.06, 0.94); }
 
-.performance-toggle {
-  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
-  flex: 0 0 auto;
-}
-.performance-mode-label {
-  color: var(--hazelnut-light); font-size: 10px; white-space: nowrap;
-}
+/* ~~.performance-toggle / .performance-mode-label: a "maxx" / "use less power"
+   read-out printed beside that row's switch.~~ The row is named for what the
+   switch turns on now, so the switch is the whole answer and there is nothing
+   to print beside it (owner, 2026-09-13). */
 /* Real local work below the controls without becoming another progress
    dashboard. The total queue horizon stays pinned in the header; individual
    rows name work and never own or clip that total. */
@@ -2464,17 +2431,11 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
   color: var(--hazelnut-light); font-size: 10px; letter-spacing: 0.08em;
   font-variant-numeric: tabular-nums; white-space: nowrap; text-transform: uppercase;
 }
-.activity-estimate-line { display: inline-flex; align-items: center; gap: 5px; }
-.activity-estimate-line[hidden] { display: none; }
-/* The estimate sits on the card's right edge, so its hint grows inward. */
-.activity-estimate-line .setting-hint-copy {
-  left: auto; right: 0; transform: translate(0, -2px);
-}
-.activity-estimate-line .setting-hint:hover .setting-hint-copy,
-.activity-estimate-line .setting-hint:focus-within .setting-hint-copy,
-.activity-estimate-line .setting-hint.open .setting-hint-copy {
-  transform: translate(0, 0);
-}
+/* ~~.activity-estimate-line and the inward-growing hint box it held at the
+   card's right edge.~~ The "why is this taking so long?" icon is gone; the
+   answer is the estimate's own `title` (owner, 2026-09-13), so the read-out
+   hides and shows itself and needs no wrapper to hide with it. */
+.activity-estimate[hidden] { display: none; }
 .activity-list { display: flex; flex-direction: column; gap: 5px; min-height: 15px; }
 /* Three 15px task lines plus two 5px gaps: current + next two. The scheduler
    can carry more, but the rest remains reachable by scrolling. */

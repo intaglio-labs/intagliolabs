@@ -55,7 +55,20 @@ test('the privacy switch believes the reply, not the absence of a throw', () => 
     'a bare try/catch around setEngine catches nothing');
   // The owner has to be told, too: a switch that silently springs back is a
   // control the owner will simply press again.
-  assert.match(click, /state\.textContent =/u, 'and the row must say why it sprang back');
+  //
+  // WAS: a sentence under the label (`state.textContent = …`). The panel lost
+  // its paragraphs on 2026-09-13 — every row is one line now — so the telling
+  // is split: a one-word marker beside the switch, which is on the row and
+  // cannot be missed, and the reason on the row's hover. Both are required
+  // here; the marker alone does not say why, and a hover alone is a report
+  // nobody is obliged to read.
+  assert.match(click, /control\.replaceChildren\(warn, sw\)/u,
+    'the row must show, beside the switch, that nothing was written');
+  assert.match(click, /say\(out\?\.state === 'auth' \? ENGINE_NO_SAVE_AUTH : ENGINE_NO_SAVE\)/u,
+    'and the hover must say which of the two failures it was');
+  assert.match(connections, /warn\.textContent = 'unsaved';/u);
+  assert.match(row, /control\.replaceChildren\(sw\);\s*\n\s*say\(ENGINE_TIMING\)/u,
+    'and a write that DID land clears the marker');
 });
 
 test('onboarding’s engine switch is the same switch and gets the same check', () => {
