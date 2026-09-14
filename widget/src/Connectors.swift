@@ -448,13 +448,33 @@ final class Connectors {
   /// a first run was that nobody had ever been asked, and the flag cannot say
   /// that.
   ///
-  /// `relationshipMemory` in ~/.hazlie/connectors/config.json can. That file is
-  /// hermes' owner config (`ownerConfigPath`, ui/server/people/owner.mjs), the
-  /// only writer of the section is `POST /admin/config/card`, and the only
-  /// caller of that route is Bridge.recordCardDefaults — which fires on the
-  /// press on screen 1. A file carrying the section is a machine where somebody
-  /// has been through the flow; `{}`, which Provision.ensureConnectorDefaults
-  /// writes on every launch, is a machine where nobody has.
+  /// ~~"`relationshipMemory` in ~/.hazlie/connectors/config.json can. …the only
+  /// writer of the section is `POST /admin/config/card`, and the only caller of
+  /// that route is Bridge.recordCardDefaults — which fires on the press on
+  /// screen 1."~~ Round-2 review, finding 1: both halves of that were wrong, and
+  /// together they let the original bug straight back in.
+  ///
+  /// The section has THREE writers in ui/server/people/owner.mjs —
+  /// ensureRelationshipDefaults, setRelationshipMode and setRelationshipEngine —
+  /// and setRelationshipMode writes `relationshipMemory = {mode}` on its own.
+  /// The mode row that posts it (`relMode`, widget/ui/onboarding.js writeMode)
+  /// is on onboarding screen ONE, above the CTA. It is hidden behind the
+  /// `timeline` registry flag today, which is not something this gate may lean
+  /// on. So: first-run owner clicks a mode chip on screen 1, quits, relaunches —
+  /// section present, reader started, Calendar and Contacts dialogs back over
+  /// screen 1, which is the whole defect returning by a side door.
+  ///
+  /// `capPerDay`/`producer` is the marker that means what this needs. Only
+  /// ensureRelationshipDefaults writes those two, only `POST /admin/config/card`
+  /// calls it, and only Bridge.recordCardDefaults calls that — from
+  /// startReadingSources, which onboarding reaches from screen 2: its "next"
+  /// button, a permission on it turning green, screen 6, or an import. Every one
+  /// of those is at or past the screen that explains the grants, which is
+  /// exactly the line this gate is trying to draw. (Screen 1 is where the owner
+  /// is SHOWN "one card a day"; screen 2 is where it gets written down.)
+  ///
+  /// Either key, not both: ensureRelationshipDefaults writes only the keys that
+  /// are ABSENT, so an owner who had set one by hand gets the other alone.
   ///
   /// UNREADABLE OR UNPARSEABLE ANSWERS NO, and the asymmetry is deliberate. The
   /// cost of a wrong no is that the reader waits for the press on screen 2's
@@ -462,20 +482,43 @@ final class Connectors {
   /// screen that has never mentioned a calendar. (The one owner a wrong no can
   /// strand — onboarded, replayed, escaped, AND hermes never took their card
   /// settings — is picked up by resumeCardDefaultsIfPending at the next launch,
-  /// which posts them and writes the section.)
+  /// which posts them and writes the keys.)
   static func launchStartAllowed(onboarded: Bool, ownerConfig: Data?) -> Bool {
     if onboarded { return true }
     guard let ownerConfig,
-          let root = try? JSONSerialization.jsonObject(with: ownerConfig) as? [String: Any]
+          let root = try? JSONSerialization.jsonObject(with: ownerConfig) as? [String: Any],
+          let section = root["relationshipMemory"] as? [String: Any]
     else { return false }
-    return root["relationshipMemory"] is [String: Any]
+    return section["capPerDay"] != nil || section["producer"] != nil
   }
 
+  /// How much of the owner config is worth reading to answer that. It is a
+  /// handful of keys; a file past this is not one this app wrote, and answering
+  /// "cannot tell" for it costs the press on screen 2's "next".
+  private static let ownerConfigReadLimit = 1 << 20 // 1 MiB
+
   /// The same question, asked of this Mac.
+  ///
+  /// BOUNDED (round-2 review, finding 3). ~~`try? Data(contentsOf: config)`~~ is
+  /// unbounded, and this runs on the main queue at launch and again on every
+  /// Full Disk Access edge. The size is checked before the read and the read is
+  /// capped, so a config that has grown into something else stalls nothing; it
+  /// comes back nil, which this predicate reads as "nobody has been asked" and
+  /// leaves the reader to the flow.
   var mayStartAtLaunch: Bool {
     let config = home.appendingPathComponent(".hazlie/connectors/config.json")
     return Connectors.launchStartAllowed(
-      onboarded: Bridge.onboarded, ownerConfig: try? Data(contentsOf: config))
+      onboarded: Bridge.onboarded, ownerConfig: Connectors.boundedRead(config))
+  }
+
+  private static func boundedRead(_ url: URL) -> Data? {
+    let fm = FileManager.default
+    guard let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
+          size.intValue > 0, size.intValue <= ownerConfigReadLimit,
+          let handle = try? FileHandle(forReadingFrom: url)
+    else { return nil }
+    defer { try? handle.close() }
+    return try? handle.read(upToCount: ownerConfigReadLimit)
   }
 
   /// Start the daemon if it is not already up and its config exists. Safe to

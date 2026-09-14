@@ -711,6 +711,15 @@ test('a first run does not start the reader from the launch sequence', () => {
 //
 // The predicate is exercised here over every shape the config arrives in, not
 // just matched: it takes bytes, so it is a pure function of two arguments.
+//
+// ~~"a relationshipMemory section is consent"~~ — round-2 review, finding 1, and
+// this table encoded the same false premise. The section has three writers in
+// ui/server/people/owner.mjs, and setRelationshipMode writes
+// `relationshipMemory = {mode}` by itself. The row that posts it (relMode,
+// onboarding.js writeMode) is on screen ONE, above the CTA — hidden behind the
+// `timeline` registry flag today, which is not something a gate may lean on. So
+// a first-run owner clicking a mode chip, quitting and relaunching got the
+// reader started and the dialogs back over screen 1.
 const launchStartAllowed = (onboarded, ownerConfigJson) => {
   if (onboarded) return true;
   if (ownerConfigJson === null) return false;
@@ -718,36 +727,78 @@ const launchStartAllowed = (onboarded, ownerConfigJson) => {
   try { root = JSON.parse(ownerConfigJson); } catch { return false; }
   if (root === null || typeof root !== 'object' || Array.isArray(root)) return false;
   const section = root.relationshipMemory;
-  return typeof section === 'object' && section !== null && !Array.isArray(section);
+  if (typeof section !== 'object' || section === null || Array.isArray(section)) return false;
+  return section.capPerDay !== undefined || section.producer !== undefined;
 };
 
-test('the launch gate asks whether anybody has been asked, not whether the flow is closed', () => {
+test('the launch gate asks whether screen 2 has been passed, not whether the flow is closed', () => {
   const body = swiftBody(connectors, 'launchStartAllowed\\(onboarded: Bool, ownerConfig: Data\\?\\) -> Bool');
   assert.match(body, /if onboarded \{ return true \}/u);
   assert.match(body, /JSONSerialization\.jsonObject\(with: ownerConfig\)/u);
-  assert.match(body, /root\["relationshipMemory"\] is \[String: Any\]/u,
-    'hermes reads the owner\'s settings from that same file (ownerConfigPath) and\n' +
-    'POST /admin/config/card is the only writer of the section');
+  assert.match(body, /let section = root\["relationshipMemory"\] as\? \[String: Any\]/u);
+  assert.match(body, /section\["capPerDay"\] != nil \|\| section\["producer"\] != nil/u,
+    'only ensureRelationshipDefaults writes those two, only POST /admin/config/card\n' +
+    'calls it, and only recordCardDefaults calls that — from startReadingSources,\n' +
+    'which onboarding reaches at or past screen 2. The section alone is not enough:\n' +
+    'setRelationshipMode writes it from a row on screen 1');
   // No filesystem inside the decision; the caller supplies the bytes.
   assert.doesNotMatch(body, /FileManager|contentsOf|fileExists/u);
 
   // An owner past the flow, whatever the config says.
   assert.equal(launchStartAllowed(true, null), true);
   assert.equal(launchStartAllowed(true, '{}'), true);
-  // THE REGRESSION: replayed the flow, escaped, settings still on disk.
+  // THE ROUND-1 REGRESSION: replayed the flow, escaped, settings still on disk.
   assert.equal(launchStartAllowed(false, '{"relationshipMemory":{"capPerDay":1}}'), true);
+  assert.equal(
+    launchStartAllowed(false, '{"relationshipMemory":{"capPerDay":1,"producer":"eligibility"}}'),
+    true, 'what screen 2 actually writes');
+  // Either key alone: ensureRelationshipDefaults writes only the ABSENT ones, so
+  // an owner who had set one by hand gets the other on its own.
+  assert.equal(launchStartAllowed(false, '{"relationshipMemory":{"producer":"eligibility"}}'), true);
+  // THE ROUND-2 REGRESSION: a mode chip on screen 1, and nothing else.
+  assert.equal(launchStartAllowed(false, '{"relationshipMemory":{"mode":"any"}}'), false,
+    'clicking a mode chip on screen 1 is not passing the screen that explains the grants');
+  assert.equal(launchStartAllowed(false, '{"relationshipMemory":{"engine":"local"}}'), false);
+  assert.equal(launchStartAllowed(false, '{"relationshipMemory":{}}'), false);
   // A genuine first run. `{}` is what ensureConnectorDefaults writes every launch.
   assert.equal(launchStartAllowed(false, '{}'), false);
   assert.equal(launchStartAllowed(false, null), false);
   // Nothing else in the file counts, and a section that is not an object is not
   // the owner's settings.
   assert.equal(launchStartAllowed(false, '{"mail":{"account":"x"}}'), false);
+  assert.equal(launchStartAllowed(false, '{"capPerDay":1}'), false);
   assert.equal(launchStartAllowed(false, '{"relationshipMemory":null}'), false);
   assert.equal(launchStartAllowed(false, '{"relationshipMemory":true}'), false);
   // Unparseable answers no: a wrong no costs the press on screen 2's "next", a
   // wrong yes costs a Calendar dialog over a screen that never mentioned one.
   assert.equal(launchStartAllowed(false, 'not json'), false);
   assert.equal(launchStartAllowed(false, '[]'), false);
+});
+
+// ROUND-2 REVIEW, FINDING 3. The reader of that config runs on the MAIN queue,
+// at launch and again on every Full Disk Access edge, and it was
+// `try? Data(contentsOf:)` — unbounded. The file is a handful of keys; anything
+// past the cap is not one this app wrote, and answering "cannot tell" for it
+// costs the press on screen 2's "next".
+test('the config behind the gate is read with a bound, on the queue it runs on', () => {
+  const reader = swiftBody(connectors, 'boundedRead\\(_ url: URL\\) -> Data\\?');
+  assert.doesNotMatch(reader, /Data\(contentsOf:/u, 'that is the unbounded read');
+  assert.match(reader, /attributesOfItem\(atPath: url\.path\)\)\?\[\.size\]/u,
+    'the size is checked before anything is read');
+  assert.match(reader, /size\.intValue <= ownerConfigReadLimit/u);
+  assert.match(reader, /read\(upToCount: ownerConfigReadLimit\)/u,
+    'and the read itself is capped, so a file that grows between the stat and the\n' +
+    'open is still bounded');
+  assert.match(reader, /defer \{ try\? handle\.close\(\) \}/u,
+    'a descriptor per launch and per FDA edge otherwise');
+  assert.match(connectors, /private static let ownerConfigReadLimit = 1 << 20/u,
+    'the cap is a named constant, so the stat and the read cannot disagree');
+  // Refusing is the same answer as "nobody has been asked", which leaves the
+  // reader to the flow rather than starting one on a file we could not read.
+  const uses = /var mayStartAtLaunch: Bool \{\n([\s\S]*?)\n  \}/u.exec(connectors)?.[1] ?? '';
+  assert.ok(uses, 'mayStartAtLaunch not found');
+  assert.match(code(uses), /Connectors\.boundedRead\(config\)/u);
+  assert.doesNotMatch(code(uses), /Data\(contentsOf:/u);
 });
 
 test('the distiller is left armed, because it opens nothing that prompts', () => {
