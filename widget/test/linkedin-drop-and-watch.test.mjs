@@ -446,8 +446,10 @@ test('an offer and the reconnect card never share the corner', () => {
   assert.match(code(aside), /orderOut\(nil\)/u);
 
   // ...and it comes back when the card goes, by whichever route the card goes:
-  // the ✕, a verdict, or a click outside. willOrderOut is the one hook all of
-  // them pass through.
+  // its ✕, a verdict, or the orb toggling it shut. NOT an outside click --
+  // watchForOutsideClicks only looks at edgePanels and the card is not one --
+  // but every route it does have ends in orderOut, and willOrderOut is chained
+  // onto that rather than onto any one of them.
   //
   // A RUN-LOOP TURN LATER. AppKit takes the window down after willOrderOut
   // returns -- makePanel's own hook hops to main and says exactly this -- so a
