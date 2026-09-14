@@ -400,12 +400,86 @@ test('nothing is offered into a scrim the owner cannot see past', () => {
   const offered = /func linkedInExportOffered\(name: String\) \{([\s\S]*?)\n  \}/u
     .exec(mainSwift)?.[1] ?? '';
   assert.ok(offered, 'linkedInExportOffered not found');
-  assert.match(code(offered), /guard onboardingPanel\?\.isVisible != true else \{/u,
-    'the existing guard elsewhere in this file is the pattern to copy');
+  assert.match(code(offered), /guard !exportOfferIsCovered else \{/u,
+    'the deferral test moved into one named predicate when the reconnect card\n' +
+    'joined the scrim in front of this offer; see exportOfferIsCovered');
+  const covered = /private var exportOfferIsCovered: Bool \{\n([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(covered, 'exportOfferIsCovered not found');
+  assert.match(code(covered), /onboardingPanel\?\.isVisible == true/u,
+    'the scrim is still one of the things that covers it');
   assert.match(code(offered), /deferredExportOffer = name/u, 'held, not dropped');
   // ...and handed over when the flow ends, by whichever route it ends.
   assert.match(code(mainSwift), /func presentDeferredExportOffer\(\)/u);
   assert.match(code(mainSwift), /presentDeferredExportOffer\(\)/u);
+});
+
+// OOBE 2026-09-14, 12:24. The offer was presented while the reconnect card was
+// up, and both are 340-wide popups that chosenFrame() sends through
+// placedFrame() -- right edge pinned to the widget's, bottom to the strip above
+// it. So the 340x200 offer sat entirely inside the 340x430 card: the window list
+// had both at the same origin and a screenshot of the region had only the card.
+// The owner found the offer by closing the card with its ✕.
+test('an offer and the reconnect card never share the corner', () => {
+  const covered = /private var exportOfferIsCovered: Bool \{\n([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(covered, 'exportOfferIsCovered not found');
+  assert.match(code(covered), /reconnectPanel\?\.isVisible == true/u,
+    'a card on the corner is a reason to hold the offer, exactly as the scrim is');
+
+  // ...and the other order, which the deferral alone cannot cover: the offer is
+  // drawn and the card is then opened onto it. The card is a press and wins, so
+  // the offer goes BACK to deferred rather than under the card.
+  const open = /func openReconnect\(\) \{\n([\s\S]*?)\n  \}\n/u.exec(mainSwift)?.[1] ?? '';
+  assert.ok(open, 'openReconnect not found');
+  const asideAt = code(open).indexOf('standAsideForReconnectCard()');
+  const presentAt = code(open).indexOf('present(reconnectPanel!)');
+  assert.ok(asideAt > 0, 'the offer on screen has to be dealt with, not covered');
+  assert.ok(asideAt < presentAt,
+    'it stands aside BEFORE the card is presented; afterwards the offer has\n' +
+    'already spent a frame underneath it');
+  const aside = /private func standAsideForReconnectCard\(\) \{\n([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(aside, 'standAsideForReconnectCard not found');
+  assert.match(code(aside), /deferredExportOffer = presentedExportOffer/u,
+    'the name has to survive the hide, or the offer comes back empty');
+  assert.match(code(aside), /orderOut\(nil\)/u);
+
+  // ...and it comes back when the card goes, by whichever route the card goes:
+  // the ✕, a verdict, or a click outside. willOrderOut is the one hook all of
+  // them pass through.
+  //
+  // A RUN-LOOP TURN LATER. AppKit takes the window down after willOrderOut
+  // returns -- makePanel's own hook hops to main and says exactly this -- so a
+  // synchronous call reads isVisible on a panel that is still visible and puts
+  // the offer straight back into deferral, forever.
+  const hook = /reconnectPanel!\.willOrderOut = \{ \[weak self\] in\n([\s\S]*?)\n      \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(hook, 'the reconnect panel has no willOrderOut chain');
+  assert.match(code(hook), /DispatchQueue\.main\.async \{ self\?\.presentDeferredExportOffer\(\) \}/u,
+    'the card closing is the moment a held offer can be seen');
+  // The scrim's own chain, named by the `reportPanels?()` it opens with --
+  // makePanel sets a `p.willOrderOut` of its own and would match otherwise.
+  const onboardingHook = /\n        reportPanels\?\(\)\n([\s\S]*?)\n      \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.match(code(onboardingHook), /DispatchQueue\.main\.async \{ self\?\.presentDeferredExportOffer\(\) \}/u,
+    'the scrim\'s hook needs the same hop, now that the guard it feeds can refuse');
+
+  // AND THE HOLD IS NOT A SPEND. ExportWatch writes the offer key on the ANSWER
+  // and keeps `offering` set until then, so a held offer is still THE offer and
+  // scan() finds nothing new behind it.
+  assert.match(code(watch), /guard offering == nil else \{ return \}/u);
+  const deferred = /func presentDeferredExportOffer\(\) \{\n([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(deferred, 'presentDeferredExportOffer not found');
+  assert.match(code(deferred), /guard !exportOfferIsCovered else \{ return \}/u,
+    'a card that closed under the scrim, or reopened in the same turn, keeps the hold');
+  // The answer is what ends it, and it clears both copies of the name.
+  const closed = /func linkedInExportOfferClosed\(\) \{\n([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(closed, 'linkedInExportOfferClosed not found');
+  assert.match(code(closed), /deferredExportOffer = nil/u);
+  assert.match(code(closed), /presentedExportOffer = nil/u);
 });
 
 test('a second find does not replace the offer being read', () => {

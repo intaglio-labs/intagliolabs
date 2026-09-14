@@ -75,9 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var reconnectPanel: PopupPanel?
   /// The Downloads watcher's "found your export" offer. See linkedInExportOffered.
   private var exportPanel: PopupPanel?
-  /// An offer that arrived while the onboarding scrim was up, waiting for the
-  /// flow to end. See presentDeferredExportOffer.
+  /// An offer that cannot be seen yet -- the onboarding scrim is up, or the
+  /// reconnect card has the corner -- waiting for whatever is covering it to go.
+  /// See presentDeferredExportOffer.
   private var deferredExportOffer: String?
+  /// The offer currently drawn, so the card taking the corner can put it back
+  /// into deferral instead of losing the name. Cleared by the answer.
+  private var presentedExportOffer: String?
   private var monthsPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
   // Set while the onboarding scrim is standing aside for the system browser
@@ -825,7 +829,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
         // AND THE OFFER THE SCRIM WAS COVERING. An export found while the flow
         // was open is held rather than drawn under it; this is the moment it
         // can be seen. See linkedInExportOffered.
-        self?.presentDeferredExportOffer()
+        //
+        // ONE TURN LATER, since presentDeferredExportOffer gained a "is anything
+        // still in front of it" guard for the reconnect card: the panel is still
+        // visible when this hook runs -- makePanel's own hook says so -- so a
+        // synchronous call would see the scrim and put the offer back.
+        DispatchQueue.main.async { self?.presentDeferredExportOffer() }
         // ...and the widget comes back however the flow ended — finished,
         // escaped from scene 1, or the panel closed by any native path. At
         // its own level: below every window, exactly as it lives.
@@ -1192,11 +1201,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       reconnectPanel!.willOrderOut = { [weak self] in
         reportPanel?()
         self?.relCardChanged()
+        // AND THE OFFER THIS CARD WAS SITTING ON TOP OF. The two are the same
+        // popup pinned to the same corner, so an export offer made while the
+        // card is up is held rather than drawn underneath it; this is the moment
+        // it can be seen. One turn later, because AppKit takes the window down
+        // after this hook returns and presentDeferredExportOffer reads
+        // isVisible. See exportOfferIsCovered.
+        DispatchQueue.main.async { self?.presentDeferredExportOffer() }
       }
     } else {
       (reconnectPanel?.contentView as? WKWebView)?
         .evaluateJavaScript("window.__hzReconnectShow && window.__hzReconnectShow()")
     }
+    // The card was pressed for and the offer was not, so the card takes the
+    // corner -- but it takes it from an offer that goes back into deferral, not
+    // from one it buries. See standAsideForReconnectCard.
+    standAsideForReconnectCard()
     present(reconnectPanel!)
   }
 
@@ -1609,30 +1629,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // TWO SURFACES, because either one alone can be missed. The panel carries the
   // decision; the gear carries the fact, because a panel can be behind
   // something and the widget is on the desktop by definition.
+  /// IS THERE ANYWHERE THE OFFER COULD BE SEEN RIGHT NOW.
+  ///
+  /// TWO THINGS STAND IN FRONT OF IT, and they stand in front of it for two
+  /// different reasons:
+  ///
+  ///   The onboarding scrim is full-screen at .floating with the widget ordered
+  ///   out, so both of the offer's surfaces are invisible while the flow is up.
+  ///
+  ///   The reconnect card is the same 340-wide popup pinned to the same corner.
+  ///   chosenFrame() sends both through placedFrame(), which anchors a popup's
+  ///   right edge to the widget's and its bottom to the strip above it -- so the
+  ///   card (340x430) and the offer (340x200) do not sit side by side, they sit
+  ///   ON each other, and the 200 is entirely inside the 430. Seen live on
+  ///   2026-09-14 at 12:24: the window list had both at the same origin and the
+  ///   screenshot had only the card, so the offer was invisible until the owner
+  ///   closed the card with its ✕.
+  ///
+  /// WHY DEFER RATHER THAN MOVE ONE OF THEM. Re-placing the offer means taking
+  /// it off the anchor every popup in this app shares, and stacking it above the
+  /// card does not fit: placedFrame already clamps a 430 card against
+  /// `visibleFrame.maxY - 12` on a laptop display, so there is no strip left
+  /// above it for another card plus its gap. Ordering the offer in front instead
+  /// only swaps which set of buttons is unreachable. One decision card at that
+  /// corner at a time is also the rule the watcher already keeps for itself --
+  /// scan() refuses to find anything while `offering` is set, because two
+  /// offers at once is an inbox rather than an offer.
+  ///
+  /// NOTHING IS SPENT BY WAITING. The offer key is written by the ANSWER
+  /// (ExportWatch.answerOffer), and `offering` stays set the whole time a
+  /// deferred offer is held -- so a held offer is still THE offer and the
+  /// watcher finds nothing new behind it.
+  private var exportOfferIsCovered: Bool {
+    onboardingPanel?.isVisible == true || reconnectPanel?.isVisible == true
+  }
+
   func linkedInExportOffered(name: String) {
     dispatchPrecondition(condition: .onQueue(.main))
-    // NOT UNDER THE SCRIM. makePanel builds at .normal and the onboarding panel
-    // is full-screen at .floating, with the widget window ordered out for the
-    // flow's duration -- so both of this offer's surfaces are invisible while
-    // the flow is open, and the owner would never see the one thing they had
-    // just been told to expect. The offer is held; it is not spent, because the
-    // key is written by the ANSWER now. The same guard the dream band uses.
-    guard onboardingPanel?.isVisible != true else {
+    guard !exportOfferIsCovered else {
       deferredExportOffer = name
       return
     }
     showExportOffer(name)
   }
 
-  /// The offer the scrim was covering, once it is gone.
+  /// The offer whatever was in front of it was covering, once that is gone.
+  ///
+  /// CALLED A RUN-LOOP TURN AFTER THE PANEL IS TOLD TO GO, not inside its
+  /// willOrderOut: AppKit takes the window down after that hook returns, so a
+  /// synchronous call here would ask `isVisible` about a panel that is still
+  /// visible and put the offer straight back into deferral. makePanel's own hook
+  /// hops to main for the same reason and says so.
   func presentDeferredExportOffer() {
     dispatchPrecondition(condition: .onQueue(.main))
     guard let name = deferredExportOffer else { return }
+    // Still covered -- the card closed while the scrim was up, or the owner
+    // opened the card again in the same turn. Keep holding it.
+    guard !exportOfferIsCovered else { return }
     deferredExportOffer = nil
     // Only if it is still the offer: answering it from the notification while
     // the flow was open leaves nothing to present, and the page closes itself
     // on an empty exportOffer either way.
     showExportOffer(name)
+  }
+
+  /// ...AND THE OTHER ORDER, which the deferral above cannot cover: the offer is
+  /// already drawn and the owner then opens the reconnect card onto the same
+  /// corner. The card is a press and wins; the offer goes back to being deferred
+  /// rather than being buried, and comes back when the card closes.
+  private func standAsideForReconnectCard() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let p = exportPanel, p.isVisible else { return }
+    if deferredExportOffer == nil { deferredExportOffer = presentedExportOffer }
+    p.orderOut(nil)
   }
 
   private func showExportOffer(_ name: String) {
@@ -1653,6 +1722,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // is exactly where "request a copy" sent them. A file-arrival notice is not
     // worth taking the screen for.
     presentWithoutStealingFocus(exportPanel!)
+    // Remembered so the card can send it back to deferral rather than bury it;
+    // see standAsideForReconnectCard.
+    presentedExportOffer = name
     eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(\(jsString(name)))")
   }
 
@@ -1660,6 +1732,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // or the app keeps asking about a decision the owner has already made.
   func linkedInExportOfferClosed() {
     dispatchPrecondition(condition: .onQueue(.main))
+    // AND THE COPIES THIS FILE WAS HOLDING. An answered offer is over, so a name
+    // still sitting in either of these is a panel about to reopen over a file
+    // nobody is being asked about any more -- the page would close itself on the
+    // empty exportOffer, but a card that appears in order to vanish is the kind
+    // of thing the owner reads as the app being confused.
+    deferredExportOffer = nil
+    presentedExportOffer = nil
     eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(null)")
   }
 
