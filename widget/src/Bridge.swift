@@ -3998,9 +3998,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // This function is the one place all three callers pass through, and it is
     // the line after which the file is really on disk, so it is where the
     // announcement belongs.
+    // AND AN OFFER ABOUT A FILE THAT IS NOW INSTALLED IS OVER, whoever installed
+    // it. exportDecide clears `pendingExport` on its own path; the other two
+    // callers never did, so a file dropped on the settings panel or picked on
+    // screen 4 left an offer standing for an archive this app had just imported.
+    // Harmless while the offer was on screen — the page closes itself on an
+    // empty exportOffer — and not harmless while it is being HELD behind the
+    // reconnect card or the onboarding scrim, because the hold then ends and
+    // re-presents an offer to import something already on disk.
+    //
+    // Only on this path, which is the success path: a failed import installs
+    // nothing and must leave the offer exactly where it was, which is the same
+    // rule answerOffer keeps when it refuses to spend a key on a failure.
     DispatchQueue.main.async { [weak self] in
-      _ = self?.startReadingSources()
-      self?.delegate?.linkedInExportChanged()
+      guard let self else { return }
+      self.pendingExport = nil
+      self.delegate?.linkedInExportOfferClosed()
+      _ = self.startReadingSources()
+      self.delegate?.linkedInExportChanged()
     }
     return [
       "state": "ok", "files": copied, "connections": connections,

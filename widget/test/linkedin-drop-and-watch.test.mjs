@@ -659,3 +659,40 @@ test('one glow, two errands, and neither hides the other', () => {
   // the bug being fixed, and "Settings" is not a sentence.
   assert.match(widgetJs, /\['linkedin', 'your export is ready — open the email'\],\n\s*\['handoff', 'Settings'\],/u);
 });
+
+// AN OFFER ABOUT A FILE THAT IS NOW INSTALLED IS OVER, WHOEVER INSTALLED IT.
+//
+// exportDecide clears `pendingExport` on its own path. The other two ways an
+// export lands -- a file dropped on the settings panel, and the picker on screen
+// 4 -- never did, so an offer could still be standing for an archive this app
+// had just imported. Harmless while the offer is on screen, because the page
+// closes itself on an empty exportOffer; not harmless while the offer is being
+// HELD behind the reconnect card or the onboarding scrim, because the hold then
+// ends and re-presents an offer to import something already on disk.
+test('an import that succeeds retires an offer about the same archive', () => {
+  const accept = /private func acceptLinkedInFiles\(_ urls: \[URL\]\) -> \[String: Any\] \{([\s\S]*?)\n  \}\n/u
+    .exec(bridge)?.[1] ?? '';
+  assert.ok(accept, 'acceptLinkedInFiles not found');
+  // The one place all three callers pass through, and the line after which the
+  // file is really on disk.
+  const announce = code(accept).slice(code(accept).indexOf('DispatchQueue.main.async'));
+  assert.match(announce, /pendingExport = nil/u,
+    'the bridge must stop holding an offer for a file it has just installed');
+  assert.match(announce, /linkedInExportOfferClosed\(\)/u,
+    'and the surfaces that draw the offer have to be told, or the gear keeps glowing');
+  // Which is what clears BOTH copies of the name main.swift holds, so nothing
+  // re-presents when the card or the scrim goes.
+  const closed = /func linkedInExportOfferClosed\(\) \{\n([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.match(code(closed), /deferredExportOffer = nil/u);
+
+  // ONLY ON THE SUCCESS PATH. A failed import installs nothing and must leave
+  // the offer where it was — the same rule answerOffer keeps when it refuses to
+  // spend a key on a failure. Every early return in this function is a refusal,
+  // and none of them may carry the retirement.
+  const beforeAnnounce = code(accept).slice(0, code(accept).indexOf('DispatchQueue.main.async'));
+  assert.doesNotMatch(beforeAnnounce, /pendingExport = nil/u,
+    'a refusal must not retire the offer; only an install does');
+  assert.match(code(watch), /if keep \{ Self\.rememberOffer\(key\) \}/u,
+    'the watcher keeps the same rule on its own side');
+});
