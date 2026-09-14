@@ -5,12 +5,20 @@ import Foundation
 // with no repo, no Homebrew, and no network. See widget/build.sh for what the
 // bundle carries.
 //
-// SAFE BY DEFAULT. Once the connect agent exists in ~/Library/LaunchAgents —
+// SAFE BY DEFAULT. ~~Once the connect agent exists in ~/Library/LaunchAgents —
 // true on the owner's repo-based setup and after any prior provision — the
-// whole copy-and-bootstrap path is skipped, so it never clobbers a working
-// machine. ~~The one thing every launch still ensures is the secret files~~ —
-// there are three, and each is there because "the plist exists" turned out to
-// answer a narrower question than the skip assumed:
+// whole copy-and-bootstrap path is skipped~~, so it never clobbers a working
+// machine. The skip is right and its TEST was not: a plist is a file in
+// ~/Library/LaunchAgents and the runtime it names lives in ~/.hazlie, and
+// deleting one of those does not delete the other. A live first run on
+// 2026-09-14 had exactly that — fresh ~/.hazlie, the three io.intaglio.* plists
+// left behind — and the skip fired, so nothing ever staged ~/.hazlie/bin/node
+// and all three agents sat at exit code 78, EX_CONFIG, with empty logs. So the
+// skip now asks about both halves: see backendState and runtimeStaged.
+//
+// ~~The one thing every launch still ensures is the secret files~~ — there are
+// three, and each is there because "the plist exists" turned out to answer a
+// narrower question than the skip assumed:
 //
 //   ensureSecrets — generation is per-file and only-if-missing, so installs
 //   provisioned by a build that predates llama-api-key.txt gain the key on
@@ -517,12 +525,87 @@ enum Provision {
     }
   }
 
+  /// WHAT A LAUNCH FINDS, and what it has to do about it.
+  ///
+  /// Pure, because the interesting part is a two-fact decision that was being
+  /// made from one fact.
+  enum BackendState: String {
+    /// No plists. provision() owns this, and always has.
+    case unprovisioned
+    /// Plists, and the runtime they name. The repairs, and nothing else.
+    case ready
+    /// Plists, and nothing under ~/.hazlie for them to run. See below.
+    case runtimeMissing
+  }
+
+  static func backendState(connectPlistExists: Bool, runtimeStaged: Bool) -> BackendState {
+    guard connectPlistExists else { return .unprovisioned }
+    return runtimeStaged ? .ready : .runtimeMissing
+  }
+
+  /// Is everything the installed agents NAME under ~/.hazlie actually there?
+  ///
+  /// Pure, with the four facts passed in. `bundleHasLlama` is what keeps this
+  /// from being a re-provisioning loop: provision() stages the llama runtime
+  /// only when the bundle carries one, so a build without it must not be asked
+  /// for a file it can never produce.
+  static func runtimeStaged(
+    bundleHasLlama: Bool, node: Bool, libnode: Bool, llama: Bool
+  ) -> Bool {
+    // Every agent's ProgramArguments[0] is ~/.hazlie/bin/node, and the wrapper
+    // build.sh ships resolves its dylib through @executable_path/../lib — so
+    // neither of these is optional for any of them.
+    guard node, libnode else { return false }
+    return bundleHasLlama ? llama : true
+  }
+
+  private static var runtimeStagedHere: Bool {
+    let libDir = hazlie.appendingPathComponent("lib").path
+    let libs = (try? fm.contentsOfDirectory(atPath: libDir)) ?? []
+    return runtimeStaged(
+      bundleHasLlama: fm.fileExists(
+        atPath: backend.appendingPathComponent("llama/bin/llama-server").path),
+      node: fm.fileExists(atPath: hazlie.appendingPathComponent("bin/node").path),
+      libnode: libs.contains { $0.hasPrefix("libnode") },
+      llama: fm.fileExists(atPath: hazlie.appendingPathComponent("llama/llama-server").path))
+  }
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("io.intaglio.connect.plist")
-      guard !fm.fileExists(atPath: connectPlist.path) else {
-        // Already provisioned (owner's setup or a previous run) — but still
-        // heal a missing secret: installs provisioned by a build that only
+      // A PLIST IS NOT A PROVISIONED INSTALL, and this guard read as if it were
+      // until a live first run on 2026-09-14 proved otherwise.
+      //
+      // ~/.hazlie was deleted and the three io.intaglio.* plists were left in
+      // ~/Library/LaunchAgents. The plists exist, so this returned early;
+      // provision() is the ONLY thing that stages ~/.hazlie/bin/node, so it was
+      // never staged; and every agent's ProgramArguments[0] is that binary. All
+      // three sat at `last exit code = 78` (EX_CONFIG), `state = spawn
+      // scheduled`, no pid, empty logs — and onboarding stalls at screen 3,
+      // which needs hermes to sign in. The recorded OOBE missed it only because
+      // that run deleted the plists too.
+      //
+      // The round-2 stale-plist repair did not save it either, and could not:
+      // agentProgramPathsExist correctly saw node missing, and routed to
+      // installAgent — which re-renders a plist naming a file that still is not
+      // there. Re-rendering is the repair for a plist pointing at the WRONG
+      // path; this plist's path was right and empty.
+      //
+      // So the test is both facts, and a missing runtime takes the full path:
+      // stage, then install and bootstrap. Never a re-render on its own.
+      let state = backendState(
+        connectPlistExists: fm.fileExists(atPath: connectPlist.path),
+        runtimeStaged: runtimeStagedHere)
+      if state == .runtimeMissing {
+        NSLog("Intaglio Labs: the launch agents are installed and ~/.hazlie has "
+              + "nothing for them to run — provisioning rather than repairing")
+      }
+      guard state != .ready else {
+        // Provisioned, and the runtime its plists name is on disk (the owner's
+        // setup, or a previous run) — so what is left here is repair, and each
+        // of these is a thing "the plist exists" turned out not to answer.
+        //
+        // A missing secret first: installs provisioned by a build that only
         // wrote hermes-token.txt have this plist yet lack llama-api-key.txt,
         // leaving hermes and llama-server crash-looping under KeepAlive.
         // Existing files are never touched, so this is a no-op when healthy.

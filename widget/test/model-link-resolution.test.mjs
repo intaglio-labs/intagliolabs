@@ -29,7 +29,11 @@ test('a relative model link resolves inside the models directory, an absolute on
 test('an already-provisioned install with weights and no llama agent gets the agent back', () => {
   const ensure = /static func ensureBackend\(\) \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
   assert.ok(ensure, 'ensureBackend not found');
-  const early = ensure.indexOf('guard !fm.fileExists(atPath: connectPlist.path) else {');
+  // ~~`guard !fm.fileExists(atPath: connectPlist.path) else {`~~ — the skip is
+  // decided by backendState from 2026-09-14, because a plist on its own said
+  // nothing about whether the runtime it names had ever been staged. The branch
+  // this test is about is the healthy one, which is now `state != .ready`.
+  const early = ensure.indexOf('guard state != .ready else {');
   // The repair moved behind a named function when it gained a lock and a
   // once-flag: two concurrent ensureBackend() calls both passed the "no plist"
   // test and interleaved installAgent's bootout/bootstrap pair. That guarding

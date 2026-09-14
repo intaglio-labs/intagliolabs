@@ -81,12 +81,15 @@ test('the decision is a named pure function of plist-exists and loaded', () => {
 
 test('the already-provisioned branch acts on it, last', () => {
   const body = bodyOf('static func ensureBackend() {');
-  const guardAt = body.indexOf('guard !fm.fileExists(atPath: connectPlist.path)');
+  // ~~`guard !fm.fileExists(atPath: connectPlist.path)`~~ — the skip is decided
+  // by backendState now, because a plist on its own said nothing about whether
+  // the runtime it names was ever staged. See the live 2026-09-14 failure below.
+  const guardAt = body.indexOf('guard state != .ready else');
   const healAt = body.indexOf('bootstrapUnloadedAgents(skipping: justInstalled)');
-  assert.ok(guardAt > 0, 'the fast path still turns on the connect plist existing');
+  assert.ok(guardAt > 0, 'the repairs still sit behind one guard, on the healthy branch');
   assert.ok(healAt > guardAt,
-    'the repair belongs on the branch the plist-exists guard takes; that guard is\n' +
-    'the reason a booted-out service was never noticed');
+    'the repair belongs on the branch that guard takes; that guard is the reason\n' +
+    'a booted-out service was never noticed');
   const returnAt = body.indexOf('return', healAt);
   assert.ok(returnAt > healAt,
     'it has to run before that branch returns, or it never runs at all');
@@ -250,4 +253,111 @@ test('the probe asks about one label, is bounded, and cannot deadlock on its out
   assert.match(body, /return p\.terminationStatus == 0/u);
   assert.match(swift, /private static let agentProbeTimeout: TimeInterval = \d+/u,
     'the bound is a named constant, so the log line and the wait cannot disagree');
+});
+
+// ------------------------------- a plist is not a provisioned install
+
+// LIVE, 2026-09-14, and the thing every other repair in this file missed.
+//
+// A first run with a fresh ~/.hazlie and the three io.intaglio.* plists still in
+// ~/Library/LaunchAgents. ensureBackend's skip was decided by the connect plist
+// alone, so it returned early; provision() is the ONLY thing that stages
+// ~/.hazlie/bin/node, so it was never staged; and every agent's
+// ProgramArguments[0] is that binary. All three sat at `last exit code = 78`
+// (EX_CONFIG), `state = spawn scheduled`, no pid, empty logs — and onboarding
+// stalls at screen 3, which needs hermes to sign in.
+//
+// The stale-plist repair could not save it and should not have: it saw node
+// missing, correctly, and routed to installAgent — which re-renders a plist
+// naming a file that still is not there. Re-rendering repairs a plist pointing
+// at the WRONG path. This one's path was right and empty.
+//
+// A plist lives in ~/Library/LaunchAgents and the runtime it names lives in
+// ~/.hazlie. Deleting either does not delete the other, so one of them cannot
+// stand in for both.
+const backendState = (connectPlistExists, runtimeStaged) => {
+  if (!connectPlistExists) return 'unprovisioned';
+  return runtimeStaged ? 'ready' : 'runtimeMissing';
+};
+
+// `bundleHasLlama` is what keeps this from being a re-provisioning loop:
+// provision() stages the llama runtime only when the bundle carries one, so a
+// build without it must not be asked for a file it can never produce.
+const runtimeStaged = (bundleHasLlama, node, libnode, llama) => {
+  if (!node || !libnode) return false;
+  return bundleHasLlama ? llama : true;
+};
+
+test('a plist with no runtime under it is provisioned, not repaired', () => {
+  const decision = bodyOf('static func backendState(connectPlistExists: Bool, runtimeStaged: Bool) -> BackendState');
+  assert.match(decision, /guard connectPlistExists else \{ return \.unprovisioned \}/u,
+    'no plist is still provision()\'s own case, exactly as before');
+  assert.match(decision, /return runtimeStaged \? \.ready : \.runtimeMissing/u);
+  assert.doesNotMatch(decision, /FileManager|fileExists/u, 'the facts are the caller\'s');
+
+  // Unchanged: a machine with nothing installed, and a healthy one.
+  assert.equal(backendState(false, false), 'unprovisioned');
+  assert.equal(backendState(false, true), 'unprovisioned');
+  assert.equal(backendState(true, true), 'ready');
+  // THE LIVE FAILURE: plists from the previous install, ~/.hazlie emptied.
+  assert.equal(backendState(true, false), 'runtimeMissing');
+});
+
+test('the runtime test names every file the agents actually run', () => {
+  const rule = bodyOf('static func runtimeStaged(');
+  assert.match(rule, /guard node, libnode else \{ return false \}/u,
+    'every agent runs ~/.hazlie/bin/node, and build.sh points its wrapper at\n' +
+    '@executable_path/../lib for the dylib — neither is optional for any of them');
+  assert.match(rule, /return bundleHasLlama \? llama : true/u,
+    'a bundle with no llama runtime must not be asked for one, or every launch\n' +
+    're-provisions and every launch bounces the agents');
+
+  // The live shape: the plists' interpreter is simply not there.
+  assert.equal(runtimeStaged(true, false, false, false), false);
+  assert.equal(runtimeStaged(true, false, true, true), false);
+  // A staged node whose dylib went with a half-deleted home.
+  assert.equal(runtimeStaged(true, true, false, true), false);
+  // Node is fine and the llama runtime this bundle ships was never staged.
+  assert.equal(runtimeStaged(true, true, true, false), false);
+  // ...and the same machine, from a build that ships no llama runtime.
+  assert.equal(runtimeStaged(false, true, true, false), true);
+  assert.equal(runtimeStaged(true, true, true, true), true);
+
+  // The reader of those four facts asks about the bundle, not about a flag.
+  const probe = /private static var runtimeStagedHere: Bool \{\n([\s\S]*?)\n  \}/u
+    .exec(swift)?.[1] ?? '';
+  assert.ok(probe, 'runtimeStagedHere not found');
+  assert.match(code(probe), /backend\.appendingPathComponent\("llama\/bin\/llama-server"\)/u);
+  assert.match(code(probe), /hazlie\.appendingPathComponent\("bin\/node"\)/u);
+  assert.match(code(probe), /\$0\.hasPrefix\("libnode"\)/u,
+    'the dylib is versioned, so it is matched by prefix rather than named');
+});
+
+test('a missing runtime takes the full path, and never a re-render alone', () => {
+  const body = bodyOf('static func ensureBackend() {');
+  assert.match(body, /runtimeStaged: runtimeStagedHere/u,
+    'the skip has to ask both halves; a plist alone is what got this wrong');
+  assert.match(body, /guard state != \.ready else \{/u,
+    'only `ready` takes the repair path — `runtimeMissing` falls through to provision');
+  // The dev-build guard still stands in front of provisioning on BOTH paths
+  // that reach it, or a build with no bundled backend tries to stage from one.
+  const guardAt = body.indexOf('connect/server.mjs');
+  const provisionAt = body.indexOf('try provision()');
+  assert.ok(guardAt > 0 && guardAt < provisionAt);
+
+  // AND THE FULL PATH COPES WITH THE PLISTS ALREADY BEING THERE, which is the
+  // whole situation it is now reached in. installAgent rewrites the plist and
+  // then boots the label OUT before bootstrapping it, so a job that is loaded
+  // and failing (spawn scheduled, exit 78, under KeepAlive and a 60s throttle)
+  // is replaced rather than left to its back-off.
+  const install = bodyOf('static func installAgent(_ label: String) -> Bool');
+  const bootoutAt = install.indexOf('"bootout", "gui/\\(getuid())/\\(label)"');
+  const bootstrapAt = install.indexOf('bootstrap(dst)');
+  assert.ok(bootoutAt > 0 && bootoutAt < bootstrapAt,
+    'bootout before bootstrap, or bootstrapping an already-loaded job is a no-op\n' +
+    'and the failing one stays');
+  const prov = bodyOf('private static func provision() throws {');
+  assert.match(prov, /installAgent\(label\)/u, 'provisioning installs through that same path');
+  assert.match(prov, /hazlie\.appendingPathComponent\("bin\/node"\)/u,
+    'and it is the only thing that stages the binary all of this is about');
 });
