@@ -79,21 +79,41 @@ test('the decision is a named pure function of plist-exists and loaded', () => {
   assert.equal(decide(true, false), 'bootstrap');
 });
 
-test('the already-provisioned branch acts on it', () => {
+test('the already-provisioned branch acts on it, last', () => {
   const body = bodyOf('static func ensureBackend() {');
   const guardAt = body.indexOf('guard !fm.fileExists(atPath: connectPlist.path)');
-  const healAt = body.indexOf('bootstrapUnloadedAgents()');
+  const healAt = body.indexOf('bootstrapUnloadedAgents(skipping: justInstalled)');
   assert.ok(guardAt > 0, 'the fast path still turns on the connect plist existing');
   assert.ok(healAt > guardAt,
     'the repair belongs on the branch the plist-exists guard takes; that guard is\n' +
     'the reason a booted-out service was never noticed');
-  const returnAt = body.indexOf('return', guardAt);
-  assert.ok(healAt < returnAt,
+  const returnAt = body.indexOf('return', healAt);
+  assert.ok(returnAt > healAt,
     'it has to run before that branch returns, or it never runs at all');
+
+  // ROUND-1 REVIEW, FINDING 6. The other two repairs on this branch both move
+  // launchd jobs about — repairLlamaAgent installs one, the legacy retirement
+  // boots old labels out and kickstarts the new ones — so a sweep that ran
+  // first would read a picture they were about to change and bootstrap against
+  // them.
+  const llamaAt = body.indexOf('repairLlamaAgent()');
+  const legacyAt = body.indexOf('retireLegacyBackendAgents()');
+  assert.ok(llamaAt > 0 && llamaAt < healAt, 'the llama repair runs before the sweep');
+  assert.ok(legacyAt > 0 && legacyAt < healAt, 'so does the legacy retirement');
+  // ...and the one agent it must be told about is the one just installed:
+  // installAgent boots out and bootstraps, and launchd does not reliably answer
+  // "loaded" for a job that young, so the sweep would bootstrap it again on top.
+  assert.match(body, /let justInstalled = repairLlamaAgent\(\)/u,
+    'the repair has to say what it installed for the skip to mean anything');
+  const repair = bodyOf('private static func repairLlamaAgent() -> String?');
+  assert.match(repair, /return "io\.intaglio\.llama-server"/u, 'named only on the success path');
+  assert.match(repair, /return nil/u, 'a failure installed nothing and skips nothing');
+  const sweep = bodyOf('private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil)');
+  assert.match(sweep, /for label in agentsInOrder where label != justInstalled/u);
 });
 
 test('a healthy Mac is a no-op, and a running service is never bounced', () => {
-  const body = bodyOf('private static func bootstrapUnloadedAgents() {');
+  const body = bodyOf('private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil)');
   assert.match(body, /for label in agentsInOrder/u,
     'hermes first: it migrates and opens the database the other two talk to');
   // Nothing is kickstarted. kickstart(-k) stops and restarts, which is a thing
@@ -152,7 +172,7 @@ test('a plist that points at something gone is re-rendered, not re-bootstrapped'
   assert.equal(pathsExist([], []), false);
 
   // ...and the caller routes on it, to installAgent rather than bootstrap.
-  const caller = bodyOf('private static func bootstrapUnloadedAgents() {');
+  const caller = bodyOf("private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil)");
   const guardAt = caller.indexOf('guard let args = programArguments(of: plist)');
   const bootstrapAt = caller.indexOf('bootstrap(plist)');
   assert.ok(guardAt > 0 && guardAt < bootstrapAt, 'validate before bootstrapping, not after');

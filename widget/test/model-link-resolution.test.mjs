@@ -40,7 +40,7 @@ test('an already-provisioned install with weights and no llama agent gets the ag
   const ret = ensure.indexOf('return\n      }', early);
   assert.ok(early >= 0 && repair > early && ret > repair, 'the repair sits inside the already-provisioned branch, before its return');
 
-  const body = /private static func repairLlamaAgent\(\) \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
+  const body = /private static func repairLlamaAgent\(\) -> String\? \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
   assert.ok(body, 'repairLlamaAgent not found');
   assert.match(body, /ModelSetup\.isInstalled, !fm\.fileExists\(atPath: llamaPlist\.path\)/u,
     'weights present and no agent is still the condition the repair acts on');

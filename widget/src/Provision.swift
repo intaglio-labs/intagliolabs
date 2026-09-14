@@ -257,16 +257,26 @@ enum Provision {
   /// puts a backoff in front of the next try, so the interleaving guarantee is
   /// unchanged (the lock, not the flag, is what provides it) and the one-shot
   /// loss is gone.
-  private static func repairLlamaAgent() {
+  ///
+  /// RETURNS THE LABEL IT INSTALLED, so the caller can leave it alone. installAgent
+  /// boots the agent out and bootstraps it back in, and launchd's answer to
+  /// "is this loaded" a moment later is not reliably yes — so the unloaded-agent
+  /// sweep that follows would see the agent this just installed, call it
+  /// unloaded, and bootstrap it a second time on top of the first (round-1
+  /// review, finding 6). That is the interleaving the lock above exists to
+  /// prevent, arriving from a different function.
+  @discardableResult
+  private static func repairLlamaAgent() -> String? {
     llamaRepairLock.lock()
     defer { llamaRepairLock.unlock() }
-    guard !llamaRepairAttempted, Date() >= llamaRepairNotBefore else { return }
+    guard !llamaRepairAttempted, Date() >= llamaRepairNotBefore else { return nil }
     let llamaPlist = launchAgents.appendingPathComponent("io.intaglio.llama-server.plist")
-    guard ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) else { return }
+    guard ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) else { return nil }
     if installAgent("io.intaglio.llama-server") {
       llamaRepairAttempted = true
       llamaRepairFailures = 0
       NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
+      return "io.intaglio.llama-server"
     } else {
       llamaRepairFailures += 1
       let delay = min(
@@ -275,6 +285,7 @@ enum Provision {
       )
       llamaRepairNotBefore = Date().addingTimeInterval(delay)
       NSLog("Intaglio Labs: llama agent install failed (\(llamaRepairFailures)); retrying in \(Int(delay))s")
+      return nil
     }
   }
 
@@ -415,8 +426,15 @@ enum Provision {
   /// accepted the job rather than when the process is serving — so the wait
   /// bought no ordering here, only up to fifteen seconds of a launch path on
   /// exactly the Mac that is already unwell.
-  private static func bootstrapUnloadedAgents() {
-    for label in agentsInOrder {
+  ///
+  /// `skipping` IS FOR AN AGENT ANOTHER REPAIR JUST INSTALLED in the same pass.
+  /// installAgent boots out and bootstraps, and launchd's answer to "is this
+  /// loaded" a moment later is not reliably yes — so without it this sweep sees
+  /// a just-installed agent as unloaded and bootstraps it a second time on top
+  /// of the first, which is the interleaving repairLlamaAgent's own lock exists
+  /// to prevent, arriving from another function (round-1 review, finding 6).
+  private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil) {
+    for label in agentsInOrder where label != justInstalled {
       let plist = launchAgents.appendingPathComponent("\(label).plist")
       let exists = fm.fileExists(atPath: plist.path)
       // Short-circuited: no plist, no launchctl call.
@@ -457,12 +475,21 @@ enum Provision {
         // Existing files are never touched, so this is a no-op when healthy.
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
-        repairLlamaAgent()
+        let justInstalled = repairLlamaAgent()
+        if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         // AND THE AGENTS THAT ARE INSTALLED BUT NOT RUNNING. The guard above
         // asks whether a PLIST exists, which is not the same question as
         // whether launchd has the job — see bootstrapUnloadedAgents.
-        bootstrapUnloadedAgents()
-        if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
+        //
+        // LAST, AFTER THE OTHER TWO REPAIRS (round-1 review, finding 6). Both of
+        // them move launchd jobs about: repairLlamaAgent installs one, and the
+        // legacy retirement boots old labels out and kickstarts the new ones. A
+        // sweep that ran first would be reading a picture those two were about
+        // to change, and would bootstrap against them. Running last means it
+        // sees what they left, and only has to be told about the agent
+        // repairLlamaAgent installed — launchd does not reliably answer "loaded"
+        // for one that young.
+        bootstrapUnloadedAgents(skipping: justInstalled)
         return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
