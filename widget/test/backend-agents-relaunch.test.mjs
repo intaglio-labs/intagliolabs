@@ -107,8 +107,62 @@ test('a healthy Mac is a no-op, and a running service is never bounced', () => {
   // short-circuited behind the file check.
   assert.match(body, /loaded: exists \? probeAgentLoaded\(label\) : nil/u,
     'no plist, no launchctl call');
-  // The same wait provision() takes after hermes, for the same reason.
-  assert.match(body, /if label == "io\.intaglio\.hermes" \{ waitForHermes\(\) \}/u);
+  // AND NO WAIT ON HERMES (round-1 review, finding 5). provision() waits because
+  // it goes on to bootstrap connect and hand the reader a database in the same
+  // pass; nothing here talks to hermes afterwards, and `launchctl bootstrap`
+  // returns when launchd accepts the job rather than when the process serves --
+  // so the wait bought no ordering, only up to fifteen seconds of a launch path
+  // on the Mac that is already unwell.
+  assert.doesNotMatch(body, /waitForHermes/u,
+    'the repair must not block a launch on a service it is not about to use');
+});
+
+// ROUND-1 REVIEW, FINDING 5. A plist naming a path nothing lives at any more --
+// the shape a stale plist takes after the app moves -- cannot be repaired by
+// bootstrapping it: launchd accepts the job, the job dies, the next launch finds
+// it unloaded and does the same again, for ever. That wants the plist
+// re-rendered from the bundle's template, which is what fixes the paths.
+const pathsExist = (args, present) => {
+  const paths = args.slice(0, 2).filter((a) => a.startsWith('/'));
+  if (paths.length === 0) return false;
+  return paths.every((p) => present.includes(p));
+};
+
+test('a plist that points at something gone is re-rendered, not re-bootstrapped', () => {
+  const body = bodyOf('static func agentProgramPathsExist(');
+  assert.match(body, /programArguments\.prefix\(2\)\.filter \{ \$0\.hasPrefix\("\/"\) \}/u,
+    'the interpreter and what it runs; everything after is flags, and llama-server\n' +
+    'has a models directory among them that legitimately appears later');
+  assert.match(body, /guard !paths\.isEmpty else \{ return false \}/u);
+  assert.match(body, /paths\.allSatisfy\(fileExists\)/u);
+  // Injected filesystem: the rule is exercised, not just read.
+  assert.match(body, /fileExists: \(String\) -> Bool/u);
+
+  const node = '/Users/x/.hazlie/bin/node';
+  const script = '/Applications/Intaglio Labs.app/Contents/Resources/backend/ui/server/hermes.mjs';
+  assert.equal(pathsExist([node, script], [node, script]), true);
+  // The app moved: the interpreter is there, the script is not.
+  assert.equal(pathsExist([node, script], [node]), false);
+  assert.equal(pathsExist([node, script], [script]), false);
+  // Flags past the first two are not evidence of staleness.
+  assert.equal(pathsExist([node, script, '/gone/models'], [node, script]), true);
+  assert.equal(pathsExist(['/usr/bin/env', 'node', '/gone/x'], ['/usr/bin/env']), true);
+  // Nothing checkable in the first two entries is not a pass.
+  assert.equal(pathsExist(['node', 'server.mjs'], []), false);
+  assert.equal(pathsExist([], []), false);
+
+  // ...and the caller routes on it, to installAgent rather than bootstrap.
+  const caller = bodyOf('private static func bootstrapUnloadedAgents() {');
+  const guardAt = caller.indexOf('guard let args = programArguments(of: plist)');
+  const bootstrapAt = caller.indexOf('bootstrap(plist)');
+  assert.ok(guardAt > 0 && guardAt < bootstrapAt, 'validate before bootstrapping, not after');
+  assert.match(caller.slice(guardAt, bootstrapAt), /installAgent\(label\)/u,
+    'the repair for a stale plist is to write it again from the template');
+  // A plist that cannot be read or parsed takes the same route, for the same
+  // reason: bootstrapping it cannot help either.
+  const reader = bodyOf('private static func programArguments(of plist: URL) -> [String]?');
+  assert.match(reader, /PropertyListSerialization/u);
+  assert.match(reader, /else \{ return nil \}/u);
 });
 
 test('the probe asks about one label, is bounded, and cannot deadlock on its output', () => {

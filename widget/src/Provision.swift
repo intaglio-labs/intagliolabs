@@ -306,6 +306,44 @@ enum Provision {
   /// How long launchctl gets to answer one question about one label.
   private static let agentProbeTimeout: TimeInterval = 3
 
+  /// DOES THIS PLIST STILL POINT AT FILES THAT ARE THERE?
+  ///
+  /// Pure, with the filesystem injected, so the rule can be exercised over every
+  /// shape of ProgramArguments rather than only read.
+  ///
+  /// Round-1 review, finding 5: without it, a plist that names a path nothing
+  /// lives at any more is bootstrapped on EVERY launch, for ever — launchd
+  /// accepts the job, the job dies, and the next launch finds it unloaded and
+  /// tries again. That is the shape a stale plist takes after the app moves, and
+  /// it is a repair that can never converge. Such a plist wants re-rendering from
+  /// the bundle's template (installAgent), not re-bootstrapping.
+  ///
+  /// THE FIRST TWO ARGUMENTS ONLY: the interpreter and what it runs. Everything
+  /// after them is flags and flag values, and llama-server's include a
+  /// models directory that legitimately appears later; treating one of those as
+  /// proof of staleness would send a healthy agent round the rewrite path.
+  /// Non-absolute entries are skipped for the same reason — they are not paths
+  /// this can check. An argument list with no absolute path in its first two
+  /// entries is not one this rule can vouch for, so it says so.
+  static func agentProgramPathsExist(
+    programArguments: [String], fileExists: (String) -> Bool
+  ) -> Bool {
+    let paths = programArguments.prefix(2).filter { $0.hasPrefix("/") }
+    guard !paths.isEmpty else { return false }
+    return paths.allSatisfy(fileExists)
+  }
+
+  /// The installed plist's ProgramArguments, or nil if it cannot be read or
+  /// parsed — which is itself a reason to re-render rather than bootstrap.
+  private static func programArguments(of plist: URL) -> [String]? {
+    guard let data = try? Data(contentsOf: plist),
+          let root = try? PropertyListSerialization
+            .propertyList(from: data, format: nil) as? [String: Any],
+          let args = root["ProgramArguments"] as? [String], !args.isEmpty
+    else { return nil }
+    return args
+  }
+
   /// Is `label` a job launchd currently knows about? `nil` is "could not tell".
   ///
   /// `launchctl print` rather than `launchctl list`: list prints EVERY job on the
@@ -369,6 +407,14 @@ enum Provision {
   /// anything that is already up. The connectors child needs no special handling
   /// — its preflight failure respawns it after 4, 8 then 16 seconds, by which
   /// time these have landed.
+  ///
+  /// AND IT DOES NOT WAIT FOR HERMES (round-1 review, finding 5). provision()
+  /// does, because provision() goes on to bootstrap connect and hand the reader
+  /// a database in the same pass. Nothing in THIS function talks to hermes
+  /// afterwards, and `launchctl bootstrap` returns as soon as launchd has
+  /// accepted the job rather than when the process is serving — so the wait
+  /// bought no ordering here, only up to fifteen seconds of a launch path on
+  /// exactly the Mac that is already unwell.
   private static func bootstrapUnloadedAgents() {
     for label in agentsInOrder {
       let plist = launchAgents.appendingPathComponent("\(label).plist")
@@ -378,12 +424,24 @@ enum Provision {
       case .notInstalled, .loaded, .unknown:
         continue
       case .bootstrap:
+        // A PLIST THAT NAMES SOMETHING THAT IS NOT THERE cannot be repaired by
+        // bootstrapping it: launchd takes the job, the job dies, and the next
+        // launch finds it unloaded and does the same thing again, for ever.
+        // Re-rendered from the bundle's template instead, which is what fixes
+        // the paths. installAgent boots out first, which is a no-op here.
+        guard let args = programArguments(of: plist),
+              agentProgramPathsExist(programArguments: args,
+                                     fileExists: { fm.fileExists(atPath: $0) })
+        else {
+          NSLog("Intaglio Labs: \(label) is installed, not loaded, and points at "
+                + "something that is gone — re-rendering it rather than bootstrapping")
+          if !installAgent(label) {
+            NSLog("Intaglio Labs: could not re-render \(label) from the bundle")
+          }
+          continue
+        }
         NSLog("Intaglio Labs: \(label) is installed but not loaded — bootstrapping it")
         bootstrap(plist)
-        // The same wait provision() takes, for the same reason: hermes migrates
-        // and opens the database, and connect and the reader must not arrive at
-        // one that is still opening. agentsInOrder puts hermes first.
-        if label == "io.intaglio.hermes" { waitForHermes() }
       }
     }
   }
