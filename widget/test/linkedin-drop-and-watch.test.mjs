@@ -676,15 +676,38 @@ test('an import that succeeds retires an offer about the same archive', () => {
   // The one place all three callers pass through, and the line after which the
   // file is really on disk.
   const announce = code(accept).slice(code(accept).indexOf('DispatchQueue.main.async'));
+  assert.match(announce, /if self\.pendingExport != nil \{/u,
+    'only when an offer is actually standing — which is also what keeps this off\n' +
+    'the verdict path, where exportDecide has already cleared it');
   assert.match(announce, /pendingExport = nil/u,
     'the bridge must stop holding an offer for a file it has just installed');
-  assert.match(announce, /linkedInExportOfferClosed\(\)/u,
-    'and the surfaces that draw the offer have to be told, or the gear keeps glowing');
+
+  // ROUND-2 REVIEW, FINDING 6. Clearing the pending offer was not enough: the
+  // panel keeps whatever it last drew, so an owner who dropped a file while an
+  // offer was up was left looking at a card asking whether to import the archive
+  // it had just imported.
+  assert.match(announce, /dismissExportOffer\(\)/u,
+    'the panel showing the old filename has to go, not just the state behind it');
+  assert.doesNotMatch(announce, /linkedInExportOfferClosed\(\)/u,
+    'that one deliberately leaves the panel up; see the two delegate methods');
+  const dismiss = /func dismissExportOffer\(\) \{\n([\s\S]*?)\n  \}/u.exec(mainSwift)?.[1] ?? '';
+  assert.ok(dismiss, 'dismissExportOffer not found');
+  assert.match(code(dismiss), /linkedInExportOfferClosed\(\)/u,
+    'it still takes the glow back and clears both held names');
+  assert.match(code(dismiss), /exportPanel\?\.orderOut\(nil\)/u,
+    'ordered out, not closed: these panels are kept lazily and reused');
   // Which is what clears BOTH copies of the name main.swift holds, so nothing
   // re-presents when the card or the scrim goes.
   const closed = /func linkedInExportOfferClosed\(\) \{\n([\s\S]*?)\n  \}/u
     .exec(mainSwift)?.[1] ?? '';
   assert.match(code(closed), /deferredExportOffer = nil/u);
+  // ...and THAT one must not close the panel, because on the verdict path the
+  // panel is the surface reporting the result: a count export.js gives the owner
+  // three seconds to read, or a failure carrying the only sentence saying why.
+  assert.doesNotMatch(code(closed), /orderOut/u,
+    'closing the panel from the verdict path is the bug export.js exists to stop');
+  assert.match(read('widget/ui/export.js'), /setTimeout\(\(\) => hzPost\('close'\)/u,
+    'the page closes itself after a success, on its own clock');
 
   // ONLY ON THE SUCCESS PATH. A failed import installs nothing and must leave
   // the offer where it was — the same rule answerOffer keeps when it refuses to

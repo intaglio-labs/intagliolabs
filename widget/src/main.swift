@@ -1747,8 +1747,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(\(jsString(name)))")
   }
 
-  // ...and the answer, either way. The glow goes back and the panel goes away,
-  // or the app keeps asking about a decision the owner has already made.
+  // ...and the answer, either way. The glow goes back, and the panel closes
+  // itself once it has said what happened -- see export.js, which is the whole
+  // reason this does not close it here.
   func linkedInExportOfferClosed() {
     dispatchPrecondition(condition: .onQueue(.main))
     // AND THE COPIES THIS FILE WAS HOLDING. An answered offer is over, so a name
@@ -1759,6 +1760,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     deferredExportOffer = nil
     presentedExportOffer = nil
     eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(null)")
+  }
+
+  /// AN OFFER THAT NOBODY IS GOING TO ANSWER, because the file arrived by
+  /// another door: dropped on the settings panel, or picked on screen 4
+  /// (round-2 review, finding 6).
+  ///
+  /// Clearing the pending offer was not enough on its own — the panel keeps
+  /// whatever it last drew, so an owner who dropped a file while an offer was up
+  /// was left looking at a card asking whether to import the archive it had just
+  /// imported. Nothing is reading that panel for a result, so unlike the verdict
+  /// path it may simply go.
+  ///
+  /// Ordered out rather than closed, like every other panel here: these are kept
+  /// lazily (isReleasedWhenClosed is false) so the next offer reuses the page.
+  func dismissExportOffer() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    linkedInExportOfferClosed()
+    exportPanel?.orderOut(nil)
   }
 
   // AN EXPORT LANDED WITHOUT ANYBODY PRESSING ANYTHING ON A PAGE -- the

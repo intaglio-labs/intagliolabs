@@ -80,9 +80,20 @@ protocol BridgeDelegate: AnyObject {
   /// where the owner will meet it: a panel, and the gear's own glow, because a
   /// panel can be behind something and the widget never is.
   func linkedInExportOffered(name: String)
-  /// ...and the offer has been answered, either way. Take the glow back and
-  /// close the panel, or the app goes on asking about a decision already made.
+  /// ...and the offer has been answered, either way. Take the glow back, or the
+  /// app goes on asking about a decision already made.
+  ///
+  /// IT DOES NOT CLOSE THE PANEL, and that is the whole reason there are two of
+  /// these. This is the VERDICT path: the panel is the surface reporting what
+  /// happened — a count worth three seconds of reading, or a failure carrying
+  /// the only sentence that says why — and closing it from here is the bug
+  /// export.js was written to stop repeating.
   func linkedInExportOfferClosed()
+  /// An export landed some OTHER way while an offer for it was still standing: a
+  /// file dropped on the settings panel, or the picker on screen 4. Nobody is
+  /// reading that panel for a result, and what it says is now a sentence about a
+  /// file this app has already imported — so it goes, glow and all.
+  func dismissExportOffer()
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -4010,10 +4021,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // Only on this path, which is the success path: a failed import installs
     // nothing and must leave the offer exactly where it was, which is the same
     // rule answerOffer keeps when it refuses to spend a key on a failure.
+    // ONLY WHEN AN OFFER IS ACTUALLY STANDING, which is also what keeps this off
+    // the verdict path (round-2 review, finding 6). exportDecide clears
+    // `pendingExport` BEFORE it calls the import, so on that path this sees nil
+    // and does nothing — which is correct, because there the panel is the
+    // surface showing "N connections imported." and export.js gives the owner
+    // three seconds to read it. A drop or a picker import leaves it non-nil, and
+    // that panel is showing a filename nobody is going to act on any more.
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      self.pendingExport = nil
-      self.delegate?.linkedInExportOfferClosed()
+      if self.pendingExport != nil {
+        self.pendingExport = nil
+        self.delegate?.dismissExportOffer()
+      }
       _ = self.startReadingSources()
       self.delegate?.linkedInExportChanged()
     }
