@@ -105,6 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // window position all live in a domain this build cannot see. Carried over
     // once, here, so the first thing the rename does is not greet them with
     // setup they finished months ago. It cannot carry TCC -- see the file.
+    //
+    // AND BEFORE ANYTHING WRITES ONE, which is a second, newer reason this line
+    // is at the top. Its default argument probes ~/.hazlie/connectors/config.json
+    // to ask whether the install that wrote the old domain is still on this Mac,
+    // and the connector-defaults provisioning below writes that exact file as
+    // `{}` on a fresh home. Move this call under it and the probe always answers
+    // yes, which is the take-1 failure of 2026-09-14 restored: onboarding skipped
+    // on a machine where setup had never produced anything.
     let carriedSettings = DefaultsMigration.runIfNeeded()
     if carriedSettings > 0 {
       NSLog("Intaglio Labs: carried \(carriedSettings) settings across the rename")
