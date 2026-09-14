@@ -806,6 +806,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // The flow covers the display, so nothing may be left open underneath it —
     // a popup under the scrim is unreachable and still live.
     for other in edgePanels where other?.isVisible == true { other?.orderOut(nil) }
+    // ...AND THE EXPORT OFFER, WHICH IS NOT AN EDGE PANEL. The line above has
+    // always meant to say "nothing is left under the scrim", and the offer was
+    // outside the set it walks — so a visible offer stayed put, went under a
+    // full-screen scrim, and was never DEFERRED, which meant nothing handed it
+    // back when the flow ended. Standing it aside puts it in the same hold the
+    // reconnect card uses, and presentDeferredExportOffer returns it (round-1
+    // review, finding 8).
+    standExportOfferAside()
     // The widget LEAVES for the flow's duration. It used to sit under the
     // scrim, faintly visible through the dim — which made scene 3's reveal a
     // "notice the thing you half-saw" instead of a meeting. Hidden here,
@@ -1217,8 +1225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     }
     // The card was pressed for and the offer was not, so the card takes the
     // corner -- but it takes it from an offer that goes back into deferral, not
-    // from one it buries. See standAsideForReconnectCard.
-    standAsideForReconnectCard()
+    // from one it buries. See standExportOfferAside.
+    standExportOfferAside()
     present(reconnectPanel!)
   }
 
@@ -1699,7 +1707,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   /// already drawn and the owner then opens the reconnect card onto the same
   /// corner. The card is a press and wins; the offer goes back to being deferred
   /// rather than being buried, and comes back when the card closes.
-  private func standAsideForReconnectCard() {
+  ///
+  /// THE SCRIM NEEDS IT FOR THE SAME REASON (round-1 review, finding 8), which
+  /// is why this is not named after the card. openOnboarding orders out
+  /// `edgePanels` — chat, connections, people, months — and the offer is not one
+  /// of them, so a visible offer stayed exactly where it was and the full-screen
+  /// scrim went over it: invisible, still live, and NOT deferred, so nothing
+  /// handed it back when the flow ended. linkedInExportOffered has guarded
+  /// against the scrim since the day it was written; this is the other order,
+  /// and it was only ever fixed for the card.
+  private func standExportOfferAside() {
     dispatchPrecondition(condition: .onQueue(.main))
     guard let p = exportPanel, p.isVisible else { return }
     if deferredExportOffer == nil { deferredExportOffer = presentedExportOffer }
@@ -1725,7 +1742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // worth taking the screen for.
     presentWithoutStealingFocus(exportPanel!)
     // Remembered so the card can send it back to deferral rather than bury it;
-    // see standAsideForReconnectCard.
+    // see standExportOfferAside.
     presentedExportOffer = name
     eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(\(jsString(name)))")
   }

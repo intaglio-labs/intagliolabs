@@ -432,18 +432,36 @@ test('an offer and the reconnect card never share the corner', () => {
   // the offer goes BACK to deferred rather than under the card.
   const open = /func openReconnect\(\) \{\n([\s\S]*?)\n  \}\n/u.exec(mainSwift)?.[1] ?? '';
   assert.ok(open, 'openReconnect not found');
-  const asideAt = code(open).indexOf('standAsideForReconnectCard()');
+  const asideAt = code(open).indexOf('standExportOfferAside()');
   const presentAt = code(open).indexOf('present(reconnectPanel!)');
   assert.ok(asideAt > 0, 'the offer on screen has to be dealt with, not covered');
   assert.ok(asideAt < presentAt,
     'it stands aside BEFORE the card is presented; afterwards the offer has\n' +
     'already spent a frame underneath it');
-  const aside = /private func standAsideForReconnectCard\(\) \{\n([\s\S]*?)\n  \}/u
+  const aside = /private func standExportOfferAside\(\) \{\n([\s\S]*?)\n  \}/u
     .exec(mainSwift)?.[1] ?? '';
-  assert.ok(aside, 'standAsideForReconnectCard not found');
+  assert.ok(aside, 'standExportOfferAside not found');
   assert.match(code(aside), /deferredExportOffer = presentedExportOffer/u,
     'the name has to survive the hide, or the offer comes back empty');
   assert.match(code(aside), /orderOut\(nil\)/u);
+
+  // AND THE SCRIM USES THE SAME HOLD (round-1 review, finding 8).
+  //
+  // openOnboarding orders out `edgePanels` — chat, connections, people, months
+  // — meaning to leave nothing under a full-screen scrim, and the export offer
+  // is not in that set. So a visible offer stayed where it was, went under the
+  // scrim, and was never deferred: nothing handed it back when the flow ended.
+  // linkedInExportOffered has guarded against the scrim since it was written;
+  // this is the other order, and it had only been fixed for the card.
+  const onboarding = /func openOnboarding\(resume: Bool\) \{\n([\s\S]*?)\n  \}\n/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(onboarding, 'openOnboarding(resume:) not found');
+  assert.match(code(onboarding), /standExportOfferAside\(\)/u,
+    'the scrim covers the offer exactly as the card does, and holds it the same way');
+  const scrimAsideAt = code(onboarding).indexOf('standExportOfferAside()');
+  const edgeSweepAt = code(onboarding).indexOf('for other in edgePanels');
+  assert.ok(edgeSweepAt > 0 && scrimAsideAt > edgeSweepAt,
+    'it belongs beside the sweep that already means "nothing under the scrim"');
 
   // ...and it comes back when the card goes, by whichever route the card goes:
   // its ✕, a verdict, or the orb toggling it shut. NOT an outside click --
