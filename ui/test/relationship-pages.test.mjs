@@ -21,6 +21,7 @@ import { start, openDb } from '../server/hermes.mjs';
 import { eligiblePool, MIN_DEPTH_MESSAGES } from '../server/relationship/producer.mjs';
 import { groundPage, buildPersonPage, readPersonPage, gatherPersonContext } from '../server/relationship/pages.mjs';
 import { createEngine, resolveClaudeBinary } from '../server/relationship/engines.mjs';
+import { modelPause } from '../server/relationship/pause.mjs';
 
 const NOW = Date.parse('2026-09-01T12:00:00Z');
 const DAY = 86_400_000;
@@ -629,4 +630,39 @@ test('claude-cli engine treats is_error and non-zero exit as thrown errors', asy
 test('resolveClaudeBinary returns null when nothing is on PATH and the fallback does not exist', () => {
   const binary = resolveClaudeBinary({ env: { PATH: '/nonexistent-dir-xyz' }, home: '/nonexistent-home-xyz' });
   assert.equal(binary, null);
+});
+
+// ---------------------------------------------------------------------------
+// THE PAUSE runPageBuilds AWAITS BETWEEN PEOPLE MUST HOLD THE EVENT LOOP OPEN.
+//
+// runPageBuilds (hermes.mjs) used to await a local sleep() that unref'd its
+// timer, so the rest of a batch only ever got built if something else was
+// keeping the loop alive. In the server that is the HTTP listener, so nobody
+// noticed -- and it is why this cannot be pinned behaviourally HERE either:
+// every build test in this file goes through start(), whose listener holds
+// the loop open and hides the defect exactly the way production does. The
+// same unref'd pause in the sweep, which sweep-once.mjs awaits without a
+// listener of its own, took out relationship-sweep.test.mjs under Node 22.
+//
+// So this pins the property instead of the symptom.
+// process.getActiveResourcesInfo() lists ONLY resources that are keeping the
+// event loop alive, so an unref'd timer is absent from it and this assertion
+// fails on the old code under every Node major.
+//
+// What a parked runPageBuilds costs, and why it is not merely a slow batch:
+// startPageBuilds chains its queue drain off this promise, so if it never
+// settles rel.pagesBuildingActive stays true forever and every later refill
+// queues into rel.pagesPending behind a builder that has stopped -- no
+// further page is ever built, for any batch.
+test('the pause runPageBuilds awaits keeps the event loop alive until it fires', async () => {
+  const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+
+  const before = timers();
+  const startedAt = Date.now();
+  const pause = modelPause(25);
+  assert.equal(timers(), before + 1,
+    "an unref'd pause does not hold the loop open, so a batch mid-flight never resumes");
+
+  await pause;
+  assert.ok(Date.now() - startedAt >= 20, 'and it really did wait rather than resolving immediately');
 });

@@ -29,6 +29,7 @@ import { isAnonymousContact } from '../people/map.mjs';
 import { markPersonSubRoles, loadOwner } from '../people/owner.mjs';
 import { PERSON_SOURCE_POLICY } from '../people/graph.mjs';
 import { SECTION_KIND, alreadyStored } from './pages.mjs';
+import { modelPause } from './pause.mjs';
 
 // The sources a person could actually have WRITTEN a message in, past tense
 // -- what the candidate gate (sweepScope's max-id query) and newRowsFor must
@@ -107,41 +108,12 @@ export function sweepCallCap(policy) {
 
 // Matches hermes.mjs's own PAGE_BUILD_PAUSE_MS -- the same "do not hammer
 // the one local model" pause between people, applied here to sweeping
-// instead of page-building. Not imported (PAGE_BUILD_PAUSE_MS is private to
-// hermes.mjs); duplicated as a constant instead.
+// instead of page-building. The two VALUES stay separate (sweeping and page
+// building are independently tunable, and PAGE_BUILD_PAUSE_MS is private to
+// hermes.mjs); the WAITING is no longer duplicated -- both callers await
+// modelPause, whose module comment explains why that timer must be ref'd.
 export const SWEEP_PAUSE_MS = 1000;
 const DAY = 86_400_000;
-
-// NOT unref'd, and that is the entire point of this function existing rather
-// than an inline setTimeout.
-//
-// An unref'd timer does not keep the event loop alive. A pass is a sequence
-// of awaits with this pause between people, so an unref'd pause makes the
-// rest of the pass conditional on some UNRELATED handle happening to hold
-// the loop open -- the HTTP server, in the one environment anybody looked at.
-// Take that handle away and the loop drains at the first pause, the timer
-// never fires, and runSweepPass's promise stays pending forever: the
-// remaining candidates are never swept, the terminal UPDATE that marks the
-// run 'complete' never runs, the route never answers sweep-once.mjs, and the
-// `finally` that clears rel.sweepActive never runs either -- so every later
-// pass skips itself with reason 'busy-model' against a pass that is not
-// running.
-//
-// That is not hypothetical: `node --test` is exactly such an environment.
-// Under Node 22 the runner holds nothing ref'd once the test's own stack is
-// parked on this promise, so relationship-sweep.test.mjs drained the loop at
-// the first two-candidate pass and every test from that one on was cancelled
-// with "Promise resolution is still pending but the event loop has already
-// resolved". Node 24's runner does hold a ref'd handle, which is the only
-// reason the identical code passed there -- the bug was always here, and 24
-// was hiding it.
-//
-// A ref'd timer holds the process open for at most SWEEP_PAUSE_MS, and only
-// while a pass is genuinely mid-flight with a committed cursor write behind
-// it and a person in front of it. Waiting one second for that is correct.
-export function sweepPause(ms) {
-  return new Promise((resolve) => { setTimeout(resolve, ms); });
-}
 
 function promptSha(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex');
@@ -945,7 +917,7 @@ export async function runSweepPass(db, engine, policy, {
         db.exec('ROLLBACK');
         throw err;
       }
-      if (i < candidates.length - 1) await sweepPause(SWEEP_PAUSE_MS);
+      if (i < candidates.length - 1) await modelPause(SWEEP_PAUSE_MS);
     }
 
     // Counters are already in the row (bumpRun, above); this only closes the

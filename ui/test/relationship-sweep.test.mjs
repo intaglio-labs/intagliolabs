@@ -15,8 +15,9 @@ import { ownerConfigPath, markPersonSubRoles } from '../server/people/owner.mjs'
 import {
   groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass, applySweepDecision,
   sweepCallCap, sweepStatus, SWEEP_DAILY_CALL_CAP_DEFAULT,
-  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, SWEEP_PAUSE_MS, sweepPause, tokensEstFor,
+  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, SWEEP_PAUSE_MS, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
+import { modelPause } from '../server/relationship/pause.mjs';
 
 // A context row from a non-message source (e.g. an imported LinkedIn
 // connection, linked authored=1 room=0 the way people/graph.mjs's
@@ -1371,7 +1372,7 @@ test('a model call already made is counted even when the cursor write fails', as
 // ---------------------------------------------------------------------------
 // THE PAUSE BETWEEN PEOPLE MUST HOLD THE EVENT LOOP OPEN.
 //
-// sweepPause used to unref its timer, which means a pass only ever resumed
+// The pause used to unref its timer, which means a pass only ever resumed
 // after its first pause if something ELSE was keeping the loop alive. In the
 // server that is the HTTP listener, so nobody noticed; under `node --test`
 // there is nothing, and on Node 22 this whole file died at the first
@@ -1389,7 +1390,7 @@ test('the pause between people keeps the event loop alive until it fires', async
 
   const before = timers();
   const startedAt = Date.now();
-  const pause = sweepPause(25);
+  const pause = modelPause(25);
   assert.equal(timers(), before + 1,
     'an unref\'d pause does not hold the loop open, so a pass mid-flight never resumes');
 

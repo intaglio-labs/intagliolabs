@@ -81,6 +81,7 @@ import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
 import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
 import { runSweepPass, applySweepDecision, sweepStatus } from './relationship/sweep.mjs';
+import { modelPause } from './relationship/pause.mjs';
 import {
   runLookupPass, lookupGate, lookupTierFor, lookupStatus, lookupLogFor, lookupEvidenceFor,
   newestWebChange, parseLookupSources,
@@ -3805,10 +3806,6 @@ const PAGE_RECENT_BUILD_MS = 7 * 86_400_000;
 // explicit POST /admin/relationship/refresh is never throttled -- the owner
 // asked for it directly.
 
-function sleep(ms) {
-  return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
-}
-
 // "Has a page" for the card route's serving preference: any section readPersonPage
 // still returns (it already omits rejected items, so what is left is accepted
 // or pending) -- freshness does not matter here, only whether one exists.
@@ -3840,7 +3837,13 @@ async function runPageBuilds(db, engine, rel, batchId, personKeys) {
       rel.pagesBuilding.lastError = String(e?.message ?? e);
     }
     rel.pagesBuilding.done += 1;
-    if (i < toBuild.length - 1) await sleep(PAGE_BUILD_PAUSE_MS);
+    // modelPause, not a local unref'd sleep: an unref'd pause here leaves
+    // this loop parked forever the moment nothing else holds the event loop
+    // open, and because startPageBuilds chains its queue drain off this
+    // promise, rel.pagesBuildingActive would stay true and every later
+    // refill would queue behind a builder that had stopped. See
+    // relationship/pause.mjs.
+    if (i < toBuild.length - 1) await modelPause(PAGE_BUILD_PAUSE_MS);
   }
 }
 
