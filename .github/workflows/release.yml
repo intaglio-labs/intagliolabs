@@ -122,7 +122,12 @@ jobs:
       # after this point wants it.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
+          # THE NODE THE APP SHIPS. widget/build.sh bundles the stable node from
+          # ~/.hazlie/bin (24.x today), and hermes, connect and the connectors run
+          # on it. Testing on an older major here proved nothing about the product
+          # and hid a real difference: v0.5.0's first release run failed a sweep
+          # test under 22 that passes under 24. Keep this equal to the bundled major.
+          node-version: '24'
 
       # build.sh bundles the connector runtime and its dependencies. A clean
       # checkout never contains node_modules, and release builds deliberately
