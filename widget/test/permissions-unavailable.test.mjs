@@ -74,6 +74,26 @@ test('no caller collapses unavailable back into granted by accident', () => {
   assert.match(watch, /guard now == \.granted, let before = lastKnown, before != \.granted/u,
     'only a transition INTO a real read respawns the daemon');
 
+  // ...AND IT RESPAWNS, IT DOES NOT CREATE (round-1 review, finding 3).
+  //
+  // Connectors.restart() falls through to start() when nothing is running, and
+  // since the launch-time start became conditional there may be no child on a
+  // first run. Granting Full Disk Access is a trip to System Settings, so this
+  // fires with the owner looking at System Settings and none of our screens up
+  // — a daemon started here would put the Calendar and Contacts dialogs there,
+  // which is the defect the launch gate exists to prevent, one step along.
+  const check = /static func check\(\) -> Bool \{([\s\S]*?)\n {2}\}/u.exec(watch)?.[1] ?? '';
+  assert.ok(check, 'check() not found');
+  assert.match(check, /guard Connectors\.shared\.isRunning \|\| Connectors\.shared\.mayStartAtLaunch else/u,
+    'a reader that already exists, or an owner who has been asked — nothing else');
+  const skipAt = check.indexOf('guard Connectors.shared.isRunning');
+  const restartAt = check.indexOf('Connectors.shared.restart()');
+  assert.ok(skipAt > 0 && skipAt < restartAt, 'the skip has to come before the respawn');
+  // The edge is still consumed on the skip path, or the next didBecomeActive
+  // would ask the same question again about a grant already seen.
+  assert.match(check.slice(skipAt, restartAt), /return true/u,
+    'only the respawn is skipped; the transition is still recorded');
+
   // The drag card must not settle itself on "there is nothing here".
   assert.match(helper, /if disk == \.unavailable \{[\s\S]{0,400}fullDiskAccessibleSources\(\)\.isEmpty/u,
     'the card falls back to the other protected stores rather than calling absence a grant');

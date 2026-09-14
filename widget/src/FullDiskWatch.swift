@@ -36,20 +36,29 @@ import Foundation
 //
 // ~~"the daemon just started above"~~ / ~~"the daemon starts fresh"~~ were true
 // of every launch until 2026-09-14, when the launch-time start became
-// conditional on Bridge.onboarded — see main.swift, and the Calendar and
-// Contacts dialogs it had been putting over onboarding screen 1. On a first run
-// there may be no child here at all, and Connectors.restart() then STARTS one
-// rather than replacing one.
+// conditional — see main.swift, and the Calendar and Contacts dialogs it had
+// been putting over onboarding screen 1. On a first run there may be no child
+// here at all, and Connectors.restart() falls through to start() when nothing is
+// running.
 //
-// That is deliberate, and it is in context. This acts on a denied → granted
-// EDGE against a baseline taken at launch, so nothing here can fire until
-// somebody actually moves the Full Disk Access switch — and the only place this
-// app sends a first-run owner to move it is onboarding screen 2, the screen
-// whose whole subject is these grants. The live run of 2026-09-14 is the
-// behaviour being kept: the grant landed at 12:16:35 and Messages was read at
-// 12:17:52, without waiting for the press on "next" that comes after it. On the
-// "Quit & Reopen" path a first-run relaunch starts no daemon either, and the
-// flow starts one from wherever it resumes.
+// ~~"That is deliberate, and it is in context. …the only place this app sends a
+// first-run owner to move it is onboarding screen 2, the screen whose whole
+// subject is these grants."~~ Round-1 review, finding 3: the screen is not what
+// the owner is looking at. Granting Full Disk Access means going to System
+// Settings, and the flow yields the scrim to send them there (see
+// Bridge's openFullDiskAccess and FullDiskHelper) — so the app comes back to the
+// front on the grant, this fires, a daemon starts against the `{}` config, and
+// the Calendar and Contacts dialogs arrive over SYSTEM SETTINGS with no screen
+// of ours on screen to have explained them. That is the same defect one step
+// along, not an exception to it.
+//
+// So this RESPAWNS, which is what it was always for, and creates nothing. A
+// first-run owner's reader starts from the press on screen 2's "next"
+// (Bridge.startReadingSources) seconds later. What is kept from the live run of
+// 2026-09-14 — grant at 12:16:35, Messages read at 12:17:52 — is the case that
+// matters here: a daemon that was ALREADY running when the switch moved is still
+// respawned at once, so it stops carrying a denial it has no reason to
+// re-examine.
 enum FullDiskWatch {
   /// What the last look said, so only the DENIED -> GRANTED edge acts. Nil until
   /// begin() takes the first reading.
@@ -86,6 +95,18 @@ enum FullDiskWatch {
     // first time and there is now a store the daemon's startup preflight has
     // never seen.
     guard now == .granted, let before = lastKnown, before != .granted else { return false }
+    // A READER THAT EXISTS, OR AN OWNER WHO HAS BEEN ASKED. Connectors.restart()
+    // starts a daemon when none is running, and on a first run that would put
+    // the Calendar and Contacts dialogs over System Settings — which is where
+    // the owner is standing at the exact moment this fires, because granting
+    // Full Disk Access is a trip out of the app. The edge is still recorded (the
+    // defer above), so nothing here re-fires later for the same grant; only the
+    // respawn is skipped, and screen 2's "next" starts the reader in a moment.
+    guard Connectors.shared.isRunning || Connectors.shared.mayStartAtLaunch else {
+      NSLog("Intaglio Labs: full disk access arrived before setup did — leaving "
+            + "the reader to onboarding rather than starting one here")
+      return true
+    }
     NSLog("Intaglio Labs: full disk access arrived — respawning connectors, not the app")
     Connectors.shared.restart()
     return true
