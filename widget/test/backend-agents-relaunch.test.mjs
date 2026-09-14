@@ -185,7 +185,7 @@ test('a plist that points at something gone is re-rendered, not re-bootstrapped'
 
   // ...and the one rule both callers share routes on it, to installAgent rather
   // than bootstrap.
-  const caller = bodyOf("private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool");
+  const caller = bodyOf("private static func reviveInstalledAgent(");
   const guardAt = caller.indexOf('guard let args = programArguments(of: plist)');
   const bootstrapAt = caller.indexOf('bootstrap(plist)');
   assert.ok(guardAt > 0 && guardAt < bootstrapAt, 'validate before bootstrapping, not after');
@@ -501,8 +501,11 @@ test('a bootstrap that launchd refused is not a spent attempt', () => {
 
   // Both branches go through it, so neither can get this wrong on its own.
   const repair = bodyOf('private static func repairLlamaAgent() {');
-  assert.match(repair, /note\(repair: reviveInstalledAgent\(llamaLabel, plist: plist\), as: "bootstrap"\)/u);
+  assert.match(repair, /note\(repair: revival\.worked, as: revival\.action\.rawValue\)/u,
+    'the failure log names the call that failed, and reviveInstalledAgent has two\n' +
+    '(round-5 review, finding 2)');
   assert.match(repair, /note\(repair: installAgent\(llamaLabel\), as: "install"\)/u);
+  assert.match(swift, /case rerender = "re-render"/u);
   const bootstrapBranch = repair.slice(repair.indexOf('case .bootstrap:'),
                                        repair.indexOf('case .install:'));
   assert.doesNotMatch(bootstrapBranch, /llamaRepairAttempted = true/u,
@@ -523,9 +526,30 @@ test('launchctl bootstrap reports whether launchd took the job', () => {
   const install = bodyOf('static func installAgent(_ label: String) -> Bool');
   assert.match(install, /return bootstrap\(dst\)/u);
   assert.doesNotMatch(install, /bootstrap\(dst\)\n\s*return true/u);
-  // ...and the revive path hands its caller the same answer.
-  const revive = bodyOf('private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool');
-  assert.match(revive, /return bootstrap\(plist\)/u);
+  // ...and the revive path hands its caller the same answer, tagged with which
+  // of its two calls produced it.
+  const revive = bodyOf('private static func reviveInstalledAgent(');
+  assert.match(revive, /if bootstrap\(plist\) \{ return \(\.bootstrap, true\) \}/u);
+  assert.match(revive, /return \(\.rerender, true\)/u);
+});
+
+test('a bootstrap launchd refused because it already had the job is not a failure', () => {
+  // ROUND-5 REVIEW, FINDING 1. installAgent's bootout is a `try?`, and the probe
+  // that sent us here is a moment old — so a job that was busy going out, or
+  // came back between the two, answers the bootstrap with EEXIST. Counting that
+  // as a failure spends a llama attempt and parks the next one behind a
+  // 30-second backoff, for an agent that is running.
+  const revive = bodyOf('private static func reviveInstalledAgent(');
+  const refusedAt = revive.indexOf('if bootstrap(plist) { return (.bootstrap, true) }');
+  const after = revive.slice(refusedAt);
+  assert.match(after, /if probeAgentLoaded\(label\) == true \{/u,
+    'one more probe settles whether the refusal meant anything');
+  assert.match(after, /return \(\.bootstrap, true\)/u, 'a loaded job is the outcome we wanted');
+  assert.match(after, /return \(\.bootstrap, false\)/u, 'and anything else is still a failure');
+  // `== true` and not a truthiness test: probeAgentLoaded answers nil for "could
+  // not tell", and that must not be read as "it is loaded".
+  assert.doesNotMatch(after, /if probeAgentLoaded\(label\) \{/u,
+    'a probe that could not answer is not a running agent');
 });
 
 test('one rule for reviving an agent, and the llama branch takes it too', () => {
@@ -533,7 +557,7 @@ test('one rule for reviving an agent, and the llama branch takes it too', () => 
   // stale-path check nor the where-does-this-app-live check the sweep applies,
   // so it was the one bootstrap in the file that could loop on a plist naming
   // nothing, or re-point launchd at a DMG.
-  const revive = bodyOf('private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool');
+  const revive = bodyOf('private static func reviveInstalledAgent(');
   assert.match(revive, /agentProgramPathsExist\(/u);
   assert.match(revive, /guard runningFromPermanentInstall else \{/u);
   assert.match(revive, /installAgent\(label\)/u, 'a stale plist is re-rendered, not bootstrapped');

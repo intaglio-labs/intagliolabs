@@ -24,11 +24,20 @@ import Foundation
 //   provisioned by a build that predates llama-api-key.txt gain the key on
 //   upgrade instead of crash-looping forever.
 //
-//   repairLlamaAgent — the llama agent's whole lifecycle, and it is the only
-//   thing that touches that label. A plist provisioning legitimately skipped for
-//   weights that arrived later, AND one that is installed with no job for it.
-//   That agent is the one that needs something besides its plist before it can
-//   start, so it cannot share the sweep's rule; see llamaRepair.
+//   repairLlamaAgent — the llama agent's whole REPAIR lifecycle: a plist
+//   provisioning legitimately skipped for weights that arrived later, AND one
+//   that is installed with no job for it. That agent is the one that needs
+//   something besides its plist before it can start, so it cannot share the
+//   sweep's rule; see llamaRepair.
+//
+//   ~~"and it is the only thing that touches that label"~~ — not quite, and the
+//   round-5 review was right to catch it. restartInstalledBackendAgents
+//   kickstarts every label in agentsInOrder whose plist exists, llama included,
+//   after a legacy agent is retired. That is a different job on a different
+//   trigger — a migration, not a repair — and it is deliberately blind to the
+//   model, because it is restarting what was already installed rather than
+//   deciding whether it should be. What is true is the narrower sentence: one
+//   owner of the REPAIR decision, and the sweep is not it.
 //
 //   bootstrapUnloadedAgents — the same question for the other two: a plist that
 //   is here while launchd has no job for it. Booting the agents out by hand and
@@ -301,7 +310,8 @@ enum Provision {
       // app somewhere launchd may name (round-4 review, finding 3). Skipping
       // them made this the one bootstrap in the file that could re-point launchd
       // at a DMG, or loop on a plist naming a path nothing lives at.
-      note(repair: reviveInstalledAgent(llamaLabel, plist: plist), as: "bootstrap")
+      let revival = reviveInstalledAgent(llamaLabel, plist: plist)
+      note(repair: revival.worked, as: revival.action.rawValue)
     case .install:
       note(repair: installAgent(llamaLabel), as: "install")
     }
@@ -343,10 +353,20 @@ enum Provision {
   /// Bundle.main.resourceURL into @REPO@ and a launchd plist names a path rather
   /// than a commit.
   ///
-  /// Returns whether anything was actually put back, which is what lets the
-  /// llama repair's once-per-launch flag follow a success rather than an attempt.
+  /// Returns WHICH CALL IT MADE and whether it worked, which is what lets the
+  /// llama repair's once-per-launch flag follow a success rather than an attempt
+  /// — and lets its failure log name the call that actually failed. This function
+  /// has two exits and they are not the same event (round-5 review, finding 2);
+  /// a caller told only `false` would say "bootstrap failed" about a re-render.
+  enum Revival: String {
+    case bootstrap
+    case rerender = "re-render"
+  }
+
   @discardableResult
-  private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool {
+  private static func reviveInstalledAgent(
+    _ label: String, plist: URL
+  ) -> (action: Revival, worked: Bool) {
     guard let args = programArguments(of: plist),
           agentProgramPathsExist(programArguments: args,
                                  fileExists: { fm.fileExists(atPath: $0) })
@@ -356,16 +376,28 @@ enum Provision {
               + "copy is not in an Applications folder — leaving the plist alone "
               + "rather than pointing launchd at a bundle that may not be here "
               + "next login")
-        return false
+        return (.rerender, false)
       }
       NSLog("Intaglio Labs: \(label) is installed, not loaded, and points at "
             + "something that is gone — re-rendering it rather than bootstrapping")
-      if installAgent(label) { return true }
+      if installAgent(label) { return (.rerender, true) }
       NSLog("Intaglio Labs: could not re-render \(label) from the bundle")
-      return false
+      return (.rerender, false)
     }
     NSLog("Intaglio Labs: \(label) is installed but not loaded — bootstrapping it")
-    return bootstrap(plist)
+    if bootstrap(plist) { return (.bootstrap, true) }
+    // A REFUSAL BECAUSE LAUNCHD ALREADY HAS THE JOB IS NOT A FAILURE (round-5
+    // review, finding 1). installAgent's bootout is a `try?` and the probe that
+    // sent us here is a moment old, so a job that was busy going out, or came
+    // back between the two, answers this bootstrap with EEXIST. Counting that as
+    // a failure spends a llama attempt and parks the next one behind a 30-second
+    // backoff, for an agent that is running. One more probe settles it.
+    if probeAgentLoaded(label) == true {
+      NSLog("Intaglio Labs: launchd already had \(label) — the bootstrap was "
+            + "refused for the one reason that is not a problem")
+      return (.bootstrap, true)
+    }
+    return (.bootstrap, false)
   }
 
   /// WHAT THE LLAMA AGENT NEEDS, as a pure function of the three facts that
