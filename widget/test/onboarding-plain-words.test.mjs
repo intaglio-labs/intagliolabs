@@ -75,6 +75,16 @@ test('the stale-grant sentence does not promise a row it cannot see', () => {
   const probe = /static func staleGrantBundle[\s\S]*?\n {2}\}/u.exec(permissions)?.[0] ?? '';
   assert.match(probe, /UserDefaults\(suiteName: previous\)/u,
     'every mark of a previous install counts again, because none of them is proof');
+  // ...and "every mark" means every key, not the half of them that survived a
+  // split this file knows nothing about. DefaultsMigration.carried was divided
+  // on 2026-09-14 into preferences and setup-completion state, and this scan
+  // silently held the preferences half — so a pre-rename install that was set
+  // up and then barely touched (HazlieOnboarded and little else) would have
+  // stopped being recognised, and the note telling that owner to look for a
+  // stale row under the old name would have gone quiet.
+  assert.match(probe, /DefaultsMigration\.carried \+ DefaultsMigration\.carriedWithDataHome/u,
+    'the question here is only "did an install run before the rename", which\n' +
+    'every key in either list answers');
   const paint = /function paintBundleNote\(res\)([\s\S]*?)\n\}/u.exec(js)?.[1] ?? '';
   assert.match(paint, /if you see/u,
     'so the sentence is conditional on what the owner is actually looking at');

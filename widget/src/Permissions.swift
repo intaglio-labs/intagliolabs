@@ -376,8 +376,19 @@ enum Permissions {
 
     // 1. The old defaults domain. UserDefaults is keyed on the bundle id, so
     //    anything under the old one is an install that ran before the rename.
+    //
+    //    BOTH LISTS, because `carried` stopped being the whole of them on
+    //    2026-09-14: it was split so that setup-completion keys carry only while
+    //    the legacy data home is still there, and this scan silently inherited
+    //    the preferences half. An owner whose old domain held HazlieOnboarded
+    //    and little else — a pre-rename install that was set up and then barely
+    //    touched — would have stopped being recognised here, and the screen that
+    //    tells them to look for a stale Full Disk Access row under the old name
+    //    would have gone quiet. The question asked here is only "did an install
+    //    run before the rename", which every key in either list answers.
     if let old = UserDefaults(suiteName: previous),
-       DefaultsMigration.carried.contains(where: { old.object(forKey: $0) != nil }) {
+       (DefaultsMigration.carried + DefaultsMigration.carriedWithDataHome)
+         .contains(where: { old.object(forKey: $0) != nil }) {
       return previous
     }
     // 2. A pre-rename launch agent. Only the old install writes these.
