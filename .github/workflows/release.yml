@@ -18,6 +18,10 @@
 #   secrets.ASC_KEY_P8                 base64 of an App Store Connect API key
 #                                      (AuthKey_<KEYID>.p8)
 #   secrets.ASC_KEY_ID                 that key's Key ID
+#   secrets.GOOGLE_CLIENT_JSON         the desktop OAuth client file, verbatim
+#                                      ({client_id, client_secret, label}); it is
+#                                      staged into the bundle so sign-in works
+#                                      on a Mac that never saw the developer's disk
 #   secrets.ASC_ISSUER_ID              the Issuer UUID -- Team keys only, leave
 #                                      UNSET for an Individual key
 #
@@ -98,9 +102,10 @@ jobs:
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           TELEGRAM_APP_CREDENTIAL: ${{ secrets.TELEGRAM_APP_CREDENTIAL }}
+          GOOGLE_CLIENT_JSON: ${{ secrets.GOOGLE_CLIENT_JSON }}
         run: |
           missing=""
-          for v in MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_P12_PASS ASC_KEY_P8 ASC_KEY_ID TELEGRAM_APP_CREDENTIAL; do
+          for v in MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_P12_PASS ASC_KEY_P8 ASC_KEY_ID TELEGRAM_APP_CREDENTIAL GOOGLE_CLIENT_JSON; do
             eval "val=\$$v"
             [ -n "$val" ] || missing="$missing $v"
           done
@@ -283,6 +288,21 @@ jobs:
       # The build itself is unchanged: the same script a person runs by hand,
       # including its provenance guard, which on a tag build checks that the tag
       # is this commit and that the commit is on main.
+      # THE GOOGLE OAUTH CLIENT RIDES IN THE BUNDLE. build.sh stages every
+      # ~/.hazlie/secrets/google-client-*.json into backend/ops/google-clients so a
+      # fresh Mac's "sign in to google" has a client to sign in with (found dead on
+      # the 2026-09-12 clean-machine retest, when the client existed only on the
+      # developer's disk). A runner has no such file, so the secret becomes one
+      # here, 0600, contents never echoed. The file is the desktop OAuth client
+      # {client_id, client_secret, label}; Google's installed-app model treats the
+      # secret as non-confidential, which is why it can ship at all.
+      - name: stage the Google OAuth client for the bundle
+        env:
+          GOOGLE_CLIENT_JSON: ${{ secrets.GOOGLE_CLIENT_JSON }}
+        run: |
+          ( umask 077; mkdir -p "$HOME/.hazlie/secrets" )
+          ( umask 077; printf '%s' "$GOOGLE_CLIENT_JSON" > "$HOME/.hazlie/secrets/google-client-hazlie-prod.json" )
+          node -e 'const c=JSON.parse(require("fs").readFileSync(process.env.HOME+"/.hazlie/secrets/google-client-hazlie-prod.json","utf8")); if(!c.client_id||!c.client_secret) process.exit(1); console.log("google client staged:", c.label||"unlabelled")'
       - name: build, sign, notarize, staple, DMG
         env:
           # Names the tag for release.sh's provenance guard. Passed explicitly
