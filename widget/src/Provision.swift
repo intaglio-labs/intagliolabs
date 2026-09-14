@@ -295,28 +295,77 @@ enum Provision {
       return
     case .bootstrap:
       // WEIGHTS, A PLIST, AND NO JOB — the case this function did not cover and
-      // the sweep was covering badly. Once per launch, like the install beside
-      // it: an agent that has weights and dies anyway gets one attempt a launch
-      // rather than a bootstrap every time anything calls ensureBackend.
+      // the sweep was covering badly. Through reviveInstalledAgent, so the two
+      // questions the sweep asks before it bootstraps anything get asked here
+      // too: is the plist still pointing at something, and is this copy of the
+      // app somewhere launchd may name (round-4 review, finding 3). Skipping
+      // them made this the one bootstrap in the file that could re-point launchd
+      // at a DMG, or loop on a plist naming a path nothing lives at.
+      note(repair: reviveInstalledAgent(llamaLabel, plist: plist), as: "bootstrap")
+    case .install:
+      note(repair: installAgent(llamaLabel), as: "install")
+    }
+  }
+
+  /// ONCE IS ONCE PER SUCCESS, NOT ONCE PER TRY — for both branches now.
+  ///
+  /// Round-4 review, finding 1: the bootstrap branch raised the flag and cleared
+  /// the failure count BEFORE it acted and without learning whether the act
+  /// worked, which is exactly the property round-5 finding 21 removed from the
+  /// install branch and wrote a paragraph about. A launchctl that failed
+  /// transiently then burnt the launch's one attempt AND told the backoff that
+  /// everything was fine. Shared here so the next branch cannot get it wrong
+  /// either: the flag goes up only on success, and a failure both counts and
+  /// waits.
+  private static func note(repair worked: Bool, as what: String) {
+    if worked {
       llamaRepairAttempted = true
       llamaRepairFailures = 0
-      NSLog("Intaglio Labs: the llama agent is installed but not loaded — bootstrapping it")
-      bootstrap(plist)
-    case .install:
-      if installAgent(llamaLabel) {
-        llamaRepairAttempted = true
-        llamaRepairFailures = 0
-        NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
-      } else {
-        llamaRepairFailures += 1
-        let delay = min(
-          llamaRepairBackoffCeiling,
-          llamaRepairBackoffFloor * pow(2, Double(llamaRepairFailures - 1))
-        )
-        llamaRepairNotBefore = Date().addingTimeInterval(delay)
-        NSLog("Intaglio Labs: llama agent install failed (\(llamaRepairFailures)); retrying in \(Int(delay))s")
-      }
+      NSLog("Intaglio Labs: llama agent \(what) succeeded")
+      return
     }
+    llamaRepairFailures += 1
+    let delay = min(
+      llamaRepairBackoffCeiling,
+      llamaRepairBackoffFloor * pow(2, Double(llamaRepairFailures - 1))
+    )
+    llamaRepairNotBefore = Date().addingTimeInterval(delay)
+    NSLog("Intaglio Labs: llama agent \(what) failed (\(llamaRepairFailures)); "
+          + "retrying in \(Int(delay))s")
+  }
+
+  /// PUT ONE INSTALLED-BUT-UNLOADED AGENT BACK, by the same rule for every label.
+  ///
+  /// The sweep and the llama repair both reach this, so the two cannot drift: a
+  /// plist still naming real files is bootstrapped, one that does not is
+  /// re-rendered from the bundle's template — and only ever from a bundle that
+  /// will still be there at the next login, because installAgent bakes
+  /// Bundle.main.resourceURL into @REPO@ and a launchd plist names a path rather
+  /// than a commit.
+  ///
+  /// Returns whether anything was actually put back, which is what lets the
+  /// llama repair's once-per-launch flag follow a success rather than an attempt.
+  @discardableResult
+  private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool {
+    guard let args = programArguments(of: plist),
+          agentProgramPathsExist(programArguments: args,
+                                 fileExists: { fm.fileExists(atPath: $0) })
+    else {
+      guard runningFromPermanentInstall else {
+        NSLog("Intaglio Labs: \(label) points at something that is gone, and this "
+              + "copy is not in an Applications folder — leaving the plist alone "
+              + "rather than pointing launchd at a bundle that may not be here "
+              + "next login")
+        return false
+      }
+      NSLog("Intaglio Labs: \(label) is installed, not loaded, and points at "
+            + "something that is gone — re-rendering it rather than bootstrapping")
+      if installAgent(label) { return true }
+      NSLog("Intaglio Labs: could not re-render \(label) from the bundle")
+      return false
+    }
+    NSLog("Intaglio Labs: \(label) is installed but not loaded — bootstrapping it")
+    return bootstrap(plist)
   }
 
   /// WHAT THE LLAMA AGENT NEEDS, as a pure function of the three facts that
@@ -556,38 +605,11 @@ enum Provision {
         continue
       case .bootstrap:
         // A PLIST THAT NAMES SOMETHING THAT IS NOT THERE cannot be repaired by
-        // bootstrapping it: launchd takes the job, the job dies, and the next
-        // launch finds it unloaded and does the same thing again, for ever.
-        // Re-rendered from the bundle's template instead, which is what fixes
-        // the paths. installAgent boots out first, which is a no-op here.
-        guard let args = programArguments(of: plist),
-              agentProgramPathsExist(programArguments: args,
-                                     fileExists: { fm.fileExists(atPath: $0) })
-        else {
-          // ...AND ONLY FROM A BUNDLE THAT WILL STILL BE THERE TOMORROW
-          // (round-2 review, finding 4). installAgent bakes
-          // Bundle.main.resourceURL into @REPO@, and a launchd plist names a
-          // PATH rather than a commit — so re-rendering while this app is
-          // running from a mounted DMG or ~/Downloads writes a KeepAlive agent
-          // pointed at a volume that is about to be ejected or a folder the
-          // owner is about to empty. That is a worse stale plist than the one
-          // being repaired, and it is the hazard CLAUDE.md names: whatever is
-          // on disk at restart is what a privileged daemon executes.
-          guard runningFromPermanentInstall else {
-            NSLog("Intaglio Labs: \(label) points at something that is gone, and this "
-                  + "copy is not in /Applications — leaving the plist alone rather than "
-                  + "pointing launchd at a bundle that may not be here next login")
-            continue
-          }
-          NSLog("Intaglio Labs: \(label) is installed, not loaded, and points at "
-                + "something that is gone — re-rendering it rather than bootstrapping")
-          if !installAgent(label) {
-            NSLog("Intaglio Labs: could not re-render \(label) from the bundle")
-          }
-          continue
-        }
-        NSLog("Intaglio Labs: \(label) is installed but not loaded — bootstrapping it")
-        bootstrap(plist)
+        // bootstrapping it, and a re-render may only point launchd at a bundle
+        // that will still be there next login. Both rules live in
+        // reviveInstalledAgent, which the llama repair also reaches — one place,
+        // so the two cannot drift apart (round-4 review, finding 3).
+        reviveInstalledAgent(label, plist: plist)
       }
     }
   }
@@ -619,9 +641,17 @@ enum Provision {
   static func runtimeStaged(
     bundleHasLlama: Bool, node: Bool, libnode: Bool, llama: Bool
   ) -> Bool {
-    // Every agent's ProgramArguments[0] is ~/.hazlie/bin/node, and the wrapper
-    // build.sh ships resolves its dylib through @executable_path/../lib — so
-    // neither of these is optional for any of them.
+    // ~~"Every agent's ProgramArguments[0] is ~/.hazlie/bin/node"~~ — two of the
+    // three, and the round-4 review was right to ask. hermes and connect run
+    // node; llama-server runs its own binary, and
+    // ops/io.intaglio.llama-server.plist starts with that path instead
+    // (installAgent rewrites Homebrew's out of it). The conclusion is unchanged:
+    // hermes and connect are installed on every machine that has agents at all,
+    // and neither can start without node or the dylib build.sh's wrapper
+    // resolves through @executable_path/../lib. A wrong `false` here re-runs
+    // provision() and re-bootstraps every agent on every launch, so the claim
+    // is pinned against the templates themselves rather than left in this
+    // sentence — see backend-agents-relaunch.test.mjs.
     guard node, libnode else { return false }
     return bundleHasLlama ? llama : true
   }
@@ -669,34 +699,20 @@ enum Provision {
       }
       guard state != .ready else {
         // Provisioned, and the runtime its plists name is on disk (the owner's
-        // setup, or a previous run) — so what is left here is repair, and each
-        // of these is a thing "the plist exists" turned out not to answer.
-        //
-        // A missing secret first: installs provisioned by a build that only
-        // wrote hermes-token.txt have this plist yet lack llama-api-key.txt,
-        // leaving hermes and llama-server crash-looping under KeepAlive.
-        // Existing files are never touched, so this is a no-op when healthy.
-        do { try ensureSecrets() }
-        catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
-        repairLlamaAgent()
-        if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
-        // AND THE AGENTS THAT ARE INSTALLED BUT NOT RUNNING. The guard above
-        // asks whether a PLIST exists, which is not the same question as
-        // whether launchd has the job — see bootstrapUnloadedAgents.
-        //
-        // LAST, AFTER THE OTHER TWO REPAIRS (round-1 review, finding 6). Both of
-        // them move launchd jobs about: repairLlamaAgent installs one, and the
-        // legacy retirement boots old labels out and kickstarts the new ones. A
-        // sweep that ran first would be reading a picture those two were about
-        // to change, and would bootstrap against them. Running last means it
-        // sees what they left, and only has to be told about the agent
-        // repairLlamaAgent installed — launchd does not reliably answer "loaded"
-        // for one that young.
-        bootstrapUnloadedAgents()
+        // setup, or a previous run) — so what is left here is repair.
+        runInstalledRepairs()
         return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
         NSLog("Intaglio Labs: no bundled backend — a dev build without it, skipping provision")
+        // ...BUT NOT SKIPPING THE REPAIRS (round-4 review, finding 4). Before
+        // the runtime became part of the provisioned test, a dev build with
+        // plists took the branch above and got all three of them. Now it lands
+        // here, and "this build cannot stage a runtime" is no reason to also
+        // stop healing a missing secret or bootstrapping an agent launchd
+        // dropped — a repo-based machine with its own runtime is exactly that
+        // shape whenever ~/.hazlie is cleared out from under it.
+        if state == .runtimeMissing { runInstalledRepairs() }
         return
       }
       do {
@@ -705,6 +721,32 @@ enum Provision {
       }
       catch { NSLog("Intaglio Labs: provisioning failed: \(error)") }
     }
+  }
+
+  /// THE THREE REPAIRS A LAUNCH OWES AN INSTALL THAT ALREADY HAS ITS PLISTS.
+  ///
+  /// Its own function because two paths owe them: an install whose runtime is
+  /// staged, and a dev build that cannot stage one but still has the plists.
+  private static func runInstalledRepairs() {
+    // A missing secret first: installs provisioned by a build that only wrote
+    // hermes-token.txt have this plist yet lack llama-api-key.txt, leaving
+    // hermes and llama-server crash-looping under KeepAlive. Existing files are
+    // never touched, so this is a no-op when healthy.
+    do { try ensureSecrets() }
+    catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+    repairLlamaAgent()
+    if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
+    // AND THE AGENTS THAT ARE INSTALLED BUT NOT RUNNING. A plist existing is not
+    // the same question as launchd having the job — see bootstrapUnloadedAgents.
+    //
+    // LAST, AFTER THE OTHER TWO (round-1 review, finding 6). Both of them move
+    // launchd jobs about: repairLlamaAgent installs or bootstraps one, and the
+    // legacy retirement boots old labels out and kickstarts the new ones. A
+    // sweep that ran first would be reading a picture those two were about to
+    // change, and would bootstrap against them. Running last means it sees what
+    // they left — and it no longer has to be told about the llama agent, because
+    // it does not touch that label at all.
+    bootstrapUnloadedAgents()
   }
 
   /// Warm the native bridge runtime after launch, without creating any social
@@ -1179,8 +1221,11 @@ enum Provision {
     out.arguments = ["bootout", "gui/\(getuid())/\(label)"]
     try? out.run()
     out.waitUntilExit()
-    bootstrap(dst)
-    return true
+    // THE BOOTSTRAP'S OWN ANSWER, not "we got as far as calling it" (round-4
+    // review, finding 2). This used to return true for a plist launchd had
+    // refused, which told repairLlamaAgent's backoff ladder that a failed
+    // install had worked — the very thing that ladder exists to notice.
+    return bootstrap(dst)
   }
 
   /// Stop an agent and start it again from its current plist — what a changed
@@ -1193,12 +1238,19 @@ enum Provision {
     p.waitUntilExit()
   }
 
-  private static func bootstrap(_ plist: URL) {
+  /// ...AND WHETHER LAUNCHD TOOK IT (round-4 review, finding 2). ~~`try?` and a
+  /// wait, with the status thrown away~~: every caller then treated "we ran
+  /// launchctl" as "the agent is up", which is how a transient failure became a
+  /// spent once-per-launch attempt with a cleared backoff, and how installAgent
+  /// reported success for a plist launchd had refused.
+  @discardableResult
+  private static func bootstrap(_ plist: URL) -> Bool {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     p.arguments = ["bootstrap", "gui/\(getuid())", plist.path]
-    try? p.run()
+    do { try p.run() } catch { return false }
     p.waitUntilExit()
+    return p.terminationStatus == 0
   }
 
   // hermes /health is unauthenticated and answers exactly {"ok":true} once it

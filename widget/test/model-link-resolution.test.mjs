@@ -40,9 +40,17 @@ test('an already-provisioned install with weights and no llama agent gets the ag
   // is pinned in llama-repair-once.test.mjs; this file still pins that the
   // repair runs on the already-provisioned branch, before its return, which is
   // the branch a Mac with late-arriving weights takes.
-  const repair = ensure.indexOf('repairLlamaAgent()');
+  // ~~repairLlamaAgent() inline on that branch~~ — the three repairs an
+  // installed machine is owed moved into runInstalledRepairs() (2026-09-14),
+  // because a dev build that cannot stage a runtime owes the same three. What
+  // this test is about is unchanged: the repair is reached from the branch a Mac
+  // with late-arriving weights takes, before that branch returns.
+  const repair = ensure.indexOf('runInstalledRepairs()');
   const ret = ensure.indexOf('return\n      }', early);
-  assert.ok(early >= 0 && repair > early && ret > repair, 'the repair sits inside the already-provisioned branch, before its return');
+  assert.ok(early >= 0 && repair > early && ret > repair,
+    'the repair sits inside the already-provisioned branch, before its return');
+  assert.match(provision, /private static func runInstalledRepairs\(\) \{[\s\S]*?repairLlamaAgent\(\)/u,
+    'and that is what calls it');
 
   const body = /private static func repairLlamaAgent\(\) \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
   assert.ok(body, 'repairLlamaAgent not found');

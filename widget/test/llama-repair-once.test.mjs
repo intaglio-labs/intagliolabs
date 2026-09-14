@@ -49,8 +49,13 @@ test('the repair lives in one named place that ensureBackend calls', () => {
   assert.match(source, /private static func repairLlamaAgent\(\)/u,
     'the repair must be its own function; inline in ensureBackend there is nothing for a\n' +
     'lock or a once-flag to guard');
-  assert.match(bodyOf('static func ensureBackend() {'), /repairLlamaAgent\(\)/u,
-    'ensureBackend must still perform the repair on the already-provisioned branch');
+  // ~~called straight from ensureBackend~~ — the three repairs an installed
+  // machine is owed moved into runInstalledRepairs(), because a dev build that
+  // cannot stage a runtime owes the same three (round-4 review, finding 4).
+  assert.match(bodyOf('private static func runInstalledRepairs() {'), /repairLlamaAgent\(\)/u,
+    'the repair must still run for an install that already has its plists');
+  assert.match(bodyOf('static func ensureBackend() {'), /runInstalledRepairs\(\)/u,
+    'and ensureBackend must still be what reaches it');
 });
 
 test('the repair takes a lock and holds it across the install', () => {
@@ -75,10 +80,12 @@ test('the second caller of a launch does not repeat the install', () => {
     'a once-flag must short-circuit the second caller; the lock alone only makes the two\n' +
     'bootout/bootstrap pairs sequential rather than stopping the second');
   // The flag is no longer what serialises them -- see the test below -- so
-  // what has to hold is that a SUCCEEDED repair is never repeated.
-  const flag = body.indexOf('llamaRepairAttempted = true');
-  const install = body.indexOf('installAgent(llamaLabel)');
-  assert.ok(flag > 0 && install > 0, 'both the install and the flag must still be here');
+  // what has to hold is that a SUCCEEDED repair is never repeated. The flag
+  // itself moved into note(repair:as:) when the bootstrap branch had to obey the
+  // same rule (round-4 review, finding 1).
+  assert.match(body, /installAgent\(llamaLabel\)/u, 'the install must still be here');
+  assert.match(bodyOf('private static func note(repair worked: Bool, as what: String)'),
+    /llamaRepairAttempted = true/u, 'and the flag with it');
 });
 
 // A FAILED INSTALL IS NOT AN ATTEMPT SPENT (round-5 finding 21).
@@ -97,27 +104,37 @@ test('a failed install is retried, behind a backoff, rather than burning the lau
   // flag, and earlier in the file, so a whole-body indexOf finds that one and
   // says nothing about the ordering this test is here for.
   const body = bodyOf('private static func repairLlamaAgent() {');
-  const installBranch = body.slice(body.indexOf('case .install:'));
-  const install = installBranch.indexOf('installAgent(llamaLabel)');
-  const flag = installBranch.indexOf('llamaRepairAttempted = true');
-  assert.ok(install > 0 && flag > install,
-    'the once-flag must be set AFTER the install, inside its success branch: set before,\n' +
-    'a transient launchctl failure is indistinguishable from a repair that worked');
+  // ~~the flag textually after installAgent, inside its success branch~~ — both
+  // branches hand their OUTCOME to note(repair:as:) now, which is a stronger
+  // form of the same rule: the flag cannot be set by a caller that did not look
+  // (round-4 review, finding 1).
+  const note = bodyOf('private static func note(repair worked: Bool, as what: String)');
+  const flag = note.indexOf('llamaRepairAttempted = true');
+  const success = note.indexOf('if worked {');
+  const failure = note.indexOf('llamaRepairFailures += 1');
+  assert.ok(success >= 0 && flag > success && failure > flag,
+    'the flag lives inside the success branch, and the failure path is the one that\n' +
+    'counts and backs off');
+  assert.match(body, /note\(repair: installAgent\(llamaLabel\), as: "install"\)/u,
+    'the install hands its real answer over rather than assuming one');
 
-  assert.match(body, /llamaRepairNotBefore/u,
+  assert.match(note, /llamaRepairNotBefore/u,
     'a failure must leave a time before which the next try is pointless; without one the\n' +
     'retry is an unbounded launchctl loop on a machine where the install keeps failing');
   assert.match(body, /guard !llamaRepairAttempted, Date\(\) >= llamaRepairNotBefore else \{ return \}/u,
     'and that backoff must be checked in the same guard that checks the flag');
-  assert.match(body, /llamaRepairFailures \+= 1/u, 'the backoff must grow with the failures');
-  assert.match(body, /min\(\s*llamaRepairBackoffCeiling/u,
+  assert.match(note, /llamaRepairFailures \+= 1/u, 'the backoff must grow with the failures');
+  assert.match(note, /min\(\s*llamaRepairBackoffCeiling/u,
     'and be capped, so a permanently broken install backs off to a ceiling rather than to hours');
 });
 
 test('a Mac whose weights arrive later still gets its agent', () => {
   const body = bodyOf('private static func repairLlamaAgent() {');
   const guard = body.indexOf('ModelSetup.isInstalled');
-  const flag = body.indexOf('llamaRepairAttempted = true');
+  // The flag is raised inside note(repair:as:), which only the .install and
+  // .bootstrap branches reach — and llamaRepair() answers .none before either
+  // of them when there are no weights. Same property, expressed by the switch.
+  const flag = body.indexOf('note(repair:');
   assert.ok(guard > 0, 'the repair must still only run for an install that has weights');
   assert.ok(guard < flag,
     'the weights-and-no-plist guard must come BEFORE the flag is set. Marking the repair\n' +

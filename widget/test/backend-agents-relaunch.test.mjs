@@ -85,7 +85,10 @@ test('the already-provisioned branch acts on it, last', () => {
   // by backendState now, because a plist on its own said nothing about whether
   // the runtime it names was ever staged. See the live 2026-09-14 failure below.
   const guardAt = body.indexOf('guard state != .ready else');
-  const healAt = body.indexOf('bootstrapUnloadedAgents()');
+  // ~~the repairs inline on this branch~~ — they are runInstalledRepairs() now,
+  // because a dev build in `runtimeMissing` owes the same three (round-4 review,
+  // finding 4). Their order is pinned in that function's own test below.
+  const healAt = body.indexOf('runInstalledRepairs()');
   assert.ok(guardAt > 0, 'the repairs still sit behind one guard, on the healthy branch');
   assert.ok(healAt > guardAt,
     'the repair belongs on the branch that guard takes; that guard is the reason\n' +
@@ -99,10 +102,12 @@ test('the already-provisioned branch acts on it, last', () => {
   // boots old labels out and kickstarts the new ones — so a sweep that ran
   // first would read a picture they were about to change and bootstrap against
   // them.
-  const llamaAt = body.indexOf('repairLlamaAgent()');
-  const legacyAt = body.indexOf('retireLegacyBackendAgents()');
-  assert.ok(llamaAt > 0 && llamaAt < healAt, 'the llama repair runs before the sweep');
-  assert.ok(legacyAt > 0 && legacyAt < healAt, 'so does the legacy retirement');
+  const repairs = bodyOf('private static func runInstalledRepairs() {');
+  const llamaAt = repairs.indexOf('repairLlamaAgent()');
+  const legacyAt = repairs.indexOf('retireLegacyBackendAgents()');
+  const sweepAt = repairs.indexOf('bootstrapUnloadedAgents()');
+  assert.ok(llamaAt > 0 && llamaAt < sweepAt, 'the llama repair runs before the sweep');
+  assert.ok(legacyAt > 0 && legacyAt < sweepAt, 'so does the legacy retirement');
   // ~~and the one agent it must be told about is the one just installed~~ —
   // round-1 finding 6 handed the llama label from repairLlamaAgent to the sweep
   // so the sweep could skip it, which made the collision harmless without making
@@ -113,7 +118,7 @@ test('the already-provisioned branch acts on it, last', () => {
     'the sweep skips the llama label outright, by name');
   assert.doesNotMatch(sweep, /justInstalled|skipping/u,
     'a hand-over parameter with one possible value and no remaining caller');
-  assert.doesNotMatch(body, /skipping:/u);
+  assert.doesNotMatch(repairs, /skipping:/u);
 });
 
 test('a healthy Mac is a no-op, and a running service is never bounced', () => {
@@ -126,7 +131,10 @@ test('a healthy Mac is a no-op, and a running service is never bounced', () => {
     'a service launchd already has is not something a relaunch gets to restart');
   assert.match(body, /case \.notInstalled, \.loaded, \.unknown:\n\s*continue/u,
     'a probe that could not answer takes no action, like a healthy service');
-  assert.match(body, /bootstrap\(plist\)/u);
+  // ~~`bootstrap(plist)` here~~ — putting an agent back is reviveInstalledAgent's
+  // rule now, shared with the llama repair so the two cannot drift (round-4
+  // review, finding 3).
+  assert.match(body, /reviveInstalledAgent\(label, plist: plist\)/u);
   // No subprocess at all for an agent whose plist is absent: the probe is
   // short-circuited behind the file check.
   assert.match(body, /loaded: exists \? probeAgentLoaded\(label\) : nil/u,
@@ -175,8 +183,9 @@ test('a plist that points at something gone is re-rendered, not re-bootstrapped'
   assert.equal(pathsExist(['node', 'server.mjs'], []), false);
   assert.equal(pathsExist([], []), false);
 
-  // ...and the caller routes on it, to installAgent rather than bootstrap.
-  const caller = bodyOf("private static func bootstrapUnloadedAgents() {");
+  // ...and the one rule both callers share routes on it, to installAgent rather
+  // than bootstrap.
+  const caller = bodyOf("private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool");
   const guardAt = caller.indexOf('guard let args = programArguments(of: plist)');
   const bootstrapAt = caller.indexOf('bootstrap(plist)');
   assert.ok(guardAt > 0 && guardAt < bootstrapAt, 'validate before bootstrapping, not after');
@@ -420,12 +429,15 @@ test('one owner for that label, and the model test it already had', () => {
   assert.match(repair, /loaded: exists \? probeAgentLoaded\(llamaLabel\) : nil/u,
     'no plist, no launchctl call — the same short-circuit the sweep uses');
   assert.match(repair, /case \.none, \.unknown:\n\s*return/u);
-  assert.match(repair, /bootstrap\(plist\)/u, 'the unloaded case is handled here now');
+  assert.match(repair, /reviveInstalledAgent\(llamaLabel, plist: plist\)/u,
+    'the unloaded case is handled here now, through the shared revive rule');
   // Once per launch, like the install beside it: an agent that HAS weights and
-  // dies anyway gets one attempt a launch rather than one per ensureBackend.
+  // dies anyway gets one attempt a launch rather than one per ensureBackend —
+  // and, since round-4 finding 1, only when the attempt actually worked. Both
+  // branches go through note(repair:as:); see its own test.
   const bootstrapBranch = repair.slice(repair.indexOf('case .bootstrap:'),
                                        repair.indexOf('case .install:'));
-  assert.match(bootstrapBranch, /llamaRepairAttempted = true/u,
+  assert.match(bootstrapBranch, /note\(repair: /u,
     'or the bootstrap is the very loop this change closes, one level up');
 
   // ...and nowhere else touches the label. `installAgent(llamaLabel)` is pinned
@@ -434,4 +446,125 @@ test('one owner for that label, and the model test it already had', () => {
   assert.match(sweep, /label != llamaLabel/u);
   assert.match(swift, /static let llamaLabel = "io\.intaglio\.llama-server"/u,
     'named once, because provisioning, installAgent and the sweep all ask about it');
+});
+
+// ------------------------------- the claim runtimeStaged rests on
+
+// A WRONG `false` FROM runtimeStaged RE-RUNS provision() AND RE-BOOTSTRAPS EVERY
+// AGENT, ON EVERY LAUNCH. So the facts it treats as unconditional are pinned
+// against the plist templates rather than against a sentence in the comment
+// beside them — the round-4 review asked for exactly this, and asking turned up
+// that the sentence was wrong: llama-server does not run node.
+const programArguments = (label) => {
+  const xml = readFileSync(join(WIDGET, '..', 'ops', `${label}.plist`), 'utf8');
+  const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/u.exec(xml)?.[1];
+  assert.ok(array, `${label} has no ProgramArguments`);
+  return [...array.matchAll(/<string>([\s\S]*?)<\/string>/gu)].map((m) => m[1]);
+};
+
+test('node is unconditional because the two agents that always exist run it', () => {
+  for (const label of ['io.intaglio.hermes', 'io.intaglio.connect']) {
+    assert.equal(programArguments(label)[0], '@HOME@/.hazlie/bin/node',
+      `${label} runs the staged node, which is why runtimeStaged requires it`);
+  }
+  // ...and the third does NOT, which is what the comment used to claim.
+  // installAgent rewrites Homebrew's path to ~/.hazlie/llama/llama-server; either
+  // way it is not node, so the llama runtime is its own fact in that rule.
+  const llama = programArguments('io.intaglio.llama-server')[0];
+  assert.doesNotMatch(llama, /\/bin\/node$/u,
+    'llama-server runs its own binary; requiring node for ITS sake would be wrong\n' +
+    'even though requiring node overall is right');
+  assert.match(llama, /llama-server$/u);
+  assert.match(swift, /~~"Every agent's ProgramArguments\[0\] is ~\/\.hazlie\/bin\/node"~~/u,
+    'the sentence that said otherwise is struck through, not deleted');
+
+  // The three labels this file provisions are the three templates on disk.
+  const order = /private static let agentsInOrder = \[([^\]]*)\]/u.exec(swift)?.[1] ?? '';
+  assert.match(order, /"io\.intaglio\.hermes"/u);
+  assert.match(order, /llamaLabel/u);
+  assert.match(order, /"io\.intaglio\.connect"/u);
+});
+
+// ------------------------------- once per success, on both branches
+
+test('a bootstrap that launchd refused is not a spent attempt', () => {
+  // ROUND-4 REVIEW, FINDING 1. The bootstrap branch raised the once-per-launch
+  // flag and cleared the failure count BEFORE it acted, and without learning
+  // whether the act worked — reintroducing into this function the exact property
+  // round-5 finding 21 had removed from the install branch beside it.
+  const note = bodyOf('private static func note(repair worked: Bool, as what: String)');
+  assert.match(note, /if worked \{\n\s*llamaRepairAttempted = true\n\s*llamaRepairFailures = 0/u,
+    'the flag and the reset belong to success only');
+  assert.match(note, /llamaRepairFailures \+= 1/u, 'and a failure counts');
+  assert.match(note, /llamaRepairNotBefore = Date\(\)\.addingTimeInterval\(delay\)/u,
+    'behind the existing backoff, rather than proving nothing and resetting it');
+
+  // Both branches go through it, so neither can get this wrong on its own.
+  const repair = bodyOf('private static func repairLlamaAgent() {');
+  assert.match(repair, /note\(repair: reviveInstalledAgent\(llamaLabel, plist: plist\), as: "bootstrap"\)/u);
+  assert.match(repair, /note\(repair: installAgent\(llamaLabel\), as: "install"\)/u);
+  const bootstrapBranch = repair.slice(repair.indexOf('case .bootstrap:'),
+                                       repair.indexOf('case .install:'));
+  assert.doesNotMatch(bootstrapBranch, /llamaRepairAttempted = true/u,
+    'no branch sets the flag for itself any more');
+});
+
+test('launchctl bootstrap reports whether launchd took the job', () => {
+  // ROUND-4 REVIEW, FINDING 2. `try?` and a wait with the status discarded, so
+  // every caller read "we ran launchctl" as "the agent is up".
+  const boot = bodyOf('private static func bootstrap(_ plist: URL) -> Bool');
+  assert.match(boot, /do \{ try p\.run\(\) \} catch \{ return false \}/u,
+    'a launchctl that would not run is a failure, not a silent success');
+  assert.match(boot, /return p\.terminationStatus == 0/u);
+  assert.doesNotMatch(boot, /try\? p\.run\(\)/u);
+  // installAgent's answer is the bootstrap's answer: it used to return true for
+  // a plist launchd had refused, which told the backoff ladder a failed install
+  // had worked.
+  const install = bodyOf('static func installAgent(_ label: String) -> Bool');
+  assert.match(install, /return bootstrap\(dst\)/u);
+  assert.doesNotMatch(install, /bootstrap\(dst\)\n\s*return true/u);
+  // ...and the revive path hands its caller the same answer.
+  const revive = bodyOf('private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool');
+  assert.match(revive, /return bootstrap\(plist\)/u);
+});
+
+test('one rule for reviving an agent, and the llama branch takes it too', () => {
+  // ROUND-4 REVIEW, FINDING 3. The llama bootstrap branch had neither the
+  // stale-path check nor the where-does-this-app-live check the sweep applies,
+  // so it was the one bootstrap in the file that could loop on a plist naming
+  // nothing, or re-point launchd at a DMG.
+  const revive = bodyOf('private static func reviveInstalledAgent(_ label: String, plist: URL) -> Bool');
+  assert.match(revive, /agentProgramPathsExist\(/u);
+  assert.match(revive, /guard runningFromPermanentInstall else \{/u);
+  assert.match(revive, /installAgent\(label\)/u, 'a stale plist is re-rendered, not bootstrapped');
+  // Both callers reach it, so the rules cannot drift apart.
+  const sweep = bodyOf('private static func bootstrapUnloadedAgents() {');
+  assert.match(sweep, /reviveInstalledAgent\(label, plist: plist\)/u);
+  assert.doesNotMatch(sweep, /agentProgramPathsExist\(/u, 'the rule moved; it did not get copied');
+  const repair = bodyOf('private static func repairLlamaAgent() {');
+  assert.match(repair, /reviveInstalledAgent\(llamaLabel, plist: plist\)/u);
+});
+
+test('a dev build with plists still gets its repairs', () => {
+  // ROUND-4 REVIEW, FINDING 4. Before the runtime joined the provisioned test, a
+  // dev build with plists took the repair branch. Afterwards it fell past
+  // `.ready`, hit the no-bundled-backend guard and returned having done nothing
+  // — losing ensureSecrets, the llama repair and the sweep for every such
+  // machine, which is exactly the shape a repo-based install takes whenever
+  // ~/.hazlie is cleared out from under it.
+  const body = bodyOf('static func ensureBackend() {');
+  const devGuard = body.indexOf('no bundled backend');
+  assert.ok(devGuard > 0, 'the dev-build guard is still there');
+  const after = body.slice(devGuard);
+  assert.match(after, /if state == \.runtimeMissing \{ runInstalledRepairs\(\) \}/u,
+    'a build that cannot stage a runtime can still heal a secret and a dropped agent');
+  // One list of repairs, reached from both paths.
+  assert.equal((body.match(/runInstalledRepairs\(\)/gu) ?? []).length, 2);
+  const repairs = bodyOf('private static func runInstalledRepairs() {');
+  for (const step of ['ensureSecrets', 'repairLlamaAgent', 'bootstrapUnloadedAgents']) {
+    assert.match(repairs, new RegExp(step, 'u'), `${step} is one of the three`);
+  }
+  const llamaAt = repairs.indexOf('repairLlamaAgent()');
+  const sweepAt = repairs.indexOf('bootstrapUnloadedAgents()');
+  assert.ok(llamaAt > 0 && sweepAt > llamaAt, 'the sweep still runs last');
 });
