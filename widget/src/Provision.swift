@@ -8,10 +8,23 @@ import Foundation
 // SAFE BY DEFAULT. Once the connect agent exists in ~/Library/LaunchAgents —
 // true on the owner's repo-based setup and after any prior provision — the
 // whole copy-and-bootstrap path is skipped, so it never clobbers a working
-// machine. The one thing every launch still ensures is the secret files
-// (ensureSecrets): generation is per-file and only-if-missing, so installs
-// provisioned by a build that predates llama-api-key.txt gain the key on
-// upgrade instead of crash-looping forever, and a healthy machine sees a
+// machine. ~~The one thing every launch still ensures is the secret files~~ —
+// there are three, and each is there because "the plist exists" turned out to
+// answer a narrower question than the skip assumed:
+//
+//   ensureSecrets — generation is per-file and only-if-missing, so installs
+//   provisioned by a build that predates llama-api-key.txt gain the key on
+//   upgrade instead of crash-looping forever.
+//
+//   repairLlamaAgent — a plist that provisioning legitimately skipped, for
+//   weights that arrived later.
+//
+//   bootstrapUnloadedAgents — a plist that is here while launchd has no job for
+//   it. Booting the agents out by hand and leaving their plists survived a quit
+//   and a relaunch (2026-09-14), because every install path bootstraps only at
+//   the moment it WRITES a plist.
+//
+// All three are only-if-missing in their own way, so a healthy machine sees a
 // no-op.
 enum Provision {
   private static let fm = FileManager.default
@@ -265,6 +278,93 @@ enum Provision {
     }
   }
 
+  /// WHAT A RELAUNCH SHOULD DO ABOUT ONE INSTALLED AGENT, as a pure function of
+  /// the two facts that decide it. Separate from the launchctl calls so the
+  /// decision can be read and tested without a launchd on the other end.
+  enum AgentAction: String {
+    /// No plist here. Provisioning and installAgent own that case, not this
+    /// repair — inventing an agent would be a different function's job.
+    case notInstalled
+    /// launchd has it. Nothing to do, and deliberately NOT a kickstart: a
+    /// running service is not something a launch gets to bounce.
+    case loaded
+    /// The plist is here and launchd does not have the job. Put it back.
+    case bootstrap
+  }
+
+  static func agentAction(plistExists: Bool, loaded: Bool) -> AgentAction {
+    guard plistExists else { return .notInstalled }
+    return loaded ? .loaded : .bootstrap
+  }
+
+  /// Is `label` a job launchd currently knows about?
+  ///
+  /// `launchctl print` rather than `launchctl list`: list prints EVERY job on the
+  /// Mac and has to have its pipe drained before the wait or it deadlocks on a
+  /// full buffer (Uninstall.loadedLabels carries that trap in a comment). With
+  /// three labels to ask about, a per-label probe with both streams discarded is
+  /// smaller in every direction.
+  ///
+  /// A launchctl we could not run at all answers "loaded", so a broken probe
+  /// does nothing rather than bootstrapping on a guess.
+  private static func isAgentLoaded(_ label: String) -> Bool {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["print", "gui/\(getuid())/\(label)"]
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { return true }
+    p.waitUntilExit()
+    return p.terminationStatus == 0
+  }
+
+  /// A PLIST ON DISK IS NOT A SERVICE LAUNCHD IS RUNNING, and until now this
+  /// file only ever asked the first question.
+  ///
+  /// ensureBackend's fast path returns the moment `io.intaglio.connect.plist`
+  /// exists, and every other install path bootstraps only at the moment it
+  /// WRITES a plist. So a machine whose agents have been booted out with their
+  /// plists left in place stays that way across quit and relaunch: on 2026-09-14
+  /// `launchctl bootout gui/501/io.intaglio.hermes` and `...connect` by hand left
+  /// only llama-server and the app in `launchctl list`, and quitting and
+  /// relaunching brought neither back. The connectors child then failed its
+  /// connect-health preflight (127.0.0.1:51788/api/status unreachable) and logged
+  /// `daemon_failed_to_start`; a manual `launchctl bootstrap` of both plists was
+  /// the whole fix. The plists name a path and launchd reloads them at login, so
+  /// the state also heals itself at the next LOGIN — which is a long time to have
+  /// no database.
+  ///
+  /// SEEN BY HAND, AND REACHABLE WITHOUT HANDS. Nothing in the app boots a
+  /// service out and leaves its plist on purpose: Uninstall.run removes the plist
+  /// straight after the bootout. But it appends a failure and CONTINUES when that
+  /// removal throws ("was stopped but its plist stayed"), and a failed uninstall
+  /// deliberately leaves the app running — which is exactly this state, in
+  /// product, with the owner still using it.
+  ///
+  /// Cheap and idempotent: three `launchctl print`s on a healthy Mac, no
+  /// subprocess at all for an agent whose plist is absent, and no kickstart of
+  /// anything that is already up. The connectors child needs no special handling
+  /// — its preflight failure respawns it after 4, 8 then 16 seconds, by which
+  /// time these have landed.
+  private static func bootstrapUnloadedAgents() {
+    for label in agentsInOrder {
+      let plist = launchAgents.appendingPathComponent("\(label).plist")
+      let exists = fm.fileExists(atPath: plist.path)
+      // Short-circuited: no plist, no launchctl call.
+      switch agentAction(plistExists: exists, loaded: exists && isAgentLoaded(label)) {
+      case .notInstalled, .loaded:
+        continue
+      case .bootstrap:
+        NSLog("Intaglio Labs: \(label) is installed but not loaded — bootstrapping it")
+        bootstrap(plist)
+        // The same wait provision() takes, for the same reason: hermes migrates
+        // and opens the database, and connect and the reader must not arrive at
+        // one that is still opening. agentsInOrder puts hermes first.
+        if label == "io.intaglio.hermes" { waitForHermes() }
+      }
+    }
+  }
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("io.intaglio.connect.plist")
@@ -277,6 +377,10 @@ enum Provision {
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
         repairLlamaAgent()
+        // AND THE AGENTS THAT ARE INSTALLED BUT NOT RUNNING. The guard above
+        // asks whether a PLIST exists, which is not the same question as
+        // whether launchd has the job — see bootstrapUnloadedAgents.
+        bootstrapUnloadedAgents()
         if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         return
       }
