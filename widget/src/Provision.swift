@@ -316,6 +316,20 @@ enum Provision {
 
   /// How long launchctl gets to answer one question about one label.
   private static let agentProbeTimeout: TimeInterval = 3
+  /// ...and how long a probe that overran gets to die after its SIGTERM.
+  private static let agentProbeReapTimeout: TimeInterval = 1
+
+  /// Is this copy of the app somewhere a launchd plist may safely name?
+  ///
+  /// The same test Bridge's `prefs` reports as `inApplications` and the same one
+  /// main.swift's stale-copy delete requires. A fresh download runs from
+  /// ~/Downloads or a mounted DMG, and onboarding's first screen offers the move
+  /// for exactly that reason — so "is it in /Applications" is already this app's
+  /// word for "is this where it lives". Named here so a third call site does not
+  /// re-derive it.
+  static var runningFromPermanentInstall: Bool {
+    Bundle.main.bundlePath.hasPrefix("/Applications/")
+  }
 
   /// DOES THIS PLIST STILL POINT AT FILES THAT ARE THERE?
   ///
@@ -383,6 +397,18 @@ enum Provision {
     while p.isRunning, Date() < deadline { usleep(50_000) }
     guard !p.isRunning else {
       p.terminate()
+      // AND WAIT FOR IT TO ACTUALLY GO (round-2 review, finding 5). terminate()
+      // is a SIGTERM and an immediate return, so returning here left a child
+      // this process still owns — on a launch path that runs again at every
+      // Full Disk Access edge, which is how one wedged launchctl becomes
+      // several. launchctl does not ignore SIGTERM, so this is a formality on
+      // every machine but the one that needs it; still bounded, because an
+      // unbounded wait is the thing this whole function exists to avoid.
+      let goneBy = Date().addingTimeInterval(agentProbeReapTimeout)
+      while p.isRunning, Date() < goneBy { usleep(50_000) }
+      if p.isRunning {
+        NSLog("Intaglio Labs: a launchctl probe for \(label) would not stop")
+      }
       NSLog("Intaglio Labs: launchctl did not say whether \(label) is loaded in "
             + "\(Int(agentProbeTimeout))s — leaving it alone")
       return nil
@@ -451,6 +477,21 @@ enum Provision {
               agentProgramPathsExist(programArguments: args,
                                      fileExists: { fm.fileExists(atPath: $0) })
         else {
+          // ...AND ONLY FROM A BUNDLE THAT WILL STILL BE THERE TOMORROW
+          // (round-2 review, finding 4). installAgent bakes
+          // Bundle.main.resourceURL into @REPO@, and a launchd plist names a
+          // PATH rather than a commit — so re-rendering while this app is
+          // running from a mounted DMG or ~/Downloads writes a KeepAlive agent
+          // pointed at a volume that is about to be ejected or a folder the
+          // owner is about to empty. That is a worse stale plist than the one
+          // being repaired, and it is the hazard CLAUDE.md names: whatever is
+          // on disk at restart is what a privileged daemon executes.
+          guard runningFromPermanentInstall else {
+            NSLog("Intaglio Labs: \(label) points at something that is gone, and this "
+                  + "copy is not in /Applications — leaving the plist alone rather than "
+                  + "pointing launchd at a bundle that may not be here next login")
+            continue
+          }
           NSLog("Intaglio Labs: \(label) is installed, not loaded, and points at "
                 + "something that is gone — re-rendering it rather than bootstrapping")
           if !installAgent(label) {

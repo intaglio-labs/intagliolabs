@@ -183,6 +183,26 @@ test('a plist that points at something gone is re-rendered, not re-bootstrapped'
   const reader = bodyOf('private static func programArguments(of plist: URL) -> [String]?');
   assert.match(reader, /PropertyListSerialization/u);
   assert.match(reader, /else \{ return nil \}/u);
+
+  // ROUND-2 REVIEW, FINDING 4. installAgent bakes Bundle.main.resourceURL into
+  // @REPO@, and a launchd plist names a PATH rather than a commit — so
+  // re-rendering while this app runs from a mounted DMG or ~/Downloads writes a
+  // KeepAlive agent pointed at a volume about to be ejected. That is a worse
+  // stale plist than the one being repaired, and it is the deployment hazard
+  // CLAUDE.md names: whatever is on disk at restart is what a privileged daemon
+  // executes.
+  const rerender = caller.slice(guardAt, bootstrapAt);
+  const permanentAt = rerender.indexOf('guard runningFromPermanentInstall else');
+  const installAt = rerender.indexOf('installAgent(label)');
+  assert.ok(permanentAt > 0 && permanentAt < installAt,
+    'the where-does-this-app-live test comes BEFORE the re-render, or the plist is\n' +
+    'already pointing at the DMG');
+  // The same test Bridge reports as `inApplications` and main.swift's stale-copy
+  // delete requires — named once here rather than re-derived a third time.
+  const permanent = /static var runningFromPermanentInstall: Bool \{\n([\s\S]*?)\n  \}/u
+    .exec(swift)?.[1] ?? '';
+  assert.ok(permanent, 'runningFromPermanentInstall not found');
+  assert.match(code(permanent), /Bundle\.main\.bundlePath\.hasPrefix\("\/Applications\/"\)/u);
 });
 
 test('the probe asks about one label, is bounded, and cannot deadlock on its output', () => {
@@ -202,6 +222,17 @@ test('the probe asks about one label, is bounded, and cannot deadlock on its out
   assert.match(body, /Date\(\)\.addingTimeInterval\(agentProbeTimeout\)/u);
   assert.match(body, /while p\.isRunning, Date\(\) < deadline/u);
   assert.match(body, /guard !p\.isRunning else \{/u, 'a probe that overran is killed, not awaited');
+  // ...AND IT IS WAITED FOR AFTER THE KILL (round-2 review, finding 5).
+  // terminate() is a SIGTERM and an immediate return, so returning straight
+  // after it left a child this process still owns — on a path that runs again
+  // at every Full Disk Access edge, which is how one wedged launchctl becomes
+  // several. Bounded too: an unbounded wait is what this function exists to
+  // avoid.
+  const overran = body.slice(body.indexOf('p.terminate()'));
+  assert.match(overran, /while p\.isRunning, Date\(\) < goneBy/u,
+    'terminate alone does not reap; the child has to be seen to go');
+  assert.match(swift, /private static let agentProbeReapTimeout: TimeInterval = \d+/u,
+    'and that wait is bounded by its own named constant');
   // Both failures answer "could not tell", so neither leads to an action.
   assert.match(body, /do \{ try p\.run\(\) \} catch \{ return nil \}/u);
   assert.match(body, /return nil/u);
