@@ -666,36 +666,53 @@ enum Provision {
 
   /// Is everything the installed agents NAME under ~/.hazlie actually there?
   ///
-  /// Pure, with the four facts passed in. `bundleHasLlama` is what keeps this
-  /// from being a re-provisioning loop: provision() stages the llama runtime
-  /// only when the bundle carries one, so a build without it must not be asked
-  /// for a file it can never produce.
+  /// Pure, with the facts passed in. EVERY OPTIONAL PIECE IS ASKED OF THE BUNDLE
+  /// FIRST, and that is the whole shape of this function: provision() stages a
+  /// thing only when the bundle carries it, so anything demanded that the bundle
+  /// cannot produce is a `false` that never becomes true — and a permanent
+  /// `false` here re-runs provision() and re-bootstraps every agent on EVERY
+  /// launch. That is not a hypothetical; see bundleHasLibnode.
   static func runtimeStaged(
-    bundleHasLlama: Bool, node: Bool, libnode: Bool, llama: Bool
+    bundleHasLibnode: Bool, bundleHasLlama: Bool, node: Bool, libnode: Bool, llama: Bool
   ) -> Bool {
     // ~~"Every agent's ProgramArguments[0] is ~/.hazlie/bin/node"~~ — two of the
     // three, and the round-4 review was right to ask. hermes and connect run
     // node; llama-server runs its own binary, and
     // ops/io.intaglio.llama-server.plist starts with that path instead
-    // (installAgent rewrites Homebrew's out of it). The conclusion is unchanged:
-    // hermes and connect are installed on every machine that has agents at all,
-    // and neither can start without node or the dylib build.sh's wrapper
-    // resolves through @executable_path/../lib. A wrong `false` here re-runs
-    // provision() and re-bootstraps every agent on every launch, so the claim
-    // is pinned against the templates themselves rather than left in this
-    // sentence — see backend-agents-relaunch.test.mjs.
-    guard node, libnode else { return false }
+    // (installAgent rewrites Homebrew's out of it). Those two are installed on
+    // every machine that has agents at all, so node itself is unconditional.
+    //
+    // ~~"and neither can start without … the dylib build.sh's wrapper resolves
+    // through @executable_path/../lib"~~ — FALSE OF THE NODE THIS BUNDLE SHIPS,
+    // and it cost a live regression. build.sh stages a libnode only when
+    // `otool -L` on the wrapper names one (LIBREF, build.sh's node stanza); the
+    // node being shipped is a statically linked 117 MB Mach-O whose only
+    // references are system frameworks, so `backend/node/lib/` is EMPTY and
+    // provision() copies nothing into ~/.hazlie/lib. Demanding a libnode
+    // therefore made runtimeStagedHere false on every fresh install, for ever.
+    // The owner's own machine hid it: that home still carries a
+    // libnode.147.dylib from a build in August, when node was dynamically
+    // linked. So the dylib is required only when there is one to require.
+    guard node else { return false }
+    if bundleHasLibnode, !libnode { return false }
     return bundleHasLlama ? llama : true
   }
 
+  /// Does a directory hold a libnode dylib? Asked of the BUNDLE and of the data
+  /// home with the same rule, because the question is "did the copy happen", and
+  /// a name the source did not have is not one the destination can be missing.
+  private static func hasLibnode(_ directory: URL) -> Bool {
+    ((try? fm.contentsOfDirectory(atPath: directory.path)) ?? [])
+      .contains { $0.hasPrefix("libnode") }
+  }
+
   private static var runtimeStagedHere: Bool {
-    let libDir = hazlie.appendingPathComponent("lib").path
-    let libs = (try? fm.contentsOfDirectory(atPath: libDir)) ?? []
-    return runtimeStaged(
+    runtimeStaged(
+      bundleHasLibnode: hasLibnode(backend.appendingPathComponent("node/lib")),
       bundleHasLlama: fm.fileExists(
         atPath: backend.appendingPathComponent("llama/bin/llama-server").path),
       node: fm.fileExists(atPath: hazlie.appendingPathComponent("bin/node").path),
-      libnode: libs.contains { $0.hasPrefix("libnode") },
+      libnode: hasLibnode(hazlie.appendingPathComponent("lib")),
       llama: fm.fileExists(atPath: hazlie.appendingPathComponent("llama/llama-server").path))
   }
 

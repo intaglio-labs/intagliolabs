@@ -290,11 +290,21 @@ const backendState = (connectPlistExists, runtimeStaged) => {
   return runtimeStaged ? 'ready' : 'runtimeMissing';
 };
 
-// `bundleHasLlama` is what keeps this from being a re-provisioning loop:
-// provision() stages the llama runtime only when the bundle carries one, so a
-// build without it must not be asked for a file it can never produce.
-const runtimeStaged = (bundleHasLlama, node, libnode, llama) => {
-  if (!node || !libnode) return false;
+// EVERY OPTIONAL PIECE IS ASKED OF THE BUNDLE FIRST. provision() stages a thing
+// only when the bundle carries it, so anything demanded that the bundle cannot
+// produce is a `false` that never becomes true — and a permanent false here
+// re-runs provision() and re-bootstraps every agent on EVERY launch.
+//
+// That is not hypothetical. Requiring a libnode unconditionally shipped, and
+// broke every fresh install: build.sh stages one only when `otool -L` on the
+// wrapper names one, and the node being shipped is a statically linked 117 MB
+// Mach-O referencing nothing but system frameworks — so backend/node/lib/ is
+// empty and ~/.hazlie/lib stays empty too. The owner's own machine hid it,
+// carrying a libnode.147.dylib from an August build when node was still
+// dynamically linked.
+const runtimeStaged = (bundleHasLibnode, bundleHasLlama, node, libnode, llama) => {
+  if (!node) return false;
+  if (bundleHasLibnode && !libnode) return false;
   return bundleHasLlama ? llama : true;
 };
 
@@ -315,32 +325,53 @@ test('a plist with no runtime under it is provisioned, not repaired', () => {
 
 test('the runtime test names every file the agents actually run', () => {
   const rule = bodyOf('static func runtimeStaged(');
-  assert.match(rule, /guard node, libnode else \{ return false \}/u,
-    'every agent runs ~/.hazlie/bin/node, and build.sh points its wrapper at\n' +
-    '@executable_path/../lib for the dylib — neither is optional for any of them');
+  assert.match(rule, /guard node else \{ return false \}/u,
+    'hermes and connect both run ~/.hazlie/bin/node and are on every machine that\n' +
+    'has agents at all, so node itself is unconditional');
+  assert.match(rule, /if bundleHasLibnode, !libnode \{ return false \}/u,
+    'the dylib is required only when the bundle ships one to stage');
   assert.match(rule, /return bundleHasLlama \? llama : true/u,
     'a bundle with no llama runtime must not be asked for one, or every launch\n' +
     're-provisions and every launch bounces the agents');
 
   // The live shape: the plists' interpreter is simply not there.
-  assert.equal(runtimeStaged(true, false, false, false), false);
-  assert.equal(runtimeStaged(true, false, true, true), false);
-  // A staged node whose dylib went with a half-deleted home.
-  assert.equal(runtimeStaged(true, true, false, true), false);
+  assert.equal(runtimeStaged(true, true, false, false, false), false);
+  assert.equal(runtimeStaged(true, true, false, true, true), false);
+  // A staged node whose dylib went with a half-deleted home, on a build that
+  // ships one to lose.
+  assert.equal(runtimeStaged(true, true, true, false, true), false);
+  // THE REGRESSION: this bundle's node is statically linked, so it ships no
+  // libnode, backend/node/lib is empty, and ~/.hazlie/lib stays empty too.
+  // Demanding one made every fresh install re-provision on every launch, for
+  // ever, and re-bootstrap all three agents each time.
+  assert.equal(runtimeStaged(false, false, true, false, false), true,
+    'no libnode to stage means no libnode to miss');
+  assert.equal(runtimeStaged(false, true, true, false, true), true);
   // Node is fine and the llama runtime this bundle ships was never staged.
-  assert.equal(runtimeStaged(true, true, true, false), false);
-  // ...and the same machine, from a build that ships no llama runtime.
-  assert.equal(runtimeStaged(false, true, true, false), true);
-  assert.equal(runtimeStaged(true, true, true, true), true);
+  assert.equal(runtimeStaged(false, true, true, false, false), false);
+  assert.equal(runtimeStaged(true, true, true, true, true), true);
 
-  // The reader of those four facts asks about the bundle, not about a flag.
+  // The reader of those facts asks the BUNDLE about each optional piece, and
+  // asks the data home the same question with the same rule.
   const probe = /private static var runtimeStagedHere: Bool \{\n([\s\S]*?)\n  \}/u
     .exec(swift)?.[1] ?? '';
   assert.ok(probe, 'runtimeStagedHere not found');
+  assert.match(code(probe), /bundleHasLibnode: hasLibnode\(backend\.appendingPathComponent\("node\/lib"\)\)/u,
+    'the bundle is what build.sh either did or did not put a dylib into');
   assert.match(code(probe), /backend\.appendingPathComponent\("llama\/bin\/llama-server"\)/u);
   assert.match(code(probe), /hazlie\.appendingPathComponent\("bin\/node"\)/u);
-  assert.match(code(probe), /\$0\.hasPrefix\("libnode"\)/u,
+  assert.match(code(probe), /libnode: hasLibnode\(hazlie\.appendingPathComponent\("lib"\)\)/u);
+  // ONE RULE FOR BOTH SIDES, and the same rule the copier uses. hasLibnode is
+  // asked of the bundle and of the data home, so a name the source did not have
+  // is not one the destination can be missing — and provision()'s own staging
+  // loop selects by the same prefix, so the checker cannot look for something
+  // the copier would not have copied.
+  const helper = bodyOf('private static func hasLibnode(_ directory: URL) -> Bool');
+  assert.match(helper, /\$0\.hasPrefix\("libnode"\)/u,
     'the dylib is versioned, so it is matched by prefix rather than named');
+  const stage = bodyOf('private static func provision() throws {');
+  assert.match(stage, /lib\.lastPathComponent\.hasPrefix\("libnode"\)/u,
+    'the copier picks by the same prefix the check asks about');
 });
 
 test('a missing runtime takes the full path, and never a re-render alone', () => {
