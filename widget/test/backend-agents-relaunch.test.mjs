@@ -197,12 +197,23 @@ test('a plist that points at something gone is re-rendered, not re-bootstrapped'
   assert.ok(permanentAt > 0 && permanentAt < installAt,
     'the where-does-this-app-live test comes BEFORE the re-render, or the plist is\n' +
     'already pointing at the DMG');
-  // The same test Bridge reports as `inApplications` and main.swift's stale-copy
-  // delete requires — named once here rather than re-derived a third time.
   const permanent = /static var runningFromPermanentInstall: Bool \{\n([\s\S]*?)\n  \}/u
     .exec(swift)?.[1] ?? '';
   assert.ok(permanent, 'runningFromPermanentInstall not found');
-  assert.match(code(permanent), /Bundle\.main\.bundlePath\.hasPrefix\("\/Applications\/"\)/u);
+  assert.match(code(permanent), /path\.hasPrefix\("\/Applications\/"\)/u);
+  // BOTH APPLICATIONS FOLDERS (round-3 review, finding 1). Bridge's
+  // `inApplications` and main.swift's stale-copy delete check only the system
+  // one, and are right to: both are about the move THIS app offers, and that
+  // move has one destination. The question here is different — will this path
+  // still be there at the next login — and ~/Applications answers yes just as
+  // well; staleGrantBundle already looks for a previous install in both places.
+  // Accepting only one left a per-user install unable to re-render a stale
+  // plist, so its reader stayed dead until the next login.
+  assert.match(code(permanent), /path\.hasPrefix\("\\\(home\)\/Applications\/"\)/u,
+    'a per-user install is a real install; ask about both folders');
+  assert.match(code(permanent), /homeDirectoryForCurrentUser/u,
+    'the home is read rather than spelled out — a literal /Users/… would be wrong\n' +
+    'under a relocated home, or one that resolves through /private');
 });
 
 test('the probe asks about one label, is bounded, and cannot deadlock on its output', () => {

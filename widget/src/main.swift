@@ -1716,10 +1716,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   /// handed it back when the flow ended. linkedInExportOffered has guarded
   /// against the scrim since the day it was written; this is the other order,
   /// and it was only ever fixed for the card.
+  /// AND A PANEL WITH NO OFFER BEHIND IT IS A RESULT, NOT AN OFFER — leave it
+  /// (round-3 review, finding 2).
+  ///
+  /// Between the owner answering and the panel going away, export.js is showing
+  /// what happened: "N connections imported.", on a three-second timer it closes
+  /// itself with, or a failure with no timer at all, which is the one place the
+  /// owner can read why their press did nothing. Both states have had their
+  /// offer retired already, so `presentedExportOffer` and `deferredExportOffer`
+  /// are both nil — and the old shape ordered the panel out anyway, storing
+  /// nothing. Pressing the orb during those three seconds deleted the count
+  /// mid-sentence, with nothing to hand back afterwards.
+  ///
+  /// Holding it instead would not help: what the hold carries is a NAME, and
+  /// re-showing from a name re-pulls `exportOffer`, which is empty by then, so
+  /// the page would close itself and the result would be just as gone. Leaving
+  /// it is the only option that keeps the sentence.
+  ///
+  /// What that costs is a failure message able to end up behind a card the owner
+  /// opens next — worth less than deleting it, and recoverable by closing the
+  /// card. A success is gone in three seconds on its own.
   private func standExportOfferAside() {
     dispatchPrecondition(condition: .onQueue(.main))
     guard let p = exportPanel, p.isVisible else { return }
-    if deferredExportOffer == nil { deferredExportOffer = presentedExportOffer }
+    guard let held = deferredExportOffer ?? presentedExportOffer else { return }
+    deferredExportOffer = held
     p.orderOut(nil)
   }
 

@@ -321,14 +321,26 @@ enum Provision {
 
   /// Is this copy of the app somewhere a launchd plist may safely name?
   ///
-  /// The same test Bridge's `prefs` reports as `inApplications` and the same one
-  /// main.swift's stale-copy delete requires. A fresh download runs from
-  /// ~/Downloads or a mounted DMG, and onboarding's first screen offers the move
-  /// for exactly that reason — so "is it in /Applications" is already this app's
-  /// word for "is this where it lives". Named here so a third call site does not
-  /// re-derive it.
+  /// A fresh download runs from ~/Downloads or a mounted DMG, and onboarding's
+  /// first screen offers the move for exactly that reason — so "is it in an
+  /// Applications folder" is already this app's word for "is this where it
+  /// lives". Named here so a third call site does not re-derive it.
+  ///
+  /// BOTH APPLICATIONS FOLDERS (round-3 review, finding 1). ~~`/Applications/`
+  /// alone~~, taken from Bridge's `inApplications` and main.swift's stale-copy
+  /// delete — where it is the right test, because both of those are about the
+  /// move THIS app offers and that move has one destination. The question here is
+  /// a different one: will this path still be here at the next login, and
+  /// `~/Applications` answers yes just as well. macOS has installed per-user for
+  /// as long as it has had a home directory, and staleGrantBundle already looks
+  /// for a previous install in both places. Accepting only one left a per-user
+  /// install unable to re-render a stale plist OR to bootstrap an unloaded agent
+  /// — so its reader stayed dead until the next login, which is the exact failure
+  /// this repair was written for.
   static var runningFromPermanentInstall: Bool {
-    Bundle.main.bundlePath.hasPrefix("/Applications/")
+    let path = Bundle.main.bundlePath
+    let home = fm.homeDirectoryForCurrentUser.path
+    return path.hasPrefix("/Applications/") || path.hasPrefix("\(home)/Applications/")
   }
 
   /// DOES THIS PLIST STILL POINT AT FILES THAT ARE THERE?

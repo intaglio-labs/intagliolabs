@@ -441,9 +441,25 @@ test('an offer and the reconnect card never share the corner', () => {
   const aside = /private func standExportOfferAside\(\) \{\n([\s\S]*?)\n  \}/u
     .exec(mainSwift)?.[1] ?? '';
   assert.ok(aside, 'standExportOfferAside not found');
-  assert.match(code(aside), /deferredExportOffer = presentedExportOffer/u,
+  assert.match(code(aside), /deferredExportOffer \?\? presentedExportOffer/u,
     'the name has to survive the hide, or the offer comes back empty');
   assert.match(code(aside), /orderOut\(nil\)/u);
+
+  // ...AND A PANEL WITH NO OFFER BEHIND IT IS A RESULT, NOT AN OFFER (round-3
+  // review, finding 2). Between the answer and the panel going away, export.js
+  // is showing "N connections imported." on a three-second timer, or a failure
+  // with no timer at all — the one place the owner can read why their press did
+  // nothing. Both have had their offer retired already, so both held names are
+  // nil, and ordering the panel out then stored nothing and handed nothing
+  // back: pressing the orb deleted the count mid-sentence.
+  //
+  // Holding it would not have helped either. What the hold carries is a NAME,
+  // and re-showing from a name re-pulls exportOffer, which is empty by then —
+  // the page would close itself and the result would be just as gone.
+  const heldAt = code(aside).indexOf('guard let held');
+  const orderAt = code(aside).indexOf('orderOut(nil)');
+  assert.ok(heldAt > 0 && heldAt < orderAt,
+    'nothing to hold means nothing to hide: the guard comes before the orderOut');
 
   // AND THE SCRIM USES THE SAME HOLD (round-1 review, finding 8).
   //
