@@ -368,12 +368,24 @@ test('the reader is started, with its config, on the main queue', () => {
   // .main. acceptLinkedInFiles runs on a background queue, so it hops.
   // `_ =` because the call answers whether the reader came up now, and this
   // call site is the import's fire-and-forget one.
-  // ONE HOP, TWO ERRANDS. The announcement to the surfaces joined it here
-  // rather than taking a second dispatch: both are main-thread work owed at
-  // exactly the same moment, and splitting them would let a repaint run before
-  // the reader it is repainting about had been asked to start.
-  assert.match(accept,
-    /DispatchQueue\.main\.async \{ \[weak self\] in\n\s*_ = self\?\.startReadingSources\(\)/u);
+  // ONE HOP, EVERY ERRAND. The announcement to the surfaces joined it here
+  // rather than taking a second dispatch, and so did retiring a pending offer
+  // for the file this import has just installed (2026-09-14). All of them are
+  // main-thread work owed at exactly the same moment, and splitting them would
+  // let a repaint run before the reader it is repainting about had been asked
+  // to start.
+  //
+  // ~~pinned as the line immediately after the hop opens~~ — that adjacency
+  // broke the moment a third errand went in front of it, while every property
+  // this test is actually about still held. What matters is that there is ONE
+  // hop and that the reader is started inside it.
+  const hop = /DispatchQueue\.main\.async \{ \[weak self\] in\n([\s\S]*?)\n {4}\}/u
+    .exec(accept)?.[1] ?? '';
+  assert.ok(hop, 'the main-queue hop is gone');
+  assert.equal((accept.match(/DispatchQueue\.main\.async/gu) ?? []).length, 1,
+    'a second dispatch is how a repaint gets ahead of the start it describes');
+  assert.match(hop, /startReadingSources\(\)/u,
+    'the reader is started on main, through the path that writes the config');
   assert.doesNotMatch(accept, /(?<!\.)\bConnectors\.shared\.start\(\)/u,
     'the bare start() is what skipped the config write');
   const starter = /private func startReadingSources\(\) -> \(configWritten: Bool, outcome: Connectors\.StartOutcome\) \{([\s\S]*?)\n {2}\}/u.exec(bridge)?.[1];
