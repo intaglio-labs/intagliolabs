@@ -290,14 +290,23 @@ enum Provision {
     case loaded
     /// The plist is here and launchd does not have the job. Put it back.
     case bootstrap
+    /// The probe could not answer. Not the same as "loaded", and deliberately
+    /// its own case rather than a Bool defaulted one way: what it justifies is
+    /// doing nothing this launch, and a reader should be able to see that
+    /// without working out which way a default fell.
+    case unknown
   }
 
-  static func agentAction(plistExists: Bool, loaded: Bool) -> AgentAction {
+  static func agentAction(plistExists: Bool, loaded: Bool?) -> AgentAction {
     guard plistExists else { return .notInstalled }
+    guard let loaded else { return .unknown }
     return loaded ? .loaded : .bootstrap
   }
 
-  /// Is `label` a job launchd currently knows about?
+  /// How long launchctl gets to answer one question about one label.
+  private static let agentProbeTimeout: TimeInterval = 3
+
+  /// Is `label` a job launchd currently knows about? `nil` is "could not tell".
   ///
   /// `launchctl print` rather than `launchctl list`: list prints EVERY job on the
   /// Mac and has to have its pipe drained before the wait or it deadlocks on a
@@ -305,16 +314,30 @@ enum Provision {
   /// three labels to ask about, a per-label probe with both streams discarded is
   /// smaller in every direction.
   ///
-  /// A launchctl we could not run at all answers "loaded", so a broken probe
-  /// does nothing rather than bootstrapping on a guess.
-  private static func isAgentLoaded(_ label: String) -> Bool {
+  /// BOUNDED, because `waitUntilExit` is not (round-1 review, finding 7). This
+  /// runs on a launch path, and the machine where launchctl is wedged or launchd
+  /// is slow to answer is exactly the machine where an unbounded wait is worst.
+  /// Three seconds is far more than a local `print` needs and short enough that
+  /// three of them cannot add up to anything an owner notices.
+  ///
+  /// A launchctl we could not run, and one that did not answer in time, both
+  /// return nil — so a probe that failed leads to no action rather than to a
+  /// bootstrap on a guess.
+  private static func probeAgentLoaded(_ label: String) -> Bool? {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     p.arguments = ["print", "gui/\(getuid())/\(label)"]
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
-    do { try p.run() } catch { return true }
-    p.waitUntilExit()
+    do { try p.run() } catch { return nil }
+    let deadline = Date().addingTimeInterval(agentProbeTimeout)
+    while p.isRunning, Date() < deadline { usleep(50_000) }
+    guard !p.isRunning else {
+      p.terminate()
+      NSLog("Intaglio Labs: launchctl did not say whether \(label) is loaded in "
+            + "\(Int(agentProbeTimeout))s — leaving it alone")
+      return nil
+    }
     return p.terminationStatus == 0
   }
 
@@ -351,8 +374,8 @@ enum Provision {
       let plist = launchAgents.appendingPathComponent("\(label).plist")
       let exists = fm.fileExists(atPath: plist.path)
       // Short-circuited: no plist, no launchctl call.
-      switch agentAction(plistExists: exists, loaded: exists && isAgentLoaded(label)) {
-      case .notInstalled, .loaded:
+      switch agentAction(plistExists: exists, loaded: exists ? probeAgentLoaded(label) : nil) {
+      case .notInstalled, .loaded, .unknown:
         continue
       case .bootstrap:
         NSLog("Intaglio Labs: \(label) is installed but not loaded — bootstrapping it")

@@ -47,15 +47,21 @@ function bodyOf(signature) {
 // This is the whole of agentAction: a plist that is not there is not this
 // repair's business, a loaded job is left alone, and the remaining case is the
 // one that survived a relaunch.
+//
+// `loaded` is a tri-state: null is "the probe could not answer", which is not
+// the same as "it is loaded" and justifies doing nothing this launch.
 function decide(plistExists, loaded) {
   if (!plistExists) return 'notInstalled';
+  if (loaded === null) return 'unknown';
   return loaded ? 'loaded' : 'bootstrap';
 }
 
 test('the decision is a named pure function of plist-exists and loaded', () => {
-  const body = bodyOf('static func agentAction(plistExists: Bool, loaded: Bool) -> AgentAction');
+  const body = bodyOf('static func agentAction(plistExists: Bool, loaded: Bool?) -> AgentAction');
   assert.match(body, /guard plistExists else \{ return \.notInstalled \}/u,
     'a missing plist belongs to provision()/installAgent, not to this repair');
+  assert.match(body, /guard let loaded else \{ return \.unknown \}/u,
+    'a probe that could not answer is its own case, not a Bool defaulted one way');
   assert.match(body, /return loaded \? \.loaded : \.bootstrap/u);
   // No launchctl inside the decision: the probe is the caller's, so the
   // decision can be read without a launchd on the other end.
@@ -65,7 +71,10 @@ test('the decision is a named pure function of plist-exists and loaded', () => {
   }
   assert.equal(decide(false, false), 'notInstalled');
   assert.equal(decide(false, true), 'notInstalled');
+  assert.equal(decide(false, null), 'notInstalled');
   assert.equal(decide(true, true), 'loaded');
+  // A launchctl that would not run, or would not answer in time.
+  assert.equal(decide(true, null), 'unknown');
   // THE CASE THAT SURVIVED A RELAUNCH.
   assert.equal(decide(true, false), 'bootstrap');
 });
@@ -91,18 +100,19 @@ test('a healthy Mac is a no-op, and a running service is never bounced', () => {
   // to do when a plist CHANGED, not when a launch finds a healthy service.
   assert.doesNotMatch(body, /kickstart\(/u,
     'a service launchd already has is not something a relaunch gets to restart');
-  assert.match(body, /case \.notInstalled, \.loaded:\n\s*continue/u);
+  assert.match(body, /case \.notInstalled, \.loaded, \.unknown:\n\s*continue/u,
+    'a probe that could not answer takes no action, like a healthy service');
   assert.match(body, /bootstrap\(plist\)/u);
   // No subprocess at all for an agent whose plist is absent: the probe is
   // short-circuited behind the file check.
-  assert.match(body, /loaded: exists && isAgentLoaded\(label\)/u,
+  assert.match(body, /loaded: exists \? probeAgentLoaded\(label\) : nil/u,
     'no plist, no launchctl call');
   // The same wait provision() takes after hermes, for the same reason.
   assert.match(body, /if label == "io\.intaglio\.hermes" \{ waitForHermes\(\) \}/u);
 });
 
-test('the probe asks about one label and cannot deadlock on its own output', () => {
-  const body = bodyOf('private static func isAgentLoaded(_ label: String) -> Bool');
+test('the probe asks about one label, is bounded, and cannot deadlock on its output', () => {
+  const body = bodyOf('private static func probeAgentLoaded(_ label: String) -> Bool?');
   // `launchctl list` prints every job on the Mac; Uninstall.loadedLabels has to
   // drain its pipe before waiting or it deadlocks on a full buffer. A per-label
   // `print` with both streams discarded has neither problem.
@@ -111,8 +121,17 @@ test('the probe asks about one label and cannot deadlock on its own output', () 
   assert.doesNotMatch(body, /Pipe\(\)/u, 'discard the output; there is a lot of it');
   assert.match(body, /standardOutput = FileHandle\.nullDevice/u);
   assert.match(body, /standardError = FileHandle\.nullDevice/u);
-  // A launchctl that will not run answers "loaded", so a broken probe does
-  // nothing rather than bootstrapping on a guess.
-  assert.match(body, /do \{ try p\.run\(\) \} catch \{ return true \}/u);
+  // BOUNDED (round-1 review, finding 7). waitUntilExit is not, and this sits on
+  // a launch path: the Mac where launchctl is wedged is exactly the one where an
+  // unbounded wait is worst.
+  assert.doesNotMatch(body, /waitUntilExit/u, 'an unbounded wait on a launch path');
+  assert.match(body, /Date\(\)\.addingTimeInterval\(agentProbeTimeout\)/u);
+  assert.match(body, /while p\.isRunning, Date\(\) < deadline/u);
+  assert.match(body, /guard !p\.isRunning else \{/u, 'a probe that overran is killed, not awaited');
+  // Both failures answer "could not tell", so neither leads to an action.
+  assert.match(body, /do \{ try p\.run\(\) \} catch \{ return nil \}/u);
+  assert.match(body, /return nil/u);
   assert.match(body, /return p\.terminationStatus == 0/u);
+  assert.match(swift, /private static let agentProbeTimeout: TimeInterval = \d+/u,
+    'the bound is a named constant, so the log line and the wait cannot disagree');
 });
