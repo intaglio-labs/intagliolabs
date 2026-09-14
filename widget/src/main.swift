@@ -298,13 +298,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // The connectors daemon runs as a child of this app so its file access is
     // attributed to the app rather than to node — see Connectors.swift. Any
     // launchd agent from an older install is retired first, or the two would
-    // race for the same cursors.
+    // race for the same cursors. The retirement is unconditional: a leftover
+    // agent runs the reader whatever this app decides, and leaving one up is
+    // the only way the gate below can be bypassed.
+    //
+    // ONLY FOR AN OWNER WHO IS PAST THE FLOW, which is the same finding as the
+    // export watcher's below (review finding 2, 2026-09-13) arriving on a
+    // different launch line — found on a from-scratch OOBE, 2026-09-14, with
+    // Calendar and Contacts dialogs standing over onboarding screen 1.
+    //
+    // Nothing stopped it: Connectors.start()'s only content guard is that
+    // ~/.hazlie/connectors/config.json EXISTS, and ensureConnectorDefaults()
+    // writes it as `{}` fifteen lines above — so the guard passed, and the
+    // daemon ran every source with no `.disabled` marker beside it. calendar.mjs
+    // opens EventKit and contacts.mjs opens the Contacts framework, both
+    // attributed to this app, so macOS asked for both grants while screen 1 was
+    // still asking which mode the owner wanted. Screen 2 is the surface that
+    // explains those two grants and asks for them.
+    //
+    // A first-run owner gets the reader from the flow instead, by every route
+    // that already exists: screen 2's "next", screen 6's entry and the LinkedIn
+    // import all reach Bridge.startReadingSources(); a grant on screen 2 reaches
+    // Connectors.start() through the `requestPermission` verb; and a Full Disk
+    // Access grant reaches Connectors.restart() through FullDiskWatch, which
+    // starts the daemon when none is running. FullDiskWatch cannot fire before
+    // that anyway — it acts on a denied→granted EDGE off a baseline taken at
+    // launch, so only an actual grant moves it. For an owner past the flow
+    // nothing here changes.
     DispatchQueue.global(qos: .utility).async {
       Provision.retireConnectorsAgent()
-      DispatchQueue.main.async { Connectors.shared.start() }
+      DispatchQueue.main.async {
+        guard Bridge.onboarded else {
+          NSLog("Intaglio Labs: first run — the reader starts from onboarding, "
+                + "so the Calendar and Contacts dialogs arrive on the screen "
+                + "that asks for them")
+          return
+        }
+        Connectors.shared.start()
+      }
       // Reading the sources is only half of it. Nothing was turning those rows
       // into anything answerable, so every question abstained on a full
       // database — see Distiller.swift.
+      //
+      // NOT GATED WITH THE READER, and the difference is the whole reason the
+      // reader is: this child opens ~/.hazlie/context/context.db and nothing
+      // else — no EventKit, no Contacts, no Photos, no folder outside our own
+      // data home — so there is no dialog for it to put anywhere. On a first
+      // run runOnce() finds no context.db, or an empty one, and parks on the
+      // idle interval; the cost of leaving it armed is one timer.
       DispatchQueue.main.async { Distiller.shared.start() }
       // Hardware/app upgrades may change the safest model tier. The bridge
       // waits for the published processing queues to become idle, stages the

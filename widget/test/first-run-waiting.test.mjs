@@ -26,6 +26,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const js = readFileSync(join(ROOT, 'widget', 'ui', 'onboarding.js'), 'utf8');
 const connectors = readFileSync(join(ROOT, 'widget', 'src', 'Connectors.swift'), 'utf8');
 const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+const mainSwift = readFileSync(join(ROOT, 'widget', 'src', 'main.swift'), 'utf8');
 
 /// Code only: the comments in these files describe the very defects being
 /// pinned, so a naive `includes` finds the bug's own description.
@@ -661,4 +662,63 @@ test('a press answered by a throttle does not take the button away', () => {
   // ...and it says what happened rather than reverting to a sentence about
   // something else.
   assert.match(peek, /still looking — try that again in a moment/u);
+});
+
+// ------------------------------------------- the reader, and when it may start
+
+// THE SAME BUG AS THE EXPORT WATCHER'S, ON THE OTHER LAUNCH LINE (from-scratch
+// OOBE, 2026-09-14). applicationDidFinishLaunching started the connectors
+// daemon unconditionally, and the only content guard in Connectors.start() is
+// that ~/.hazlie/connectors/config.json EXISTS — which
+// Provision.ensureConnectorDefaults() had just satisfied by writing `{}`. So
+// the daemon ran every source with no `.disabled` marker beside it, calendar.mjs
+// opened EventKit and contacts.mjs opened Contacts, and macOS put both dialogs
+// over onboarding screen 1. Screen 2 is the screen that explains those grants.
+//
+// A source scan: a TCC dialog has no surface to pin from node. The live check is
+// in the report — a fresh ~/.hazlie with TCC revoked, launched with `open -a`,
+// screen 1 up and no system dialog over it.
+const launchBody = () => {
+  const src = code(mainSwift);
+  const at = src.indexOf('func applicationDidFinishLaunching');
+  assert.ok(at > 0, 'applicationDidFinishLaunching not found');
+  return src.slice(at);
+};
+
+test('a first run does not start the reader from the launch sequence', () => {
+  const body = launchBody();
+  const startAt = body.indexOf('Connectors.shared.start()');
+  assert.ok(startAt > 0, 'the launch sequence must still be the place an onboarded owner starts');
+  const retireAt = body.indexOf('Provision.retireConnectorsAgent()');
+  const guardAt = body.indexOf('guard Bridge.onboarded else');
+  assert.ok(retireAt > 0, 'a leftover launchd agent is still retired at launch');
+  assert.ok(guardAt > 0 && guardAt < startAt,
+    'the launch-time start must be gated on Bridge.onboarded; without it the daemon\n' +
+    'opens EventKit and Contacts while onboarding screen 1 is up');
+  assert.ok(retireAt < guardAt,
+    'the retirement is NOT behind the gate: an agent left running by an older install\n' +
+    'reads the sources whatever this app decides, which is the one way past the gate');
+});
+
+test('the distiller is left armed, because it opens nothing that prompts', () => {
+  const body = launchBody();
+  const distillAt = body.indexOf('Distiller.shared.start()');
+  assert.ok(distillAt > 0, 'the distiller must still be started at launch');
+  const gatesBefore = body.slice(0, distillAt).match(/guard Bridge\.onboarded else/gu) ?? [];
+  assert.equal(gatesBefore.length, 1,
+    'exactly one launch gate, and it is the reader\'s. The distiller reads\n' +
+    '~/.hazlie/context/context.db and nothing else — no EventKit, no Contacts, no\n' +
+    'folder outside our own data home — so there is no dialog for it to misplace');
+});
+
+test('the gate is at the call site, not inside the shared starter', () => {
+  // Onboarding's own start goes through the same Connectors.start(), and screen
+  // 2's "next" fires it while Bridge.onboarded is still false. A gate moved into
+  // the starter would refuse exactly the call that is supposed to succeed.
+  const start = swiftBody(connectors, 'start\\(bypassingThrottle: Bool = false\\) -> StartOutcome');
+  assert.doesNotMatch(start, /Bridge\.onboarded/u,
+    'the starter must stay ignorant of onboarding, or screen 2 cannot start the reader');
+  const reading = swiftBody(bridge, 'startReadingSources\\(\\) -> \\(configWritten: Bool, outcome: Connectors\\.StartOutcome\\)');
+  assert.doesNotMatch(reading, /Bridge\.onboarded/u,
+    'and so must the flow\'s own entry point, which is only ever called from it');
 });

@@ -33,6 +33,23 @@ import Foundation
 //
 // Neither path restarts twice, and neither leaves the daemon sitting on a denial
 // it will not retry.
+//
+// ~~"the daemon just started above"~~ / ~~"the daemon starts fresh"~~ were true
+// of every launch until 2026-09-14, when the launch-time start became
+// conditional on Bridge.onboarded — see main.swift, and the Calendar and
+// Contacts dialogs it had been putting over onboarding screen 1. On a first run
+// there may be no child here at all, and Connectors.restart() then STARTS one
+// rather than replacing one.
+//
+// That is deliberate, and it is in context. This acts on a denied → granted
+// EDGE against a baseline taken at launch, so nothing here can fire until
+// somebody actually moves the Full Disk Access switch — and the only place this
+// app sends a first-run owner to move it is onboarding screen 2, the screen
+// whose whole subject is these grants. The live run of 2026-09-14 is the
+// behaviour being kept: the grant landed at 12:16:35 and Messages was read at
+// 12:17:52, without waiting for the press on "next" that comes after it. On the
+// "Quit & Reopen" path a first-run relaunch starts no daemon either, and the
+// flow starts one from wherever it resumes.
 enum FullDiskWatch {
   /// What the last look said, so only the DENIED -> GRANTED edge acts. Nil until
   /// begin() takes the first reading.
