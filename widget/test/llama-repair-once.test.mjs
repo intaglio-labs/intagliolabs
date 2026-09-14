@@ -56,9 +56,9 @@ test('the repair lives in one named place that ensureBackend calls', () => {
 test('the repair takes a lock and holds it across the install', () => {
   assert.match(source, /llamaRepairLock = NSLock\(\)/u,
     'concurrent ensureBackend calls must be serialised by something');
-  const body = bodyOf('private static func repairLlamaAgent() -> String? {');
+  const body = bodyOf('private static func repairLlamaAgent() {');
   const lock = body.indexOf('llamaRepairLock.lock()');
-  const install = body.indexOf('installAgent("io.intaglio.llama-server")');
+  const install = body.indexOf('installAgent(llamaLabel)');
   assert.ok(lock >= 0, 'the repair must take the lock');
   assert.ok(install > lock,
     'the lock must be held ACROSS installAgent, not just around the flag: it is the\n' +
@@ -70,14 +70,14 @@ test('the repair takes a lock and holds it across the install', () => {
 });
 
 test('the second caller of a launch does not repeat the install', () => {
-  const body = bodyOf('private static func repairLlamaAgent() -> String? {');
+  const body = bodyOf('private static func repairLlamaAgent() {');
   assert.match(body, /guard !llamaRepairAttempted/u,
     'a once-flag must short-circuit the second caller; the lock alone only makes the two\n' +
     'bootout/bootstrap pairs sequential rather than stopping the second');
   // The flag is no longer what serialises them -- see the test below -- so
   // what has to hold is that a SUCCEEDED repair is never repeated.
   const flag = body.indexOf('llamaRepairAttempted = true');
-  const install = body.indexOf('installAgent("io.intaglio.llama-server")');
+  const install = body.indexOf('installAgent(llamaLabel)');
   assert.ok(flag > 0 && install > 0, 'both the install and the flag must still be here');
 });
 
@@ -93,9 +93,13 @@ test('the second caller of a launch does not repeat the install', () => {
 // intermediate flag. Raising the flag only on success costs nothing and gives
 // the failure a way back.
 test('a failed install is retried, behind a backoff, rather than burning the launch', () => {
-  const body = bodyOf('private static func repairLlamaAgent() -> String? {');
-  const install = body.indexOf('installAgent("io.intaglio.llama-server")');
-  const flag = body.indexOf('llamaRepairAttempted = true');
+  // SCOPED TO THE INSTALL BRANCH. The bootstrap case beside it raises the same
+  // flag, and earlier in the file, so a whole-body indexOf finds that one and
+  // says nothing about the ordering this test is here for.
+  const body = bodyOf('private static func repairLlamaAgent() {');
+  const installBranch = body.slice(body.indexOf('case .install:'));
+  const install = installBranch.indexOf('installAgent(llamaLabel)');
+  const flag = installBranch.indexOf('llamaRepairAttempted = true');
   assert.ok(install > 0 && flag > install,
     'the once-flag must be set AFTER the install, inside its success branch: set before,\n' +
     'a transient launchctl failure is indistinguishable from a repair that worked');
@@ -103,7 +107,7 @@ test('a failed install is retried, behind a backoff, rather than burning the lau
   assert.match(body, /llamaRepairNotBefore/u,
     'a failure must leave a time before which the next try is pointless; without one the\n' +
     'retry is an unbounded launchctl loop on a machine where the install keeps failing');
-  assert.match(body, /guard !llamaRepairAttempted, Date\(\) >= llamaRepairNotBefore else \{ return nil \}/u,
+  assert.match(body, /guard !llamaRepairAttempted, Date\(\) >= llamaRepairNotBefore else \{ return \}/u,
     'and that backoff must be checked in the same guard that checks the flag');
   assert.match(body, /llamaRepairFailures \+= 1/u, 'the backoff must grow with the failures');
   assert.match(body, /min\(\s*llamaRepairBackoffCeiling/u,
@@ -111,7 +115,7 @@ test('a failed install is retried, behind a backoff, rather than burning the lau
 });
 
 test('a Mac whose weights arrive later still gets its agent', () => {
-  const body = bodyOf('private static func repairLlamaAgent() -> String? {');
+  const body = bodyOf('private static func repairLlamaAgent() {');
   const guard = body.indexOf('ModelSetup.isInstalled');
   const flag = body.indexOf('llamaRepairAttempted = true');
   assert.ok(guard > 0, 'the repair must still only run for an install that has weights');
@@ -124,7 +128,7 @@ test('a Mac whose weights arrive later still gets its agent', () => {
 test('nothing else installs the llama agent behind the lock back', () => {
   // One place, or the lock is decoration: a second call site would race the
   // guarded one exactly as the two ensureBackend callers used to race.
-  const sites = [...source.matchAll(/installAgent\("io\.intaglio\.llama-server"\)/gu)];
+  const sites = [...source.matchAll(/installAgent\(llamaLabel\)/gu)];
   assert.equal(sites.length, 1,
     `the llama agent must be installed from exactly one place (found ${sites.length})`);
 });

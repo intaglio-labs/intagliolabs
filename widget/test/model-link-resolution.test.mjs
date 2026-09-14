@@ -44,10 +44,16 @@ test('an already-provisioned install with weights and no llama agent gets the ag
   const ret = ensure.indexOf('return\n      }', early);
   assert.ok(early >= 0 && repair > early && ret > repair, 'the repair sits inside the already-provisioned branch, before its return');
 
-  const body = /private static func repairLlamaAgent\(\) -> String\? \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
+  const body = /private static func repairLlamaAgent\(\) \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
   assert.ok(body, 'repairLlamaAgent not found');
-  assert.match(body, /ModelSetup\.isInstalled, !fm\.fileExists\(atPath: llamaPlist\.path\)/u,
-    'weights present and no agent is still the condition the repair acts on');
-  assert.match(body, /installAgent\("io\.intaglio\.llama-server"\)/u,
+  // ~~`ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path)` as one
+  // guard~~ — the same two facts, plus "does launchd have the job", moved into
+  // the pure llamaRepair() when that label's whole lifecycle came here from the
+  // unloaded-agent sweep (2026-09-14). Weights and no plist is still the
+  // condition that INSTALLS.
+  assert.match(body, /modelInstalled: ModelSetup\.isInstalled/u,
+    'weights are still what the repair acts on, and still through ModelSetup');
+  assert.match(body, /plistExists: exists/u);
+  assert.match(body, /installAgent\(llamaLabel\)/u,
     'and installing that agent is still what it does');
 });

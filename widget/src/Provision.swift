@@ -24,13 +24,16 @@ import Foundation
 //   provisioned by a build that predates llama-api-key.txt gain the key on
 //   upgrade instead of crash-looping forever.
 //
-//   repairLlamaAgent — a plist that provisioning legitimately skipped, for
-//   weights that arrived later.
+//   repairLlamaAgent — the llama agent's whole lifecycle, and it is the only
+//   thing that touches that label. A plist provisioning legitimately skipped for
+//   weights that arrived later, AND one that is installed with no job for it.
+//   That agent is the one that needs something besides its plist before it can
+//   start, so it cannot share the sweep's rule; see llamaRepair.
 //
-//   bootstrapUnloadedAgents — a plist that is here while launchd has no job for
-//   it. Booting the agents out by hand and leaving their plists survived a quit
-//   and a relaunch (2026-09-14), because every install path bootstraps only at
-//   the moment it WRITES a plist.
+//   bootstrapUnloadedAgents — the same question for the other two: a plist that
+//   is here while launchd has no job for it. Booting the agents out by hand and
+//   leaving their plists survived a quit and a relaunch (2026-09-14), because
+//   every install path bootstraps only at the moment it WRITES a plist.
 //
 // All three are only-if-missing in their own way, so a healthy machine sees a
 // no-op.
@@ -55,7 +58,12 @@ enum Provision {
   // System Settings under a name nobody installed. Spawned by the app, the app
   // is responsible, so the grant is one row called Intaglio Labs and the same
   // inheritance covers the Contacts, Calendar and Photos prompts.
-  private static let agentsInOrder = ["io.intaglio.hermes", "io.intaglio.llama-server", "io.intaglio.connect"]
+  private static let agentsInOrder = ["io.intaglio.hermes", llamaLabel, "io.intaglio.connect"]
+  /// The one agent whose lifecycle is owned by repairLlamaAgent alone: it is
+  /// the only one that needs something besides its plist (weights) before it
+  /// can start, so "installed but not loaded" does not mean for it what it
+  /// means for the other two. Named because three places ask about it.
+  static let llamaLabel = "io.intaglio.llama-server"
 
   /// Remove a connectors agent left behind by an older install. Without this it
   /// keeps running under launchd — responsible for itself, needing its own FDA,
@@ -115,7 +123,7 @@ enum Provision {
     var retired = false
     let migrations = [
       ("com.hazlie.hermes", "io.intaglio.hermes"),
-      ("com.hazlie.llama-server", "io.intaglio.llama-server"),
+      ("com.hazlie.llama-server", llamaLabel),
       ("com.hazlie.connect", "io.intaglio.connect"),
     ]
     for (legacy, replacement) in migrations {
@@ -266,35 +274,84 @@ enum Provision {
   /// unchanged (the lock, not the flag, is what provides it) and the one-shot
   /// loss is gone.
   ///
-  /// RETURNS THE LABEL IT INSTALLED, so the caller can leave it alone. installAgent
-  /// boots the agent out and bootstraps it back in, and launchd's answer to
-  /// "is this loaded" a moment later is not reliably yes — so the unloaded-agent
-  /// sweep that follows would see the agent this just installed, call it
-  /// unloaded, and bootstrap it a second time on top of the first (round-1
-  /// review, finding 6). That is the interleaving the lock above exists to
-  /// prevent, arriving from a different function.
-  @discardableResult
-  private static func repairLlamaAgent() -> String? {
+  /// ~~RETURNS THE LABEL IT INSTALLED, so the caller can leave it alone.~~ That
+  /// was round-1 finding 6's answer to this function and the unloaded-agent
+  /// sweep both touching one label: installAgent boots out and bootstraps, and
+  /// launchd's answer to "is this loaded" a moment later is not reliably yes, so
+  /// the sweep would bootstrap a second time on top of the first. Passing the
+  /// label along for the sweep to skip made the collision harmless; it did not
+  /// make the label have one owner. The sweep does not touch it at all now, so
+  /// there is nothing to hand over — see llamaLabel there, and llamaRepair here.
+  private static func repairLlamaAgent() {
     llamaRepairLock.lock()
     defer { llamaRepairLock.unlock() }
-    guard !llamaRepairAttempted, Date() >= llamaRepairNotBefore else { return nil }
-    let llamaPlist = launchAgents.appendingPathComponent("io.intaglio.llama-server.plist")
-    guard ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) else { return nil }
-    if installAgent("io.intaglio.llama-server") {
+    guard !llamaRepairAttempted, Date() >= llamaRepairNotBefore else { return }
+    let plist = launchAgents.appendingPathComponent("\(llamaLabel).plist")
+    let exists = fm.fileExists(atPath: plist.path)
+    switch llamaRepair(modelInstalled: ModelSetup.isInstalled,
+                       plistExists: exists,
+                       loaded: exists ? probeAgentLoaded(llamaLabel) : nil) {
+    case .none, .unknown:
+      return
+    case .bootstrap:
+      // WEIGHTS, A PLIST, AND NO JOB — the case this function did not cover and
+      // the sweep was covering badly. Once per launch, like the install beside
+      // it: an agent that has weights and dies anyway gets one attempt a launch
+      // rather than a bootstrap every time anything calls ensureBackend.
       llamaRepairAttempted = true
       llamaRepairFailures = 0
-      NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
-      return "io.intaglio.llama-server"
-    } else {
-      llamaRepairFailures += 1
-      let delay = min(
-        llamaRepairBackoffCeiling,
-        llamaRepairBackoffFloor * pow(2, Double(llamaRepairFailures - 1))
-      )
-      llamaRepairNotBefore = Date().addingTimeInterval(delay)
-      NSLog("Intaglio Labs: llama agent install failed (\(llamaRepairFailures)); retrying in \(Int(delay))s")
-      return nil
+      NSLog("Intaglio Labs: the llama agent is installed but not loaded — bootstrapping it")
+      bootstrap(plist)
+    case .install:
+      if installAgent(llamaLabel) {
+        llamaRepairAttempted = true
+        llamaRepairFailures = 0
+        NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
+      } else {
+        llamaRepairFailures += 1
+        let delay = min(
+          llamaRepairBackoffCeiling,
+          llamaRepairBackoffFloor * pow(2, Double(llamaRepairFailures - 1))
+        )
+        llamaRepairNotBefore = Date().addingTimeInterval(delay)
+        NSLog("Intaglio Labs: llama agent install failed (\(llamaRepairFailures)); retrying in \(Int(delay))s")
+      }
     }
+  }
+
+  /// WHAT THE LLAMA AGENT NEEDS, as a pure function of the three facts that
+  /// decide it — and `modelInstalled` is the one that matters most here.
+  ///
+  /// The general sweep asks only "is there a plist launchd has no job for", and
+  /// for this label that is not enough: the llama agent cannot start without
+  /// weights, so on a Mac with an old plist and no model it was bootstrapped at
+  /// every launch, died at every launch, and looked unloaded again at the next.
+  /// That is the same non-converging shape the stale-plist check was added for,
+  /// arriving through a path that is not stale at all — `llama-server` really is
+  /// where the plist says it is; there is simply nothing for it to load.
+  ///
+  /// `ModelSetup.isInstalled` is the existing answer to "is there a model", and
+  /// it is the one provision() and this function have always used. No second
+  /// check, and the model-link resolution behind it stays in one place.
+  enum LlamaRepair: String {
+    /// No weights, or a job launchd already has. Nothing to do either way.
+    case none
+    /// Weights, and no plist. What this function has always done.
+    case install
+    /// Weights, a plist, and launchd has no job for it.
+    case bootstrap
+    /// Weights and a plist, and the probe could not answer. Same as none, named
+    /// separately for the same reason AgentAction.unknown is.
+    case unknown
+  }
+
+  static func llamaRepair(
+    modelInstalled: Bool, plistExists: Bool, loaded: Bool?
+  ) -> LlamaRepair {
+    guard modelInstalled else { return .none }
+    guard plistExists else { return .install }
+    guard let loaded else { return .unknown }
+    return loaded ? .none : .bootstrap
   }
 
   /// WHAT A RELAUNCH SHOULD DO ABOUT ONE INSTALLED AGENT, as a pure function of
@@ -473,14 +530,24 @@ enum Provision {
   /// bought no ordering here, only up to fifteen seconds of a launch path on
   /// exactly the Mac that is already unwell.
   ///
-  /// `skipping` IS FOR AN AGENT ANOTHER REPAIR JUST INSTALLED in the same pass.
-  /// installAgent boots out and bootstraps, and launchd's answer to "is this
-  /// loaded" a moment later is not reliably yes — so without it this sweep sees
-  /// a just-installed agent as unloaded and bootstraps it a second time on top
-  /// of the first, which is the interleaving repairLlamaAgent's own lock exists
-  /// to prevent, arriving from another function (round-1 review, finding 6).
-  private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil) {
-    for label in agentsInOrder where label != justInstalled {
+  /// AND IT DOES NOT TOUCH THE LLAMA AGENT AT ALL. "A plist launchd has no job
+  /// for" is the wrong question for that one label: llama-server cannot start
+  /// without weights, so on a Mac with an old plist and no model this
+  /// bootstrapped it at every launch, the job died at every launch, and the next
+  /// launch found it unloaded again — the same non-converging shape the
+  /// stale-plist check was added for, arriving through a path that is not stale
+  /// at all. The plist's `llama-server` really is where it says it is; there is
+  /// simply nothing for it to load.
+  ///
+  /// ~~`skipping:`~~ went with it. That parameter (round-1 review, finding 6)
+  /// was this sweep and repairLlamaAgent both touching one label, with the
+  /// collision made harmless by handing the label across — which is not the same
+  /// thing as the label having ONE owner. repairLlamaAgent owns it now, in full:
+  /// it already held the model test, the lock, the once-per-launch flag and the
+  /// backoff, and it gained the unloaded case this sweep was covering badly. So
+  /// there is no longer anything to hand over.
+  private static func bootstrapUnloadedAgents() {
+    for label in agentsInOrder where label != llamaLabel {
       let plist = launchAgents.appendingPathComponent("\(label).plist")
       let exists = fm.fileExists(atPath: plist.path)
       // Short-circuited: no plist, no launchctl call.
@@ -611,7 +678,7 @@ enum Provision {
         // Existing files are never touched, so this is a no-op when healthy.
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
-        let justInstalled = repairLlamaAgent()
+        repairLlamaAgent()
         if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         // AND THE AGENTS THAT ARE INSTALLED BUT NOT RUNNING. The guard above
         // asks whether a PLIST exists, which is not the same question as
@@ -625,7 +692,7 @@ enum Provision {
         // sees what they left, and only has to be told about the agent
         // repairLlamaAgent installed — launchd does not reliably answer "loaded"
         // for one that young.
-        bootstrapUnloadedAgents(skipping: justInstalled)
+        bootstrapUnloadedAgents()
         return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
@@ -927,7 +994,7 @@ enum Provision {
     // download lands, which is when it becomes true.
     let modelLink = hazlie.appendingPathComponent("models/model.gguf")
     for label in agentsInOrder {
-      if label == "io.intaglio.llama-server" && !fm.fileExists(atPath: modelLink.path) {
+      if label == llamaLabel && !fm.fileExists(atPath: modelLink.path) {
         NSLog("Intaglio Labs: no model yet — skipping the llama agent until one is chosen")
         continue
       }
@@ -1091,7 +1158,7 @@ enum Provision {
     guard var text = try? String(contentsOf: template, encoding: .utf8) else { return false }
     text = text.replacingOccurrences(of: "@HOME@", with: home.path)
     text = text.replacingOccurrences(of: "@REPO@", with: backend.path)
-    if label == "io.intaglio.llama-server" && !prepareModelRouter() { return false }
+    if label == llamaLabel && !prepareModelRouter() { return false }
     for (placeholder, value) in inferenceValues() {
       text = text.replacingOccurrences(of: placeholder, with: value)
     }

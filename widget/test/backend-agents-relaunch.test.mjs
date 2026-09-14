@@ -85,7 +85,7 @@ test('the already-provisioned branch acts on it, last', () => {
   // by backendState now, because a plist on its own said nothing about whether
   // the runtime it names was ever staged. See the live 2026-09-14 failure below.
   const guardAt = body.indexOf('guard state != .ready else');
-  const healAt = body.indexOf('bootstrapUnloadedAgents(skipping: justInstalled)');
+  const healAt = body.indexOf('bootstrapUnloadedAgents()');
   assert.ok(guardAt > 0, 'the repairs still sit behind one guard, on the healthy branch');
   assert.ok(healAt > guardAt,
     'the repair belongs on the branch that guard takes; that guard is the reason\n' +
@@ -103,20 +103,21 @@ test('the already-provisioned branch acts on it, last', () => {
   const legacyAt = body.indexOf('retireLegacyBackendAgents()');
   assert.ok(llamaAt > 0 && llamaAt < healAt, 'the llama repair runs before the sweep');
   assert.ok(legacyAt > 0 && legacyAt < healAt, 'so does the legacy retirement');
-  // ...and the one agent it must be told about is the one just installed:
-  // installAgent boots out and bootstraps, and launchd does not reliably answer
-  // "loaded" for a job that young, so the sweep would bootstrap it again on top.
-  assert.match(body, /let justInstalled = repairLlamaAgent\(\)/u,
-    'the repair has to say what it installed for the skip to mean anything');
-  const repair = bodyOf('private static func repairLlamaAgent() -> String?');
-  assert.match(repair, /return "io\.intaglio\.llama-server"/u, 'named only on the success path');
-  assert.match(repair, /return nil/u, 'a failure installed nothing and skips nothing');
-  const sweep = bodyOf('private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil)');
-  assert.match(sweep, /for label in agentsInOrder where label != justInstalled/u);
+  // ~~and the one agent it must be told about is the one just installed~~ —
+  // round-1 finding 6 handed the llama label from repairLlamaAgent to the sweep
+  // so the sweep could skip it, which made the collision harmless without making
+  // the label have ONE owner. The sweep does not touch it at all now, so there
+  // is nothing to hand over and `skipping:` is gone with it.
+  const sweep = bodyOf('private static func bootstrapUnloadedAgents() {');
+  assert.match(sweep, /for label in agentsInOrder where label != llamaLabel/u,
+    'the sweep skips the llama label outright, by name');
+  assert.doesNotMatch(sweep, /justInstalled|skipping/u,
+    'a hand-over parameter with one possible value and no remaining caller');
+  assert.doesNotMatch(body, /skipping:/u);
 });
 
 test('a healthy Mac is a no-op, and a running service is never bounced', () => {
-  const body = bodyOf('private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil)');
+  const body = bodyOf('private static func bootstrapUnloadedAgents() {');
   assert.match(body, /for label in agentsInOrder/u,
     'hermes first: it migrates and opens the database the other two talk to');
   // Nothing is kickstarted. kickstart(-k) stops and restarts, which is a thing
@@ -175,7 +176,7 @@ test('a plist that points at something gone is re-rendered, not re-bootstrapped'
   assert.equal(pathsExist([], []), false);
 
   // ...and the caller routes on it, to installAgent rather than bootstrap.
-  const caller = bodyOf("private static func bootstrapUnloadedAgents(skipping justInstalled: String? = nil)");
+  const caller = bodyOf("private static func bootstrapUnloadedAgents() {");
   const guardAt = caller.indexOf('guard let args = programArguments(of: plist)');
   const bootstrapAt = caller.indexOf('bootstrap(plist)');
   assert.ok(guardAt > 0 && guardAt < bootstrapAt, 'validate before bootstrapping, not after');
@@ -360,4 +361,77 @@ test('a missing runtime takes the full path, and never a re-render alone', () =>
   assert.match(prov, /installAgent\(label\)/u, 'provisioning installs through that same path');
   assert.match(prov, /hazlie\.appendingPathComponent\("bin\/node"\)/u,
     'and it is the only thing that stages the binary all of this is about');
+});
+
+// ------------------------------- the one agent that needs more than a plist
+
+// "A plist launchd has no job for" is the wrong question for io.intaglio.llama-server.
+// That agent cannot start without weights, so on a Mac with an old plist and no
+// model the sweep bootstrapped it at every launch, the job died at every launch,
+// and the next launch found it unloaded again — the same non-converging shape
+// the stale-plist check was added for, arriving through a path that is not stale
+// at all: `llama-server` really is where the plist says it is, and there is
+// simply nothing for it to load.
+//
+// So the label left the sweep entirely and repairLlamaAgent owns its whole
+// lifecycle. That is the option that leaves ONE owner: gating the sweep on the
+// model instead would have left two functions acting on one label under
+// conditions that merely do not overlap today, which is what round-1 finding 6
+// already had to paper over with a `skipping:` hand-over.
+const llamaRepair = (modelInstalled, plistExists, loaded) => {
+  if (!modelInstalled) return 'none';
+  if (!plistExists) return 'install';
+  if (loaded === null) return 'unknown';
+  return loaded ? 'none' : 'bootstrap';
+};
+
+test('the llama agent is not bootstrapped for want of weights', () => {
+  const rule = bodyOf('static func llamaRepair(');
+  assert.match(rule, /guard modelInstalled else \{ return \.none \}/u,
+    'no weights, no agent — this is the loop being closed, and it comes first');
+  assert.match(rule, /guard plistExists else \{ return \.install \}/u);
+  assert.match(rule, /guard let loaded else \{ return \.unknown \}/u);
+  assert.match(rule, /return loaded \? \.none : \.bootstrap/u);
+  // ModelSetup.isInstalled is the existing answer to "is there a model", and the
+  // one provision() and this repair have always used. No second check.
+  assert.doesNotMatch(rule, /ModelSetup|fileExists|model\.gguf/u,
+    'the facts are the caller\'s, so the model-link resolution stays in one place');
+
+  // THE LOOP: an old plist, no model. Whether launchd has the job or not.
+  assert.equal(llamaRepair(false, true, false), 'none');
+  assert.equal(llamaRepair(false, true, true), 'none');
+  assert.equal(llamaRepair(false, true, null), 'none');
+  // ...and with no plist either, still nothing: provision() skips the agent on a
+  // machine with no weights, and this must not undo that.
+  assert.equal(llamaRepair(false, false, null), 'none');
+  // Weights and no plist — what this repair has always been for.
+  assert.equal(llamaRepair(true, false, null), 'install');
+  // Weights, a plist, and no job: the case the sweep was covering badly.
+  assert.equal(llamaRepair(true, true, false), 'bootstrap');
+  // Weights and a healthy job, or a probe that could not answer.
+  assert.equal(llamaRepair(true, true, true), 'none');
+  assert.equal(llamaRepair(true, true, null), 'unknown');
+});
+
+test('one owner for that label, and the model test it already had', () => {
+  const repair = bodyOf('private static func repairLlamaAgent() {');
+  assert.match(repair, /modelInstalled: ModelSetup\.isInstalled/u,
+    'the existing answer to "is there a model", not a second one');
+  assert.match(repair, /loaded: exists \? probeAgentLoaded\(llamaLabel\) : nil/u,
+    'no plist, no launchctl call — the same short-circuit the sweep uses');
+  assert.match(repair, /case \.none, \.unknown:\n\s*return/u);
+  assert.match(repair, /bootstrap\(plist\)/u, 'the unloaded case is handled here now');
+  // Once per launch, like the install beside it: an agent that HAS weights and
+  // dies anyway gets one attempt a launch rather than one per ensureBackend.
+  const bootstrapBranch = repair.slice(repair.indexOf('case .bootstrap:'),
+                                       repair.indexOf('case .install:'));
+  assert.match(bootstrapBranch, /llamaRepairAttempted = true/u,
+    'or the bootstrap is the very loop this change closes, one level up');
+
+  // ...and nowhere else touches the label. `installAgent(llamaLabel)` is pinned
+  // to one call site in llama-repair-once.test.mjs; this is the other half.
+  const sweep = bodyOf('private static func bootstrapUnloadedAgents() {');
+  assert.match(sweep, /label != llamaLabel/u);
+  assert.match(swift, /static let llamaLabel = "io\.intaglio\.llama-server"/u,
+    'named once, because provisioning, installAgent and the sweep all ask about it');
 });
