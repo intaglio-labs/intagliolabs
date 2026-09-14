@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { accountSettings, createMailSource, gmailMessageToParsed } from '../sources/mail.mjs';
+import { messageToRow } from '../lib/mailRows.mjs';
 import { googleAccountSlug, googleTokensPath } from '../lib/googleAccounts.mjs';
 
 const b64url = (s) => Buffer.from(s, 'utf8').toString('base64')
@@ -99,6 +100,31 @@ test('a body-less message does not throw, it just has no text', () => {
     assert.equal(p.text, '');
     assert.equal(p.subject, null);
   }
+});
+
+// THE SEAM ITSELF, end to end, because both halves passed their own tests
+// while the join between them silently dropped every participant. This
+// adapter hands mailRows.mjs raw header strings; until 2026-09-12 that
+// function answered [] to a string, so all 81,725 mail rows in the corpus
+// carry meta.from = [] and a null speaker and no person was ever linked to
+// one. Either half alone cannot catch that -- only a test that runs the
+// payload the API actually returns through the row builder it is actually
+// paired with.
+test('a Gmail full payload becomes a row with participants, not an empty meta', () => {
+  const m = msg({
+    'Message-ID': '<full-1@example.test>',
+    From: '"Nayak, Rishab" <r@x.com>',
+    To: 'a@b.com, "Doe, Jane" <jane@d.com>',
+    Cc: '',
+    Subject: 'the quarterly numbers',
+  });
+  const row = messageToRow(gmailMessageToParsed(m), {
+    account: 'r@x.com', folder: 'INBOX', uid: 1, uidValidity: '1',
+  });
+  assert.deepEqual(row.meta.from, ['r@x.com']);
+  assert.deepEqual(row.meta.to, ['a@b.com', 'jane@d.com'], 'the comma inside the quoted name is not a separator');
+  assert.deepEqual(row.meta.cc, []);
+  assert.equal(row.speaker, 'r@x.com');
 });
 
 test('settings fall back defaults -> per-account, and an unknown account still gets defaults', () => {

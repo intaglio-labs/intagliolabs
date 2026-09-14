@@ -6,6 +6,7 @@ import {
   messageToRow,
   normalizeAddresses,
   normalizeMessageId,
+  parseAddressHeader,
   stripQuotedReply,
 } from '../lib/mailRows.mjs';
 
@@ -111,4 +112,73 @@ test('truncation is recorded in meta so a short row is not mistaken for a short 
   assert.equal(row.meta.truncated, true);
   const short = messageToRow(parsed(), { account: 'a', folder: 'f', uid: 1, uidValidity: '1' });
   assert.equal(short.meta.truncated, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// THE RAW-HEADER PATH, which the Gmail connector has needed since 2026-08-26
+// and did not have. sources/mail.mjs hands from/to/cc straight from the REST
+// payload as the header STRINGS Google returns, on the strength of a comment
+// here claiming this function took them. It did not: a string is neither an
+// array nor `{value:[...]}`, so it fell through to [] and every one of the
+// 81,725 mail rows in the corpus was written with no participants and a null
+// speaker. These tests are the ones that would have caught it.
+// ---------------------------------------------------------------------------
+
+test('a display name with a comma is one address, not two', () => {
+  // The single most common real header shape, and the one a naive
+  // split-on-comma gets wrong: the comma lives inside the quoted name.
+  assert.deepEqual(parseAddressHeader('"Nayak, Rishab" <r@x.com>'), ['r@x.com']);
+  assert.deepEqual(
+    parseAddressHeader('a@b.com, "Doe, Jane" <jane@d.com>'),
+    ['a@b.com', 'jane@d.com']
+  );
+});
+
+test('the bracket form wins, bare addresses are kept, and case is folded', () => {
+  assert.deepEqual(parseAddressHeader('Bob <Bob@Example.COM>'), ['bob@example.com']);
+  assert.deepEqual(parseAddressHeader('  plain@example.com  '), ['plain@example.com']);
+  assert.deepEqual(
+    parseAddressHeader('plain@example.com, Bob <bob@example.com>'),
+    ['plain@example.com', 'bob@example.com'],
+    'a mixed list keeps both forms'
+  );
+  assert.deepEqual(parseAddressHeader('x@y.co, X@Y.co'), ['x@y.co'], 'deduped after folding');
+});
+
+test('group syntax, comments and empty brackets are noise, not participants', () => {
+  assert.deepEqual(
+    parseAddressHeader('Team: a@x.com, b@y.com;'),
+    ['a@x.com', 'b@y.com'],
+    'the group label and the trailing semicolon are not addresses'
+  );
+  assert.deepEqual(parseAddressHeader('undisclosed-recipients:;'), []);
+  assert.deepEqual(parseAddressHeader('a@x.com (Alice at work)'), ['a@x.com']);
+  assert.deepEqual(parseAddressHeader('Mailer Daemon <>'), [], 'an empty <> names nobody');
+  assert.deepEqual(parseAddressHeader(''), []);
+  assert.deepEqual(parseAddressHeader(null), []);
+});
+
+test('a raw header string reaches meta through normalizeAddresses', () => {
+  // The actual defect: this returned [] for every string it was ever given.
+  assert.deepEqual(normalizeAddresses('"Doe, Jane" <Jane@D.com>, a@b.com'), ['a@b.com', 'jane@d.com']);
+  assert.deepEqual(normalizeAddresses(''), []);
+});
+
+test('the mailparser-object and plain-array paths are unchanged', () => {
+  assert.deepEqual(
+    normalizeAddresses({ value: [{ address: 'Zed@X.com' }, { address: 'amy@x.com' }] }),
+    ['amy@x.com', 'zed@x.com']
+  );
+  assert.deepEqual(normalizeAddresses(['B@x.com', 'a@x.com', 'b@X.com']), ['a@x.com', 'b@x.com']);
+});
+
+test('a message whose addresses are raw headers still gets a speaker and recipients', () => {
+  const row = messageToRow(
+    parsed({ from: '"Nayak, Rishab" <R@x.com>', to: 'a@b.com, "Doe, Jane" <jane@d.com>', cc: '' }),
+    { account: 'me@here.io', folder: 'INBOX', uid: 9, uidValidity: '3' }
+  );
+  assert.deepEqual(row.meta.from, ['r@x.com']);
+  assert.deepEqual(row.meta.to, ['a@b.com', 'jane@d.com']);
+  assert.deepEqual(row.meta.cc, []);
+  assert.equal(row.speaker, 'r@x.com', 'a null speaker is what 81,725 rows got instead');
 });

@@ -1,12 +1,17 @@
 // The bridge: every JS↔native message and every byte of HTTP, in one file.
 //
-// This file is the egress choke point. The audit for "nothing leaves the
-// box" is: the only two URLs this process can reach are the loopback bases
-// below; redirects are refused; the webviews themselves can load only
-// file: URLs (Windows.swift + each page's CSP). If a future edit adds a
-// third base or follows a redirect, it should have to happen HERE, loudly.
+// This file is the egress choke point. ~~The audit for "nothing leaves the
+// box" was: the only two URLs this process can reach are the loopback bases
+// below.~~ Narrowed 2026-08-31 by the owner's frontier decision; the audit
+// now reads: its own URLSession still reaches only the two loopback bases
+// below; redirects are refused; the webviews themselves can load only local
+// app assets (Windows.swift + each page's CSP). The one explicit handoff out
+// is `frontierSend`: after the owner edits and approves a bounded prompt,
+// FrontierRunner gives that text on stdin to an installed, official provider
+// client. No webview or database gets a provider credential.
 import AppKit
 import WebKit
+import UniformTypeIdentifiers
 
 /// Which page under the connect token the app may open. An ENUM, never a string
 /// from JS: connectLink() validates the base (http, loopback, re-read each time
@@ -32,6 +37,9 @@ protocol BridgeDelegate: AnyObject {
   func openPeople()
   func openMonths()
   func openReconnect()
+  // Poked whenever a judgment or a panel close may have left the widget
+  // orb showing a stale reconnect card -- see relCardChanged in main.swift.
+  func relCardChanged()
   // Takes a path and a query since the login window can hand off to
   // /bridge?p=<platform>. Both sides are load-bearing and picking either alone
   // fails to compile — at a CALL SITE rather than here, which is the slow way to
@@ -57,6 +65,24 @@ protocol BridgeDelegate: AnyObject {
   // dialog: it also pushes the scrim BEHIND, because Settings is a window the
   // owner works in for a while rather than answers and dismisses.
   func yieldForSettings(_ yield: Bool)
+  /// The system browser has just been handed the Google authorization URL.
+  /// Like yieldForSettings there is no completion to restore on -- consent
+  /// happens in another application and nothing calls back -- so this one
+  /// takes no argument and the way back is the owner returning to the app.
+  func yieldOnboardingToBrowser()
+  /// A LinkedIn export landed without anyone pressing a button on a page: the
+  /// Downloads watcher found one, or a file was dropped on the settings panel.
+  /// The two surfaces that render its state repaint themselves — without this,
+  /// screen 4 goes on saying "waiting for your file" about a file that is
+  /// already installed.
+  func linkedInExportChanged()
+  /// The Downloads watcher found an export and is asking about it. Put the offer
+  /// where the owner will meet it: a panel, and the gear's own glow, because a
+  /// panel can be behind something and the widget never is.
+  func linkedInExportOffered(name: String)
+  /// ...and the offer has been answered, either way. Take the glow back and
+  /// close the panel, or the app goes on asking about a decision already made.
+  func linkedInExportOfferClosed()
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -76,10 +102,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // rather than "it could call everything". The check is cheap because the
   // message already arrives with its webView.
   //
-  // Derived from what each page actually calls (grep hzPost across widget/ui);
-  // `markHandheld` has no caller today and is listed under connections because
-  // that is the surface it is about. A case missing from every list here is a
-  // test failure, not a silent 404 -- see widget/test/bridge-capabilities.test.mjs.
+  // Derived from what each page actually calls (grep hzPost across widget/ui).
+  // ~~`markHandheld` has no caller today and is listed under connections
+  // because that is the surface it is about.~~ That was the exception this
+  // header warns about, kept for a page that never called it: it went with
+  // `openOnboarding` in the surface review (2026-09-13), dispatch case and all.
+  // A case missing from every list here is a test failure, not a silent 404 --
+  // see widget/test/bridge-capabilities.test.mjs.
   static let sharedActions: Set<String> = [
     // bridge.js is loaded by every page, so these two are everyone's.
     "prefs", "fitContent",
@@ -88,32 +117,92 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "widget": ["drag", "openChat", "openChatWith", "openConnections",
                "openMonths", "openReconnect", "voiceArm", "widgetBounds",
                "chatBarOpen",
-               "workStatus", "relCard", "relEvent", "relRefresh"],
-    "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
+               "workStatus", "relCardPeek", "relEvent", "relRefresh",
+               // The one thing the widget has to say about a source: LinkedIn
+               // has mailed the archive and nobody has imported it. It is the
+               // gear's nudge, so it belongs to the surface the gear is on.
+               // One field, not the connector shelf — see the case.
+               "linkedInReady"],
+    "chat": ["ask", "cancel", "chatReady", "close", "decideClaim",
+             "frontierSend", "frontierCancel"],
     // The reconnect card popup (L5 step 10): reads the current card, posts
-    // the owner's verdict, and sizes itself. Nothing else -- the card page
+    // the owner's verdict, sizes itself, and (the mode picker) asks for a
+    // fresh batch under a different mode. Nothing else -- the card page
     // holds no token and can open no other surface.
-    "reconnect": ["relCard", "relEvent", "close", "fitContent"],
+    // `openProfile` is the one door out of this page, and it is a door to one
+    // shape of address: https + linkedin.com + /in/, checked natively. The card
+    // shows a person's own job title now, and the profile it came from is the
+    // obvious next thing to look at.
+    "reconnect": ["relCard", "relEvent", "relRefresh", "relMode", "relDraft", "close", "fitContent",
+                  "openProfile"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "setPerformance", "setKeepAwake",
-                    "openOnboarding", "markHandheld",
+                    // The one switch that decides whether excerpts leave this
+                    // Mac. It lived only in onboarding, so once the flow was
+                    // done the owner could never see or change it again.
+                    "engineProbe", "setEngine",
+                    // Leaving, and leaving for good: quit has no other door in
+                    // an LSUIElement app with no menu bar, and uninstall was a
+                    // shell script in a repo the owner will never find.
+                    "quitApp", "uninstallApp",
+                    // What the daily card is set to, read straight from the
+                    // owner config. A READ, not a run: GET /admin/config/card
+                    // answers mode/capPerDay/producer/engine without touching
+                    // the producers, which is why settings may ask for it on
+                    // every render and the card peek stays out of this panel.
+                    "cardConfig",
+                    // The export card's file picker. The shelf's hint used to
+                    // tell the owner to put Connections.csv in a dotfile path
+                    // by hand, while onboarding screen 4 did the same job with
+                    // this panel. One way to do it now, and it is this one.
+                    "importLinkedIn",
+                    // ...and what is already installed, so the settings row can
+                    // read "2,970 connections · <date>" rather than offering a
+                    // picker for a file the owner handed over last month.
+                    // Counts and a date; no row content. See linkedInState().
+                    "linkedInState",
                     "activity",
                     "openFullDiskAccess", "startSources",
                     // In-panel API-key walkthroughs and Google OAuth.
                     "connectSecret", "openApp", "googleAuth",
                     "permissionState", "requestPermission"],
+    // The six-screen setup flow. Every entry here is a CHECK the page runs or
+    // a thing a check writes -- there is no verb in this list the page does
+    // not call, and widget/test/onboarding-capabilities.test.mjs enforces
+    // both directions. `openPeople` is gone: the flow now ends on the
+    // reconnect card, which is what it spent six screens getting ready.
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
-                   // The setup scenes: choosing and fetching the answer model,
-                   // and turning on the first data source.
+                   // Screen 1: the mode row, read through a peek that records
+                   // nothing and written only on an actual click.
+                   "relMode", "relCardPeek",
+                   // Screen 2: the permission rows and the reader they start.
+                   "openFullDiskAccess", "startSources",
+                   "permissionState", "requestPermission",
+                   // Screen 3: the grant, and the live read that proves it.
+                   "googleAuth", "googleProbe",
+                   // Screen 4: ASK FOR THE FILE, then take it whenever it turns
+                   // up. `openLinkedInExport` opens LinkedIn's download page in
+                   // the owner's browser -- one fixed address, no URL from the
+                   // page. `importLinkedIn` is the picker, which now also takes
+                   // the zip LinkedIn sends. `linkedInState` is what is already
+                   // on disk from a previous run.
+                   // `watchForExport` arms the Downloads watcher, from the one
+                   // screen that has explained what the file is -- see the case.
+                   "openLinkedInExport", "watchForExport",
+                   "importLinkedIn", "linkedInState",
+                   // Screen 5: whether the installed claude actually works,
+                   // the opt-in it may then offer, and the local model for a
+                   // Mac that has no claude on it.
+                   "engineProbe", "setEngine",
                    "setupState", "modelDownload", "modelCancel",
-                    "openFullDiskAccess", "startSources", "openPeople",
-                    "permissionState", "requestPermission",
-                    // Which scene is up, remembered so a restart resumes on it.
-                    "onboardingStep"],
+                   // Screen 6: the live table, and the panel the flow ends on.
+                   "onboardingProgress", "openReconnect",
+                   // Which scene is up, remembered so a restart resumes on it.
+                   "onboardingStep"],
     // people.html includes connector-tile.js as well as people.js (check the
     // script tags, not the file's own comment about being shared), so the People
     // popup renders connector tiles and needs the bridge verbs too. Writing this
@@ -122,13 +211,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "bridgeDiscordServer",
                "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
-               "openFullDiskAccess", "googleAuth"],
+               "openFullDiskAccess", "googleAuth", "openReconnect"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
     // ALL-YEARS source behind the constellation — every person, uncapped, with
     // their per-year topics. monthsView: where the popup was left, so a restart
     // resumes on it rather than snapping back to this year.
     "people-months": ["close", "peopleYear", "peopleFind", "peopleSelf", "peopleRole",
                       "openPeople", "monthsView", "peopleMap", "peopleAvatars"],
+    // The export offer (ExportWatch): one sentence about one file, and one
+    // verdict. It shows a name off the owner's disk and posts yes or no --
+    // deliberately NOT `importLinkedIn`, because the panel does not get to
+    // choose a file. Native holds the one it found and this page answers about
+    // that one or about nothing.
+    "export": ["exportOffer", "exportDecide", "close", "fitContent"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -137,8 +232,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // identity here should come from the code that made the view.
   private var pageOf: [ObjectIdentifier: String] = [:]
 
-  func register(_ webView: WKWebView, as page: String) {
+  // Deliveries waiting on a page that has not finished loading. See
+  // whenPageFinishes, below the navigation delegate that drains it.
+  private var afterLoad: [ObjectIdentifier: [(WKWebView) -> Void]] = [:]
+
+  // The ONE file each view may load, recorded beside the compartment it shares
+  // a lifetime with. See the navigation policy: this table is what makes the
+  // compartment a property of a DOCUMENT and not merely of a view, which is the
+  // assumption every grant above was written under. Nil for the ear, whose page
+  // comes through the custom scheme and is fenced inside the handler instead.
+  private var allowedDocument: [ObjectIdentifier: URL] = [:]
+
+  func register(_ webView: WKWebView, as page: String, document: URL? = nil) {
     pageOf[ObjectIdentifier(webView)] = page
+    allowedDocument[ObjectIdentifier(webView)] = document
   }
 
   private func allows(_ webView: WKWebView, _ type: String) -> Bool {
@@ -194,8 +301,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }
 
   private func beginAutomaticModelReconciliation() {
-    let allowFreshInstall = !Bridge.needsOnboarding
-    guard let tier = ModelSetup.automaticTarget(allowFreshInstall: allowFreshInstall) else {
+    // `allowFreshInstall` IS DEAD and this is the last caller passing it.
+    // ModelSetup.automaticTarget discards the value (`_ = allowFreshInstall`,
+    // ModelSetup.swift) — the fresh-install case is decided by `installed ==
+    // nil` inside the function instead. It was bound to a local here, which
+    // made the call site read as though onboarding state still influenced the
+    // answer. Inlined so nothing in this file implies a dependency that is
+    // not there; deleting the PARAMETER belongs to ModelSetup.swift.
+    guard let tier = ModelSetup.automaticTarget(allowFreshInstall: false) else {
       return
     }
     let replacingExisting = ModelSetup.installed != nil
@@ -407,9 +520,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
 
-  static let stepDefaultsKey = "HazlieOnboardingStep"
+  // VERSIONED, because the vocabulary changed under the same key.
+  //
+  // The old flow had three scenes and wrote '1', '2', '3' for welcome, typing
+  // demo and widget spotlight. The six-screen flow writes the same characters
+  // for welcome, permissions and Google sign-in. An owner who FINISHED the old
+  // flow yesterday has a '3' on disk meaning "the last screen", and the new
+  // build reads it as "resume into Google sign-in" — dropping them back into
+  // the middle of a flow they completed, and skipping the permissions screen
+  // that everything else depends on. There is no way to tell the two apart by
+  // value, so the KEY carries the version and a value written under the old
+  // one is not read at all. The legacy key is removed rather than left to rot.
+  static let legacyStepDefaultsKey = "HazlieOnboardingStep"
+  static let stepDefaultsKey = "HazlieOnboardingStep-v2"
   static var onboardingStep: String? {
-    get { UserDefaults.standard.string(forKey: stepDefaultsKey) }
+    get {
+      UserDefaults.standard.removeObject(forKey: legacyStepDefaultsKey)
+      return UserDefaults.standard.string(forKey: stepDefaultsKey)
+    }
     set {
       if let v = newValue { UserDefaults.standard.set(v, forKey: stepDefaultsKey) }
       else { UserDefaults.standard.removeObject(forKey: stepDefaultsKey) }
@@ -455,6 +583,91 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   static func clampScale(_ v: Double) -> Double {
     guard v.isFinite else { return 1 }
     return min(max(v, scaleRange.lowerBound), scaleRange.upperBound)
+  }
+
+  // THE INTENT OUTLIVES THE REQUEST THAT CARRIES IT.
+  //
+  // Pressing screen 1's button is the owner accepting one card a day, and
+  // startReadingSources posts that to hermes. hermes on a first launch is
+  // often still warming, and the post was fire-and-forget: one refused
+  // connection and relationshipMemory.capPerDay was never written, which makes
+  // hermes' card route answer no-cap-configured for ever. The press is
+  // recorded HERE first, so a post that cannot land today is retried on the
+  // next launch until it lands once. Cleared by the first reply that says the
+  // settings were taken.
+  static let cardDefaultsPendingKey = "HazlieCardDefaultsPending"
+  static var cardDefaultsPending: Bool {
+    get { UserDefaults.standard.bool(forKey: cardDefaultsPendingKey) }
+    set { UserDefaults.standard.set(newValue, forKey: cardDefaultsPendingKey) }
+  }
+
+  // THE MODE THE OWNER PICKED, ON THE SAME TERMS AS THE CAP.
+  //
+  // The mode route answers 200 with `persisted: false` when its config write
+  // fails: the choice is live in the running reader and only its durability
+  // broke. The page retried once and then wrote a quiet note — so hermes being
+  // down for a whole first session lost the pick with nothing but a sentence
+  // the owner may have scrolled past, while `capPerDay`, chosen on the same
+  // screen, landed on a later launch.
+  //
+  // Same shape as the cap: the choice is written down HERE first and delivered
+  // until a reply says it was kept. The note is still written for the session
+  // the owner is in, because "it will be there next launch" is not what they
+  // asked for; it is the floor under that sentence rather than a replacement.
+  // EXPORTS WHOSE VINTAGE THIS APP COULD NOT ESTABLISH.
+  //
+  // The staging swap stamps the export's own date onto the installed copy so
+  // PASS ONE can ask how old it is. Two things have to go wrong together and
+  // then it cannot: the archive carries no readable date AND setResourceValues
+  // throws. Both dates are then the moment the copy landed, installedVintage
+  // answers "now", and the refusal below reads the owner's own file as older
+  // than the one they have -- permanently, with no way past it but deleting the
+  // file by hand. That is a flow that cannot be completed, which is a worse
+  // outcome than any re-import.
+  //
+  // So the app writes down that it does not know, and a date it does not know
+  // is not evidence to refuse on. Cleared the moment a stamp lands.
+  static let unstampedImportsKey = "HazlieUnstampedImports"
+  static var unstampedImports: [String] {
+    get { UserDefaults.standard.stringArray(forKey: unstampedImportsKey) ?? [] }
+    set { UserDefaults.standard.set(newValue, forKey: unstampedImportsKey) }
+  }
+
+  /// The modes hermes accepts (ui/server/people/owner.mjs RELATIONSHIP_MODES),
+  /// and the values onboarding.html's picker carries. Restated rather than
+  /// derived because nothing crosses that boundary at build time — and pinned to
+  /// the page by widget/test/first-run-waiting.test.mjs so the two cannot drift.
+  static let relationshipModes: Set<String> = ["founder", "investor", "any"]
+
+  /// THE EXPORT THE WATCHER FOUND, waiting on a yes or no.
+  ///
+  /// Instance state and never UserDefaults: an offer is about a file that is in
+  /// a folder right now, and one restored across a relaunch would be a panel
+  /// asking about something that may have been moved, renamed or imported since.
+  /// ExportWatch re-finds whatever is still there on its own.
+  private var pendingExport:
+    (url: URL, name: String, folder: String, dated: String, key: String)?
+
+  /// The one-off mode the reconnect panel's NEXT pull should use, handed over by
+  /// onboarding's "just this once" button. Instance state and not UserDefaults:
+  /// see the openReconnect case.
+  private var pendingOneOffMode: String?
+
+  /// How many launches a pending mode may survive. The retry exists for a hermes
+  /// that is down today; a value it refuses is not going to start being accepted
+  /// on the ninth morning, and a pending write with no ceiling is a request this
+  /// app makes for the life of the install.
+  static let cardModeMaxLaunches = 8
+  static let cardModeLaunchesKey = "HazlieCardModeLaunches"
+  static var cardModeLaunches: Int {
+    get { UserDefaults.standard.integer(forKey: cardModeLaunchesKey) }
+    set { UserDefaults.standard.set(newValue, forKey: cardModeLaunchesKey) }
+  }
+
+  static let cardModePendingKey = "HazlieCardModePending"
+  static var cardModePending: String? {
+    get { UserDefaults.standard.string(forKey: cardModePendingKey) }
+    set { UserDefaults.standard.set(newValue, forKey: cardModePendingKey) }
   }
 
   // The handoff out of onboarding: after the flow finishes, the widget's
@@ -564,7 +777,37 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
     "https://docs.mau.fi/bridges/go/slack/authentication.html",
+    // LinkedIn's own "get a copy of your data" page, which is where BOTH doors
+    // to the export lead: the settings shelf's export card (the linkedin-export
+    // hint in connections.js) through openExternal, and onboarding screen 4's
+    // "request a copy" through openLinkedInExport.
+    //
+    // NO SQUARE BRACKETS IN THIS BLOCK, in a comment or anywhere else.
+    // openExternal.test.mjs reads the declaration up to its first closing
+    // bracket, so a comment spelling a JS subscript truncates the allowlist the
+    // test is scanning and every real URL below it then reads as missing. Cost
+    // two rounds here to find, once for the subscript and once for the sentence
+    // warning about the subscript.
+    //
+    // IT WAS MISSING, and the symptom is the one this allowlist's test exists to
+    // catch: connections.js has sent this string since the export card came
+    // back, nothing allowed it, openExternal answered "url not in allowlist",
+    // and the only link on that card did nothing.
+    // connectors/test/openExternal.test.mjs was already failing on it.
+    //
+    // Written out rather than interpolated from linkedInExportPage below,
+    // because that test reads STRING LITERALS out of this declaration and an
+    // identifier would read as an empty allowlist. The two are pinned to each
+    // other by the guard in openLinkedInExport, and by
+    // widget/test/linkedin-export-handoff.test.mjs.
+    "https://www.linkedin.com/mypreferences/d/download-my-data",
   ]
+
+  /// Where "request a copy" sends the owner. ONE fixed address, so the page
+  /// passes no URL at all and this constant is what gets opened — see the
+  /// `openLinkedInExport` case for why that is a different door from
+  /// `openProfile`, which pins a host because its path is per-person.
+  static let linkedInExportPage = "https://www.linkedin.com/mypreferences/d/download-my-data"
 
   // Refuse every redirect: a redirect is how a compromised loopback response
   // would move the bearer token somewhere else.
@@ -590,16 +833,68 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // through scaleChanged, which is the case this cannot see.
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     webView.pageZoom = Bridge.scale
+    for work in afterLoad.removeValue(forKey: ObjectIdentifier(webView)) ?? [] { work(webView) }
   }
 
-  // Webviews may navigate to file: URLs and nowhere else.
+  /// Work to run the next time this page finishes loading.
+  ///
+  /// FOR THE WORD THAT ARRIVED TOO EARLY. A caller that evaluates JavaScript
+  /// against a panel it has just built is talking to a document that may not
+  /// have parsed its script yet — WebKit runs the evaluation when the document
+  /// exists, which on a cold first launch can be seconds after the call and
+  /// after the owner has started pressing things. The caller checks whether
+  /// the page answered and, if it did not, leaves the delivery here to be made
+  /// again once there is a page to make it to.
+  ///
+  /// One-shot and main-queue only, like every other webview touch here. A page
+  /// that never finishes loading keeps its closure; that is one closure on a
+  /// window the app holds anyway, and the alternative (a timer) would have to
+  /// guess at the same answer.
+  func whenPageFinishes(_ web: WKWebView, _ work: @escaping (WKWebView) -> Void) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    afterLoad[ObjectIdentifier(web), default: []].append(work)
+  }
+
+  // A WEBVIEW MAY LOAD THE ONE DOCUMENT IT WAS BUILT FOR, AND NOTHING ELSE.
+  //
+  // ~~"Webviews may navigate to file: URLs and nowhere else."~~ `url?.isFileURL
+  // == true` is EVERY FILE ON THE DISK, and the compartment above is keyed on
+  // the view rather than on the document — so any file that got itself loaded
+  // into a page inherited that page's grants. Review finding 1 (2026-09-13)
+  // found the way in: a file dropped on the settings panel and not claimed by
+  // the export handler fell through to WebKit, which navigates to it, and an
+  // .html file dropped there could then call uninstallApp.
+  //
+  // ClickThroughWebView swallows those drops now, which closes that route.
+  // This is the fence behind it, and the one that keeps holding when some later
+  // surface accepts a drop, a paste, or a link nobody thought about: the URL a
+  // view was registered with is the only file it may ever load. Everything a
+  // page legitimately fetches after that first load — its stylesheet, its
+  // scripts — is a subresource and never reaches this delegate.
+  //
+  // The custom scheme keeps its blanket allowance: AssetSchemeHandler serves
+  // only out of the bundle's own ui directory, so that fence is already inside
+  // it.
   func webView(
     _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
   ) {
-    let url = navigationAction.request.url
-    let ok = url?.isFileURL == true || url?.scheme == AssetSchemeHandler.scheme
-    decisionHandler(ok ? .allow : .cancel)
+    if navigationAction.request.url?.scheme == AssetSchemeHandler.scheme {
+      decisionHandler(.allow)
+      return
+    }
+    guard let url = navigationAction.request.url, url.isFileURL,
+          let allowed = allowedDocument[ObjectIdentifier(webView)]
+    else {
+      decisionHandler(.cancel)
+      return
+    }
+    // Resolved on both sides: a symlinked home, or a path carrying `..`, must
+    // not be able to read as a different string for the same file — nor as the
+    // same string for a different one.
+    let same = url.standardizedFileURL.resolvingSymlinksInPath()
+      == allowed.standardizedFileURL.resolvingSymlinksInPath()
+    decisionHandler(same ? .allow : .cancel)
   }
 
   // MARK: messages
@@ -688,6 +983,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       delegate?.openPeople()
       reply(webView, id, ["state": "ok"])
     case "openReconnect":
+      // A WIDENING THAT TRAVELS EXACTLY ONE FETCH.
+      //
+      // Onboarding's "show me anyone, just this once" peeks under a one-off mode
+      // and then hands over to this panel, which pulls under the STANDING mode --
+      // the one with nobody in it. The owner pressed a button, the flow finished,
+      // and the panel said "nothing to review" with their own chip lit. So the
+      // mode rides here, is held for the panel's first pull, and is gone.
+      //
+      // In memory, deliberately: it is a hand-off inside one launch, and a
+      // widening that survived a relaunch would be the durable write that button
+      // exists not to make.
+      if let mode = payload["oneOffMode"] as? String, Bridge.relationshipModes.contains(mode) {
+        pendingOneOffMode = mode
+      }
       delegate?.openReconnect()
       reply(webView, id, ["state": "ok"])
     case "widgetSpot":
@@ -733,9 +1042,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } catch {
         reply(webView, id, ["state": "error", "error": "copy failed: \(error.localizedDescription)"])
       }
-    case "openOnboarding":
-      delegate?.openOnboarding()
-      reply(webView, id, ["state": "ok"])
+    // ~~case "openOnboarding"~~ and ~~case "markHandheld"~~ were removed with
+    // the settings grants that were their only door (2026-09-13). Onboarding
+    // still opens from native -- first run, a resumed flow and the `onboarding`
+    // URL scheme all call main.swift's own openOnboarding -- and nothing ever
+    // called markHandheld. A handled case no page may call is dead code that
+    // looks live, and this file's own header says a granted-but-uncalled verb
+    // is a re-widened surface; both directions now agree.
     case "onboardingDone":
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.
@@ -751,14 +1064,63 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // load cannot burn the intro unseen.
       Bridge.connectorsIntroDone = true
       reply(webView, id, ["state": "ok"])
-    case "markHandheld":
-      // A connector kind that has now been walked through once.
-      let kind = String((payload["id"] as? String ?? "").prefix(64))
-      if !kind.isEmpty, kind.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) {
-        var list = Bridge.handheld
-        if !list.contains(kind) { list.append(kind); Bridge.handheld = list }
-      }
+    // LEAVING, AND LEAVING FOR GOOD. Both of these are settings rows, and both
+    // exist because this app is LSUIElement: no menu bar, no ⌘Q, no status
+    // item. Until they landed, the only ways to stop it were Activity Monitor
+    // and a shell script in a repo.
+    case "quitApp":
+      // THE REPLY GOES FIRST. terminate() tears this webview down with the app,
+      // so a reply sent after it never arrives and the page is left awaiting a
+      // promise that cannot settle -- which is the last frame the owner sees.
       reply(webView, id, ["state": "ok"])
+      // The services keep running: the launch agents are hermes, connect and
+      // the model server, and none of them is this process. The READER is this
+      // app's own child and stops with it (applicationWillTerminate), which is
+      // what the row says.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { NSApp.terminate(nil) }
+
+    case "uninstallApp":
+      // NATIVE ASKS, NOT THE PAGE. A destructive confirm drawn in a webview is
+      // a dialog the page could style, mistime or skip; an NSAlert is the one
+      // the owner already trusts, and Uninstall.confirm lists what is actually
+      // on this Mac rather than a generic sentence.
+      let plan = Uninstall.plan()
+      guard Uninstall.confirm(services: plan.services, apps: plan.apps) else {
+        reply(webView, id, ["state": "ok", "cancelled": true])
+        return
+      }
+      // OFF THE MAIN THREAD, AND NARRATED. Every step is a launchctl call with a
+      // waitUntilExit, plus a bounded wait on the reader: on the main thread
+      // that is a frozen window with nothing on screen saying why. The steps
+      // land in the row the owner pressed, through the same one-way push the
+      // model download uses.
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        guard let self else { return }
+        let outcome = Uninstall.run { step in
+          let literal = Bridge.jsString(step)
+          DispatchQueue.main.async {
+            webView.evaluateJavaScript(
+              "window.__hzUninstallStep && window.__hzUninstallStep(\(literal))",
+              completionHandler: nil)
+          }
+        }
+        self.reply(webView, id, [
+          "state": outcome.failures.isEmpty ? "ok" : "partial",
+          "services": outcome.services,
+          "apps": outcome.apps,
+          "failures": outcome.failures,
+          "dataKept": outcome.dataKept,
+          "readerRestarted": outcome.readerRestarted,
+        ])
+        // A HALF-UNINSTALL STAYS ON SCREEN. Quitting on a failure takes the
+        // window away along with the only account of what did not happen —
+        // /Applications can refuse a delete, and the owner needs to be told
+        // rather than left with an app that is still there and no explanation.
+        if outcome.failures.isEmpty {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { NSApp.terminate(nil) }
+        }
+      }
+
     case "prefs":
       reply(webView, id, [
         "state": "ok",
@@ -779,6 +1141,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           ? false : Bundle.main.bundlePath.hasPrefix("/Applications/"),
         "connectorsIntroDone": Bridge.connectorsIntroDone,
         "handheld": Bridge.handheld,
+        // THE FEATURE REGISTRY, TO THE PAGES. Carried on `prefs` rather than on
+        // a new verb because `prefs` is a sharedAction — bridge.js loads on
+        // every page, so every page can ask, and no page's capability list has
+        // to change to let it. See ops/FEATURES.md.
+        //
+        // Booleans only here, and the connectors table separately: a page
+        // deciding whether to draw a tile needs the three-state value, and
+        // flattening 'optional' to true/false at this boundary is exactly how
+        // the connections page would lose the distinction it exists to show.
+        "features": Dictionary(uniqueKeysWithValues:
+          FeatureSet.names.map { ($0, Features.on($0)) }),
+        "connectorFeatures": Dictionary(uniqueKeysWithValues:
+          FeatureSet.connectorNames.map { name -> (String, Any) in
+            switch Features.connector(name) {
+            case .on: return (name, true)
+            case .off: return (name, false)
+            case .optional: return (name, "optional")
+            }
+          }),
       ])
     case "setMotion":
       let on = payload["on"] as? Bool ?? false
@@ -833,6 +1214,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       KeepMacAwake.enabled = on
       reply(webView, id, ["state": "ok", "keepAwake": on])
     case "close":
+      // Closing chat hides the pending bubbles — the only cancel affordance —
+      // so work left running would bill and block for up to its timeout with
+      // nothing on screen naming it (review 2026-08-31). Chat only: another
+      // page's close must not touch chat's jobs.
+      if pageOf[ObjectIdentifier(webView)] == "chat" {
+        askTask?.cancel()
+        FrontierRunner.shared.cancel()
+      }
       delegate?.closeWindow(of: webView)
       reply(webView, id, ["state": "ok"])
     case "drag":
@@ -855,6 +1244,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "status":
       fetchStatus { [weak self] data in self?.reply(webView, id, data) }
+    case "linkedInReady":
+      // WHETHER LINKEDIN HAS MAILED TO SAY THE ARCHIVE IS DOWNLOADABLE, and
+      // nothing else about anything.
+      //
+      // The mail connector leaves a marker beside the import folder when it
+      // sees that mail (connectors/lib/linkedinExport.mjs), and connect's
+      // `linkedin-export` row relays its timestamp. This is that one field,
+      // lifted out of that one row, because the widget is a surface that has to
+      // say "your export is ready" and the whole connector shelf is not
+      // something the widget page has any business being handed.
+      //
+      // A TIMESTAMP OR NULL, and null already carries the second half of the
+      // question: exportReadyAt refuses to answer at all once Connections.csv
+      // is in place, so a non-null answer means ready AND not yet imported —
+      // the page does not have to combine two facts and cannot get it wrong.
+      //
+      // NOTHING HERE READS THE MARKER FILE, and Swift must not: the connector
+      // owns its lifetime and deletes it on the first run that sees an export.
+      // A second reader with its own idea of when the note is spent is how two
+      // surfaces come to disagree about whether the owner still has something
+      // to do.
+      fetchStatus { [weak self] data in
+        guard let self else { return }
+        let sources = data["sources"] as? [[String: Any]] ?? []
+        let row = sources.first { $0["id"] as? String == "linkedin-export" }
+        var out: [String: Any] = ["state": data["state"] as? String ?? "error"]
+        // NSNumber bridges to Double whether the JSON held an int or a float.
+        out["readyTs"] = (row?["linkedinExportReady"] as? Double).map { $0 as Any } ?? NSNull()
+        self.reply(webView, id, out)
+      }
     case "setConnectorEnabled":
       // This webview-controlled write is deliberately limited to the passive
       // WhatsApp connector marker; no arbitrary path reaches the filesystem.
@@ -925,6 +1344,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               // completed. Returning to the app fires the shelf's focus refresh;
               // the token file remains the source of truth. `why` is reserved
               // for a local validation or browser-launch failure.
+              // AND THE SCRIM GETS OUT OF THE BROWSER'S WAY. The onboarding
+              // panel is full-screen at .floating; a browser window is an
+              // ordinary one, so Google's consent page opened UNDERNEATH a
+              // scrim that swallowed every click on it. The only route to the
+              // browser was Escape, which closes the flow. Seen live on the
+              // clean-machine walk (2026-09-12): Dia opened behind and could
+              // not be reached. Yielding on the launch macOS accepted, not on
+              // consent, because consent is the thing that cannot be observed
+              // from here.
+              if ok { self.delegate?.yieldOnboardingToBrowser() }
               var out: [String: Any] = ["ok": ok, "opened": ok]
               if let why { out["refused"] = why }
               self.reply(webView, id, out)
@@ -934,6 +1363,44 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self.reply(webView, id, d)
         }
       }
+    case "importLinkedIn":
+      // LINKEDIN WILL NOT LET ANYTHING READ YOUR CONNECTIONS, so the owner
+      // asks LinkedIn for a copy and hands the file over. This is the whole
+      // import: a file picker, a check, a copy.
+      //
+      // THE CHECK HAPPENS BEFORE THE COPY, and that ordering is the feature.
+      // csvObjects parses these files by SCANNING for a header row containing
+      // a known anchor column; with no anchor it yields nothing, the connector
+      // records rows: 0 and ok: true, and the first-load screen then shows
+      // linkedin at zero with nothing anywhere saying the file was unreadable.
+      // A French export (Prénom/Nom) does exactly that. So the anchor is
+      // checked here, on the picked file, and a file that fails is not copied
+      // and is named back with its own first column quoted.
+      //
+      // "Is the anchor present anywhere in the first 4 KB", not "is it line
+      // one": LinkedIn puts a Notes: paragraph above the real header and
+      // csvObjects handles that fine, so a line-one check would reject files
+      // that parse perfectly.
+      //
+      // AND THE FILE LINKEDIN ACTUALLY SENDS IS A ZIP. This used to refuse one
+      // with a sentence telling the owner to unzip it themselves; it now takes
+      // Connections.csv out of the archive and checks THAT, by exactly the same
+      // rule. See extractConnections.
+      importLinkedIn { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "googleProbe":
+      // Whether the grant actually buys a READ, not whether a token file
+      // exists. See connect/server.mjs — consent can complete and
+      // messages.list still answer 403, and the token on disk cannot tell the
+      // difference. Counts and HTTP statuses come back; no address, no message
+      // id, no header, no snippet. 25s, because it is one live API call per
+      // account and a 5s default would report a slow network as a failed grant.
+      bridgeCall("GET", "api/google-probe", timeout: 25) { [weak self] d in
+        self?.reply(webView, id, d)
+      }
+
     case "connectSecret":
       let p = String(payload["p"] as? String ?? "")
       let value = String(payload["value"] as? String ?? "")
@@ -1248,7 +1715,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       if let label = Distiller.shared.activity {
         items.append(["kind": "index", "label": label])
       }
-      var activity: [String: Any] = ["state": "ok", "items": items]
+      // WHETHER THE THING THAT DOES THE WORK IS EVEN UP. An empty item list
+      // means "nothing in flight", which is the same picture for a reader that
+      // has finished, one that has not started and one that died — and the
+      // panel had no way to tell the owner which. The onboarding screen has
+      // always known (it reads the run log); settings gets the fact directly
+      // from the child process this app owns.
+      var activity: [String: Any] = [
+        "state": "ok", "items": items, "reading": Connectors.shared.isRunning,
+      ]
       if let estimate = Connectors.shared.activityEstimate {
         activity["estimate"] = estimate
       }
@@ -1316,12 +1791,130 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // proxies to hermes -- the page never holds the token, and the card
     // payload crosses as data the page renders with textContent only.
     case "relCard":
-      relHermes("GET", "admin/relationship/card", json: nil) { [weak self] out in
+      // SPENT, NOT READ. See openReconnect: the widening is for the pull that
+      // follows the hand-off and for nothing after it, so taking it here is what
+      // makes "just this once" true.
+      var cardQuery: [String] = []
+      if let mode = pendingOneOffMode {
+        cardQuery.append("mode=\(mode)")
+        pendingOneOffMode = nil
+      }
+      // THE OWNER ASKED FOR ANOTHER ONE. The day's card is served without being
+      // asked for and counts as the day's one interruption; a pull is the owner
+      // pressing "show me another" after rejecting it, which hermes allows three
+      // times a day and then answers `pulls-exhausted`. It is one boolean from
+      // the page and it becomes one query flag -- nothing else about the request
+      // changes, so a page that does not send it gets exactly today's behaviour.
+      if payload["pull"] as? Bool == true { cardQuery.append("pull=1") }
+      let cardPath = cardQuery.isEmpty
+        ? "admin/relationship/card"
+        : "admin/relationship/card?" + cardQuery.joined(separator: "&")
+      relHermes("GET", cardPath, json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    // A PEEK, NOT A SERVE. The widget's own 10-minute poll asks only whether
+    // a card is waiting and what it would tease. GET /card records 'shown',
+    // spends a global-cap slot, starts that person's 7-day pool cooldown and
+    // flips the two producers' turn -- all four for a card no human has
+    // looked at, on every poll, forever. ?peek=1 answers the tease and
+    // records nothing; only the reconnect panel's own pull serves.
+    case "relCardPeek":
+      // AN OPTIONAL ONE-OFF MODE, and nothing durable behind it. The route reads
+      // `mode` as askedMode: it wins for THIS request only, produces and serves
+      // under it, and never touches relationshipMemory.mode. That is what lets
+      // screen 6 offer a first card outside the owner's pick without quietly
+      // rewriting the pick. Validated against the same list the picker offers,
+      // so a page cannot ask for a mode hermes would have to reject.
+      var peekPath = "admin/relationship/card?peek=1"
+      if let mode = payload["mode"] as? String, Bridge.relationshipModes.contains(mode) {
+        peekPath += "&mode=\(mode)"
+      }
+      relHermes("GET", peekPath, json: nil) { [weak self] out in
         self?.reply(webView, id, out)
       }
 
     case "relRefresh":
-      relHermes("POST", "admin/relationship/refresh", json: [:]) { [weak self] out in
+      // "mode" is the only field the widget's mode picker sends; an absent
+      // or unrecognized value falls through to hermes' own config default
+      // (relationshipMemory.mode ?? 'any'), so no allowlist beyond the one
+      // key is needed here.
+      var refreshBody: [String: Any] = [:]
+      if let mode = payload["mode"] { refreshBody["mode"] = mode }
+      relHermes("POST", "admin/relationship/refresh", json: refreshBody) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "onboardingProgress":
+      // Screen 6's live table. Counts and projection state only -- see the
+      // route. Polled every 3s while the screen is up, which is why it must
+      // stay a read of already-computed numbers and never trigger a rebuild.
+      relHermes("GET", "admin/onboarding/progress", json: nil) { [weak self] out in
+        // AND WHY THE READER IS NOT RUNNING, when this app already knows.
+        //
+        // hazlie-tree-perms is FATAL in the daemon and says so only in the
+        // daemon's own log. Connectors.reassertTreePerms tries to satisfy it at
+        // every start and cannot for three shapes -- a symlinked directory, a
+        // path that is not a directory, a directory owned by root -- so the
+        // owner watches this screen wait for rows that will never come. The
+        // paths ride along with the table that is doing the waiting.
+        var body = out
+        let blockers = Connectors.shared.treePermsBlockers
+        if !blockers.isEmpty { body["treePermsBlockers"] = blockers }
+        self?.reply(webView, id, body)
+      }
+
+    case "cardConfig":
+      // The settings panel's one question for the reader: what is the daily
+      // card set to. Bearer-only and read-only on the hermes side; nothing here
+      // sends a body, so the page cannot write a setting through this door.
+      relHermes("GET", "admin/config/card", json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "setEngine":
+      // The page sends one of two words and nothing else; hermes checks it
+      // against its own closed list and owner.mjs does the write. Anything
+      // this bridge does not recognise never reaches the route, so a page
+      // cannot even attempt to name a third engine.
+      let askedEngine = String(payload["engine"] as? String ?? "")
+      guard ["claude-cli", "local"].contains(askedEngine) else {
+        reply(webView, id, ["state": "error", "error": "unknown engine"])
+        return
+      }
+      relHermes("POST", "admin/config/engine", json: ["engine": askedEngine]) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "relMode":
+      var modeBody: [String: Any] = [:]
+      for k in ["mode"] {
+        if let v = payload[k] { modeBody[k] = v }
+      }
+      // WRITTEN DOWN BEFORE IT IS SENT. See cardModePending: a press is the
+      // decision and the POST is only how it travels, so a hermes that cannot
+      // keep it today must not cost the owner their pick.
+      // VALIDATED BEFORE IT IS REMEMBERED. The pending value is re-delivered at
+      // every launch until hermes answers persisted:true, so a mode hermes will
+      // never accept is a full retry ladder on every launch, for ever, with
+      // nothing recording that it has already failed a hundred times. The page
+      // only offers these three today; that is a reason to write the list down,
+      // not a reason to trust the payload.
+      if let mode = payload["mode"] as? String, Bridge.relationshipModes.contains(mode) {
+        Bridge.cardModePending = mode
+        Bridge.cardModeLaunches = 0
+      }
+      relHermes("POST", "admin/relationship/mode", json: modeBody) { [weak self] out in
+        if out["persisted"] as? Bool == true { Bridge.cardModePending = nil }
+        self?.reply(webView, id, out)
+      }
+
+    case "relDraft":
+      var draftBody: [String: Any] = [:]
+      for k in ["snapshot_id"] {
+        if let v = payload[k] { draftBody[k] = v }
+      }
+      relHermes("POST", "admin/relationship/draft", json: draftBody) { [weak self] out in
         self?.reply(webView, id, out)
       }
 
@@ -1334,6 +1927,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         if let v = payload[k] { evt[k] = v }
       }
       relHermes("POST", "admin/relationship/event", json: evt) { [weak self] out in
+        // A judgment changes what the orb should show right now -- poke the
+        // widget rather than let it wait out the poll interval. AFTER the
+        // reply, not before it: firing this first raced the POST, so the
+        // widget's re-read reached hermes while the verdict was still in
+        // flight, got the same unjudged card back, and left the badge lit
+        // with the person the owner had just judged.
+        self?.delegate?.relCardChanged()
         self?.reply(webView, id, out)
       }
 
@@ -1394,6 +1994,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       ModelSetup.cancel()
       reply(webView, id, ["state": "ok"])
 
+    case "engineProbe":
+      // ASKS THE CLIENT, DOES NOT ASK THE FILESYSTEM. See EngineProbe.swift:
+      // "the binary resolves" is not the same question as "the binary works",
+      // and only the second one may be allowed to offer a switch that sends
+      // message excerpts off this Mac. The reply carries the configured engine
+      // as well, so the toggle renders from the config file rather than from a
+      // default that would read as an opt-out the owner never made.
+      EngineProbe.run { [weak self] out in
+        var result = out
+        if result["state"] == nil { result["state"] = "error" }
+        self?.reply(webView, id, result)
+      }
+
     case "onboardingStep":
       // Fire-and-forget from showScreen(). Bounded because it is a UserDefaults
       // key written from a webview message, and an unbounded string there is a
@@ -1424,23 +2037,73 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
 
     case "startSources":
-      // Write the connectors config if it is not there, then (re)start the
-      // daemon. There is no list of sources to choose: the daemon runs every
-      // connector it has credentials for and each one's needs() gates it, so
-      // the local Apple stores turn on together the moment Full Disk Access
-      // lands. The config is what makes the daemon boot AT ALL -- without it
-      // the agent parks at exit 1 -- so writing it is the whole action.
-      let ok = writeConnectorsConfigIfMissing()
-      // Started as a CHILD of this app, not bootstrapped into launchd, so the
-      // reader inherits this app's permissions instead of needing its own.
-      Provision.retireConnectorsAgent()
-      Connectors.shared.start()
-      Distiller.shared.start()
-      reply(webView, id, ["state": ok ? "ok" : "error"])
+      // WHETHER IT ACTUALLY CAME UP, not whether a config file exists.
+      // Connectors.start() returns silently on six guards, two of which
+      // (a stop latch, a model download holding the reader) are states the
+      // settings panel's "start it" button can land in — and it used to report
+      // success for every one of them, so the row said "starting…" for ever.
+      let started = startReadingSources()
+      reply(webView, id, [
+        "state": started.configWritten ? "ok" : "error",
+        "reading": started.outcome.isUp,
+        "why": started.outcome.rawValue,
+      ])
+
+    case "linkedInState":
+      // WHAT IS ALREADY HERE, so a second run of the flow does not ask for a
+      // file it has. Counts and a date; see linkedInState().
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        guard let self else { return }
+        self.reply(webView, id, self.linkedInState())
+      }
 
     case "permissionState":
-      Permissions.writeDiagnostic()
-      reply(webView, id, ["state": "ok", "permissions": Permissions.all])
+      // NO DIAGNOSTIC ON THE POLL PATH. This screen polls while it is up, and
+      // writeDiagnostic() evaluates Permissions.all a second time and writes a
+      // JSON file — so a 1.5s poll was four chat.db opens, a createDirectory
+      // and a file write every tick, forever, and on a denied machine four
+      // tccd denial events with it. The FDA row is primed by the FIRST
+      // attempt; the rest bought nothing. The page asks for the diagnostic on
+      // entry and after a request, which is when somebody is actually going to
+      // read the file.
+      let permissions = Permissions.all
+      let deepCheck = payload["diagnostic"] as? Bool == true
+      if deepCheck { Permissions.writeDiagnostic(mapped: permissions) }
+      // WHICH APP THE GRANT WOULD LAND ON — AND ONLY WHEN THAT IS A REAL
+      // QUESTION ON THIS MAC.
+      //
+      // The 30 August rename left com.hazlie.widget allowed in Full Disk
+      // Access and io.intaglio.widget denied. fullDisk() probes from THIS
+      // process, so it reported denied correctly — but the owner was looking
+      // at a Settings list holding a row labelled "intaglio labs" with its
+      // switch ON, and the screen stayed red with nothing to explain the
+      // contradiction. So the screen named the identifier.
+      //
+      // It named it to EVERYONE, including the great majority who have never
+      // had a pre-rename install — a bundle identifier on the second screen of
+      // a consumer flow, explaining a developer's problem. `staleBundle` is the
+      // probe's answer instead: present only when this process cannot read AND
+      // this Mac carries the marks of an install from before the rename. The
+      // page says nothing unless it is there. `bundle` stays on the reply for
+      // the sentence to name and for the diagnostic to keep recording.
+      var permReply: [String: Any] = [
+        "state": "ok",
+        "permissions": permissions,
+        "bundle": Bundle.main.bundleIdentifier ?? "?",
+      ]
+      // ON THE SAME PATH AS THE DIAGNOSTIC, AND FOR THE SAME REASON. The screen
+      // polls while it is up; staleGrantBundle is two directory reads and two
+      // stats, and the machine it runs on is by definition the one where the
+      // poll is already costing tccd denials. The page asks for the deep check
+      // on entry and after a permission request, which is when the answer can
+      // have changed, and `staleChecked` tells it which kind of reply this is
+      // so a poll cannot rub out the line an entry drew.
+      permReply["staleChecked"] = deepCheck
+      if deepCheck,
+         let stale = Permissions.staleGrantBundle(disk: Permissions.fullDiskStatus(mapped: permissions)) {
+        permReply["staleBundle"] = stale
+      }
+      reply(webView, id, permReply)
 
     case "requestPermission":
       // A real system prompt, in context, naming this app. macOS shows it once
@@ -1458,6 +2121,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // Granted mid-flow means the reader can suddenly see more; nudge it so
         // the owner does not wait for the next poll to see anything happen.
         if status == .granted { Connectors.shared.start() }
+        // The one moment the raw authorization values are worth a file: a
+        // prompt was just displayed (or declined to display) and this is what
+        // each API answered afterwards.
+        Permissions.writeDiagnostic()
         self.reply(webView, id, ["state": "ok", "which": which, "status": status.rawValue])
       }
 
@@ -1539,6 +2206,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self?.reply(webView, id, ["state": ok ? "ok" : "error"])
         }
       }.resume()
+    case "frontierSend":
+      // THIS IS THE CONSENT BOUNDARY. chat.js sends the value of the visible,
+      // editable textarea only after the owner presses the provider-named send
+      // button. The wire shape is exactly {provider, prompt} and anything else
+      // is refused outright — a denylist of suspicious names was proven
+      // bypassable by a field called "notes" in review (2026-08-31), so the
+      // guard is on the whole key set, not on names someone thought of.
+      guard payload.keys.allSatisfy({ $0 == "provider" || $0 == "prompt" }) else {
+        reply(webView, id, ["state": "error", "error": "bad frontier request"])
+        break
+      }
+      let providerName = String((payload["provider"] as? String ?? "").prefix(16))
+      let prompt = String((payload["prompt"] as? String ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines).prefix(12_000))
+      guard let provider = FrontierProvider(rawValue: providerName), !prompt.isEmpty else {
+        reply(webView, id, ["state": "error", "error": "bad frontier request"])
+        break
+      }
+      let work = Bridge.activeWork.begin("waiting for \(providerName)")
+      FrontierRunner.shared.run(provider: provider, prompt: prompt) { [weak self] result in
+        Bridge.activeWork.finish(work)
+        self?.reply(webView, id, result)
+      }
+    case "frontierCancel":
+      // Two cancel verbs on purpose. The shared "cancel" briefly cancelled the
+      // frontier job too, so cancelling a slow local ask silently discarded a
+      // frontier answer that was already sent and billed — and vice versa
+      // (review 2026-08-31). Each pending bubble cancels only its own job.
+      FrontierRunner.shared.cancel()
+      reply(webView, id, ["state": "ok"])
     case "cancel":
       askTask?.cancel()
       reply(webView, id, ["state": "ok"])
@@ -1550,6 +2247,152 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } else {
         reply(webView, id, ["state": "error", "error": "url not in allowlist"])
       }
+    case "openProfile":
+      // THE ONE EXTERNAL URL THAT CANNOT BE ON A FIXED ALLOWLIST: a person's own
+      // LinkedIn profile, which came out of the owner's own export and is
+      // different for every card. `openExternal` above is a set of literal
+      // strings and must stay that way — this is a separate, narrower door with
+      // the host pinned instead of the whole string.
+      //
+      // https only, linkedin.com or www.linkedin.com only, and a /in/ path
+      // only: that is the shape graph.mjs stores, and anything else is either a
+      // corrupted row or a page asking for something it was not given.
+      // LENGTH IS A REFUSAL, NOT A TRIM. ~~prefix(300)~~ truncated before
+      // parsing, so an over-long row opened a silently different path.
+      let asked = payload["url"] as? String ?? ""
+      guard asked.count <= 300,
+            let parsed = URL(string: asked), parsed.scheme == "https",
+            let host = parsed.host?.lowercased(),
+            host == "linkedin.com" || host == "www.linkedin.com",
+            parsed.path.hasPrefix("/in/"),
+            var rebuilt = URLComponents(url: parsed, resolvingAgainstBaseURL: false)
+      else {
+        reply(webView, id, ["state": "error", "error": "not a linkedin profile"])
+        return
+      }
+      // REBUILT FROM ITS PARTS, not opened as written. The export row carries a
+      // ?trk= tracking parameter, which is this app handing LinkedIn a referrer
+      // for a click the owner made privately — and rebuilding also removes the
+      // whole class of disagreement between Foundation's parser and the
+      // browser's about exotic inputs. Scheme, host, path; nothing else.
+      rebuilt.query = nil
+      rebuilt.fragment = nil
+      rebuilt.user = nil
+      rebuilt.password = nil
+      rebuilt.port = nil
+      guard let profile = rebuilt.url else {
+        reply(webView, id, ["state": "error", "error": "not a linkedin profile"])
+        return
+      }
+      NSWorkspace.shared.open(profile)
+      reply(webView, id, ["state": "ok"])
+
+    case "openLinkedInExport":
+      // "REQUEST A COPY" — AND THE PAGE DOES NOT GET TO SAY WHERE.
+      //
+      // Onboarding screen 4 sends the owner to LinkedIn's data-download page.
+      // Unlike openProfile there is nothing per-person about that address, so
+      // the payload carries no url at all and this case reads the constant:
+      // openProfile pins a HOST because its path comes out of the owner's own
+      // export, and this pins the whole STRING because there is only ever one.
+      //
+      // openExternal would do the same job and is deliberately not used. It is
+      // granted to connections and people, and giving onboarding a verb that
+      // opens anything on a shared allowlist widens the surface of the one page
+      // that runs before the owner has agreed to anything. This door opens one
+      // page, and the guard below is what keeps it the page in the allowlist.
+      guard allowedExternal.contains(Bridge.linkedInExportPage),
+            let exportPage = URL(string: Bridge.linkedInExportPage)
+      else {
+        reply(webView, id, ["state": "error", "error": "no linkedin export page"])
+        return
+      }
+      let openedExport = NSWorkspace.shared.open(exportPage)
+      // AND THE SCRIM GETS OUT OF THE BROWSER'S WAY, exactly as googleAuth does
+      // and for exactly the same reason: the onboarding panel is full-screen at
+      // .floating, a browser window is an ordinary one, and without this the
+      // page the owner was just sent to opens UNDERNEATH a scrim that swallows
+      // every click on it. See yieldOnboardingToBrowser.
+      //
+      // Gated on the launch macOS accepted. Lowering the scrim for a browser
+      // that never opened would leave the flow sitting behind every other window
+      // with nothing to come back from.
+      if openedExport { delegate?.yieldOnboardingToBrowser() }
+      reply(webView, id, ["state": openedExport ? "ok" : "error", "opened": openedExport])
+
+    case "exportOffer":
+      // WHAT THE PANEL IS ASKING ABOUT, or that there is nothing to ask about.
+      // A name, the folder it is in and how old it is -- the three things the
+      // owner needs to recognise their own download -- and never the path,
+      // which the page has no use for and no business holding.
+      if let pending = pendingExport {
+        reply(webView, id, ["state": "ok", "name": pending.name,
+                            "folder": pending.folder, "dated": pending.dated])
+      } else {
+        reply(webView, id, ["state": "ok", "name": NSNull()])
+      }
+
+    case "exportDecide":
+      // THREE ANSWERS, AND ONLY TWO OF THEM SPEND THE OFFER.
+      //
+      //   take: true    import it. The offer ends if the import WORKED -- a
+      //                 failure leaves the archive exactly where it was, still
+      //                 the one the owner wanted, and the key is
+      //                 (path, size, mtime), none of which a failure changes,
+      //                 so spending it there refused that file forever.
+      //   take: false   "not this one". A real answer, and it ends the offer.
+      //   no `take`     "not now" -- the ✕. Closes the panel and takes the glow
+      //                 back, and leaves the archive re-offerable: the watcher
+      //                 holds it aside until the owner next comes back to the
+      //                 app. The close box used to post nothing at all, so the
+      //                 gear glowed forever over an offer nothing could
+      //                 re-present.
+      //
+      // The page names no file: it answers about whatever this bridge is
+      // holding, so a compromised panel can accept an offer it was shown and
+      // nothing else.
+      guard let pending = pendingExport else {
+        reply(webView, id, ["state": "ok", "taken": false])
+        return
+      }
+      let take = payload["take"] as? Bool
+      pendingExport = nil
+      delegate?.linkedInExportOfferClosed()
+      guard take == true else {
+        // `false` is a verdict and spends it; a missing `take` is the ✕.
+        ExportWatch.shared.answerOffer(pending.key, keep: take == false)
+        reply(webView, id, ["state": "ok", "taken": false])
+        return
+      }
+      importLinkedIn(files: [pending.url]) { [weak self] out in
+        let ok = out["state"] as? String == "ok"
+        ExportWatch.shared.answerOffer(pending.key, keep: ok)
+        self?.reply(webView, id, ["state": "ok", "taken": true,
+                                  "result": out["state"] as? String ?? "error",
+                                  "reason": out["reason"] as? String ?? NSNull(),
+                                  "connections": out["connections"] as? Int ?? 0])
+      }
+
+    case "watchForExport":
+      // ARM THE WATCHER, FROM THE ONE SCREEN THAT HAS EXPLAINED THE FILE.
+      //
+      // The first read of ~/Downloads is what makes macOS ask the owner for that
+      // folder, and starting the watcher at launch put that dialog over
+      // onboarding screens 1 to 3 — no context, and while screen 2 is telling
+      // its own story about a different grant (review finding 2). Screen 4 is
+      // where the owner has just been told there is a file coming, so it is
+      // where the question about the folder it will land in belongs.
+      //
+      // Sent by "request a copy" and by "later", which are the two answers that
+      // mean the file is still to come. "i have it" does not: that path ends in
+      // an installed export, and ExportWatch refuses to start for one.
+      //
+      // Answers immediately. Whether a folder actually opened is not this
+      // screen's business — the pickers work either way — and a reply that
+      // waited on a TCC dialog would hang the press.
+      ExportWatch.shared.begin(bridge: self)
+      reply(webView, id, ["state": "ok"])
+
     case "openApp":
       let bundleId = String((payload["bundleId"] as? String ?? "").prefix(96))
       guard allowedApps.contains(bundleId),
@@ -1742,6 +2585,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
 
+  /// A JS string literal for a value this app produced. JSONSerialization does
+  /// the escaping, so a path with a quote or a newline in it cannot end the
+  /// literal early — the same helper main.swift keeps for its own pushes.
+  static func jsString(_ s: String) -> String {
+    guard let d = try? JSONSerialization.data(withJSONObject: [s]),
+          let arr = String(data: d, encoding: .utf8) else { return "\"\"" }
+    return "\(arr)[0]"
+  }
+
   private func reply(_ webView: WKWebView, _ id: Int, _ data: [String: Any]) {
     let envelope: [String: Any] = ["id": id, "ok": true, "data": data]
     guard JSONSerialization.isValidJSONObject(envelope),
@@ -1828,6 +2680,205 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       DispatchQueue.main.async { done(n, memory) }
     }.resume()
+  }
+
+  /// Write the connectors config if it is missing, retire the launchd agent
+  /// and start the daemon as a child of this app.
+  ///
+  /// THE ONE PLACE THAT DOES IT, because two callers need all three steps and
+  /// one of them used to do only the last. The config is what makes the daemon
+  /// boot AT ALL — without it the agent parks at exit 1, and Connectors.start()
+  /// returns silently — so writing it is the whole action, and an importer
+  /// that calls start() alone on a machine where screen 2 was skipped
+  /// schedules nothing at all.
+  ///
+  /// MAIN QUEUE ONLY. Connectors.start() takes no lock, reads and writes
+  /// isRunning, lastStart and process, and re-dispatches its own throttle
+  /// retry and termination handling onto .main — it is main-thread-assumed,
+  /// and every other call site is on main. The LinkedIn import runs its checks
+  /// on a background queue, so it hops before it calls this.
+  @discardableResult
+  private func startReadingSources() -> (configWritten: Bool, outcome: Connectors.StartOutcome) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    // There is no list of sources to choose: the daemon runs every connector
+    // it has credentials for and each one's needs() gates it, so the local
+    // Apple stores turn on together the moment Full Disk Access lands.
+    let ok = writeConnectorsConfigIfMissing()
+    // THE ONE CARD A DAY SCREEN 1 PROMISED, AND THE PRODUCER THAT MAKES IT.
+    //
+    // hermes gates the whole reconnect card on relationshipMemory.capPerDay and
+    // fails closed when it is absent -- no config, no cards -- because a
+    // threshold is the owner's to set and never one the server invents. The
+    // file written just above is `{}`, so without this the card never arrives
+    // on a fresh install no matter how much the reader ingests.
+    //
+    // This is not the app inventing that threshold either. Screen 1 says "one
+    // person a day" in its title and "one card a day" in the paragraph under
+    // it, directly above the button the owner pressed to get here: the press is
+    // the owner accepting one a day, and this is onboarding writing down what
+    // they were shown. hermes writes it only when the key is absent, so a
+    // second run of the flow never overrides a number they later changed.
+    //
+    // The producer travels with it because it has the same shape of problem.
+    // hermes reads an absent relationshipMemory.producer as the legacy matcher
+    // path, which is the safe reading for an owner who chose to stay there and
+    // the wrong one for a machine with no owner history at all: the card this
+    // app ships is the eligibility producer's, and every judgment behind it was
+    // made against that producer. Same rule, same call, written only if absent.
+    //
+    // Recorded before the reader starts and never gating it: these decide
+    // whether a card appears tomorrow, and a hermes that is not up yet is no
+    // reason to leave every source unread today. Asynchronous, retried, and
+    // remembered across launches -- see recordCardDefaults.
+    recordCardDefaults()
+    // Started as a CHILD of this app, not bootstrapped into launchd, so the
+    // reader inherits this app's permissions instead of needing its own.
+    Provision.retireConnectorsAgent()
+    let outcome = Connectors.shared.start()
+    // AND IF IT WAS ALREADY UP, TELL IT SOMETHING CHANGED.
+    //
+    // start() is idempotent and therefore silent when the daemon is running,
+    // which is the case on every call after the first — and those later calls
+    // are the interesting ones: this method is called when screen 2 is left,
+    // after the Google sign-in, after the LinkedIn import and on entering
+    // screen 6. On the second clean-machine run the daemon had already answered
+    // "not ready" for mail and linkedin before the owner did either, and
+    // nothing here told it otherwise; ten minutes later it still had not asked
+    // again. The nudge is what makes the reader look within seconds of the
+    // owner finishing. See Connectors.nudge().
+    Connectors.shared.nudge()
+    Distiller.shared.start()
+    return (ok, outcome)
+  }
+
+  /// Roughly two minutes of attempts, front-loaded. hermes' own warm-up window
+  /// is the case this covers, and it is seconds rather than minutes; the long
+  /// tail is for a hermes that is being reinstalled underneath the app.
+  private static let cardDefaultsRetryDelays: [Double] = [2, 4, 8, 12, 16, 16, 16, 16, 16]
+
+  /// WRITE THE INTENT DOWN, THEN TRY TO DELIVER IT.
+  ///
+  /// The owner's press is the decision; the POST is only how it travels. This
+  /// used to be one fire-and-forget request whose failure was an NSLog, so a
+  /// first launch where hermes was still warming -- the ordinary case, since
+  /// the same launch starts it -- left relationshipMemory.capPerDay unwritten
+  /// and hermes answering no-cap-configured for ever, with the reconnect card
+  /// the whole product is about never appearing. The three startedSources call
+  /// sites made that a coin flip rather than a certainty.
+  ///
+  /// The flag is set FIRST and cleared only by a reply that says the settings
+  /// were taken, so a crash, a quit mid-retry or a hermes that is down for the
+  /// rest of the session all end the same way: the next launch tries again.
+  private func recordCardDefaults() {
+    Bridge.cardDefaultsPending = true
+    postCardDefaults(attempt: 0)
+  }
+
+  /// The next launch's half of recordCardDefaults. Called once from
+  /// applicationDidFinishLaunching; a no-op on every machine whose settings
+  /// have already landed, which after the first success is all of them.
+  func resumeCardDefaultsIfPending() {
+    if Bridge.cardDefaultsPending { postCardDefaults(attempt: 0) }
+    resumeCardModeIfPending()
+  }
+
+  /// ONE CHAIN, NOT FOUR. recordCardDefaults is reachable from all three
+  /// startedSources call sites and resumeCardDefaultsIfPending fires
+  /// independently at launch, so a first launch with hermes down ran four
+  /// independent chains of up to ten POSTs each. Nothing breaks -- the route is
+  /// write-if-absent and always answers ok -- but it is forty requests where one
+  /// was meant, against a hermes that is already struggling, which is the only
+  /// condition under which the chains exist at all.
+  private var cardDefaultsInFlight = false
+  private var cardDefaultsInFlightSince = Date.distantPast
+  private var cardModeInFlightSince = Date.distantPast
+
+  /// HOW LONG AN IN-FLIGHT FLAG MAY STAND WITHOUT A COMPLETION.
+  ///
+  /// The flags are cleared on success and on giving up, which covers every
+  /// completion — and a completion that never arrives is not one of them. A
+  /// request that neither succeeds nor errors therefore pinned the flag for the
+  /// life of the process and made every later resume a silent no-op. The chains
+  /// exist only when hermes is already struggling, which is the condition most
+  /// likely to produce exactly that. Longer than the whole retry ladder (about
+  /// two minutes), so this can never cut a live chain short.
+  static let inFlightStaleAfter: TimeInterval = 300
+
+  private func postCardDefaults(attempt: Int) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    if attempt == 0 {
+      if cardDefaultsInFlight,
+         Date().timeIntervalSince(cardDefaultsInFlightSince) < Bridge.inFlightStaleAfter { return }
+      cardDefaultsInFlight = true
+      cardDefaultsInFlightSince = Date()
+    }
+    relHermes("POST", "admin/config/card",
+              json: ["capPerDay": 1, "producer": "eligibility"]) { [weak self] out in
+      let state = out["state"] as? String ?? "unknown"
+      if state == "ok" {
+        Bridge.cardDefaultsPending = false
+        self?.cardDefaultsInFlight = false
+        return
+      }
+      guard let self, attempt < Bridge.cardDefaultsRetryDelays.count else {
+        // Giving up for this launch only. The flag stays set, which is what
+        // makes the next one pick it up.
+        NSLog("Intaglio Labs: daily card settings not recorded (\(state)) — retrying next launch")
+        self?.cardDefaultsInFlight = false
+        return
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + Bridge.cardDefaultsRetryDelays[attempt]) {
+        self.postCardDefaults(attempt: attempt + 1)
+      }
+    }
+  }
+
+  private var cardModeInFlight = false
+
+  /// The mode's half of the same story, on the same retry ladder. A reply
+  /// without `persisted: true` is not a delivery: the route answers 200 either
+  /// way, and 200 is exactly what it says when the config write failed.
+  func resumeCardModeIfPending() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let mode = Bridge.cardModePending else { return }
+    // A value this build does not recognise, or one that has outlived its
+    // ceiling, is dropped rather than re-sent for ever. See cardModeMaxLaunches.
+    guard Bridge.relationshipModes.contains(mode),
+          Bridge.cardModeLaunches < Bridge.cardModeMaxLaunches
+    else {
+      NSLog("Intaglio Labs: giving up on an unrecorded card mode after \(Bridge.cardModeLaunches) launches")
+      Bridge.cardModePending = nil
+      Bridge.cardModeLaunches = 0
+      return
+    }
+    Bridge.cardModeLaunches += 1
+    postCardMode(attempt: 0)
+  }
+
+  private func postCardMode(attempt: Int) {
+    guard let mode = Bridge.cardModePending else { cardModeInFlight = false; return }
+    if attempt == 0 {
+      if cardModeInFlight,
+         Date().timeIntervalSince(cardModeInFlightSince) < Bridge.inFlightStaleAfter { return }
+      cardModeInFlight = true
+      cardModeInFlightSince = Date()
+    }
+    relHermes("POST", "admin/relationship/mode", json: ["mode": mode]) { [weak self] out in
+      if out["persisted"] as? Bool == true {
+        Bridge.cardModePending = nil
+        Bridge.cardModeLaunches = 0
+        self?.cardModeInFlight = false
+        return
+      }
+      guard let self, attempt < Bridge.cardDefaultsRetryDelays.count else {
+        NSLog("Intaglio Labs: card mode not recorded — retrying next launch")
+        self?.cardModeInFlight = false
+        return
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + Bridge.cardDefaultsRetryDelays[attempt]) {
+        self.postCardMode(attempt: attempt + 1)
+      }
+    }
   }
 
   /// The connectors daemon refuses to start without ~/.hazlie/connectors/config.json
@@ -2149,6 +3200,930 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         }
       }
     }
+  }
+
+  // MARK: the LinkedIn export
+
+  /// The header columns that identify LinkedIn's files, and the canonical
+  /// names the connector looks for.
+  ///
+  /// CLASSIFIED BY ANCHOR, NOT BY FILENAME. The owner may have renamed the
+  /// file, and a downloaded copy is frequently `Connections (1).csv`. The
+  /// anchor is what the parser actually keys on
+  /// (connectors/lib/linkedinRows.mjs), so it is also what decides which file
+  /// this is — and checking it is checking the parse.
+  ///
+  /// AND BY A SECOND COLUMN, because one column is not a file identity. The
+  /// export zip holds THREE files with an exact `First Name` column:
+  /// Connections.csv, Profile.csv and Contacts.csv. On the anchor alone,
+  /// picking Profile.csv passes the check and is copied OVER Connections.csv —
+  /// and then ingests as connections with no `URL` and no `Connected On`, so
+  /// every row lands on the export's fallback timestamp under a hashed slug,
+  /// with the screen reporting "imported". A good export destroyed by a file
+  /// whose name sounds right.
+  ///
+  /// `require` names the two columns linkedinRows.mjs actually reads — the
+  /// dormancy clock and the profile slug — and one of them must be there.
+  /// Contacts.csv's `Profile URL` is a DIFFERENT field, which is why the
+  /// comparison below is exact rather than a substring.
+  private static let linkedInKinds: [(anchor: String, require: [String], name: String)] = [
+    ("First Name", ["Connected On", "URL"], "Connections.csv"),
+    ("CONVERSATION ID", [], "messages.csv"),
+  ]
+
+  /// Whitespace, newlines and a byte-order mark.
+  ///
+  /// csv.mjs compares `f.trim() === anchor`, and JS `trim()` strips U+FEFF.
+  /// Swift's `.whitespacesAndNewlines` does not, so a BOM'd export would read
+  /// its first column as "\u{FEFF}First Name" here and "First Name" there —
+  /// the two sides disagreeing about the same file, which is the whole thing
+  /// this check exists to prevent.
+  private static let csvFieldTrim = CharacterSet.whitespacesAndNewlines
+    .union(CharacterSet(charactersIn: "\u{FEFF}"))
+
+  /// Which LinkedIn file this is, decided by THE PARSER'S OWN RULE.
+  ///
+  /// connectors/lib/csv.mjs finds the header as the first row holding a FIELD
+  /// whose trim() equals the anchor. `head.contains(anchor)` is not that rule:
+  /// it also accepts a column called "First Name (Legal)" — which passes here
+  /// and then throws inside csvObjects — and it accepts the anchor turning up
+  /// in LinkedIn's Notes: preamble or in somebody's job title. Same walk, same
+  /// comparison, same answer.
+  ///
+  /// Rows are scanned rather than assuming row zero, because the preamble is
+  /// real and csvObjects handles it.
+  private static func linkedInKind(of head: String) -> (anchor: String, name: String)? {
+    for row in csvRows(head) {
+      let fields = csvFields(row)
+      for kind in linkedInKinds where fields.contains(kind.anchor) {
+        if kind.require.isEmpty || kind.require.contains(where: { fields.contains($0) }) {
+          return (kind.anchor, kind.name)
+        }
+      }
+    }
+    return nil
+  }
+
+  /// One parsed row's fields, trimmed the way csv.mjs trims them. Shared so
+  /// that "which file is this" and "how many records does it hold" cannot
+  /// drift into two different rules about the same header.
+  private static func csvFields(_ row: [String]) -> Set<String> {
+    Set(row.map { $0.trimmingCharacters(in: csvFieldTrim) })
+  }
+
+  /// RFC-4180 rows: quoted fields, doubled-quote escapes, and commas and
+  /// newlines inside quotes. The same character walk as connectors/lib/csv.mjs
+  /// because it has to reach the same header row on the same file.
+  ///
+  /// ONE WALK, TWO CONSUMERS, AND ONLY ONE OF THEM KEEPS ANYTHING. The rows
+  /// are handed over as they are parsed and dropped again unless the caller
+  /// holds on to them: countRows() reads a whole 8-10 MB export through this
+  /// and keeps one row at a time, where collecting first meant ~400k live
+  /// Strings for a 30k-connection file while the import button spun. csvRows()
+  /// below is the collecting caller, and it is only ever handed a 4 KB head.
+  ///
+  /// A bounded head's final row may be a fragment. That is fine: a fragment
+  /// either holds the columns or it does not, and a header that does not fit
+  /// in 4 KB is not a LinkedIn export.
+  private static func csvScan(_ text: String, _ onRow: ([String]) -> Void) {
+    var row: [String] = []
+    var field = ""
+    var inQuotes = false
+    var iterator = text.makeIterator()
+    var pending: Character?
+    while let c = pending ?? iterator.next() {
+      pending = nil
+      if inQuotes {
+        if c == "\"" {
+          guard let next = iterator.next() else { inQuotes = false; break }
+          if next == "\"" { field.append("\""); continue }
+          inQuotes = false
+          pending = next
+          continue
+        }
+        field.append(c)
+        continue
+      }
+      if c == "\"" { inQuotes = true; continue }
+      if c == "," { row.append(field); field = ""; continue }
+      if c == "\n" || c == "\r" {
+        // CRLF is one ending, not two.
+        if c == "\r", let next = iterator.next(), next != "\n" { pending = next }
+        row.append(field)
+        field = ""
+        onRow(row)
+        row = []
+        continue
+      }
+      field.append(c)
+    }
+    if !field.isEmpty || !row.isEmpty {
+      row.append(field)
+      onRow(row)
+    }
+  }
+
+  /// Every row at once, for the callers that need to look back over them. Only
+  /// ever handed a bounded head — see csvScan.
+  private static func csvRows(_ text: String) -> [[String]] {
+    var rows: [[String]] = []
+    csvScan(text) { rows.append($0) }
+    return rows
+  }
+
+  /// Serialises acceptLinkedInFiles across its three callers. See the docstring
+  /// there for what overlapping calls did to each other's staged copies.
+  private static let importLock = NSLock()
+
+  /// Where the installed export lives — the directory
+  /// connectors/sources/linkedin.mjs polls.
+  ///
+  /// A TYPE PROPERTY, because the Downloads watcher asks whether an export is
+  /// already here before there is any reason to hold a Bridge. See ExportWatch.
+  static var linkedInDirectory: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hazlie/imports/linkedin", isDirectory: true)
+  }
+
+  /// Whether an export is installed AND still parses — the Downloads watcher's
+  /// only question, and the condition that stops it watching.
+  ///
+  /// The same rule the import applies, not `fileExists`: a truncated or
+  /// hand-dropped file that the connector cannot read is not an export the
+  /// owner has, and a watcher that fell silent on one would be waiting for a
+  /// file that had already been "found".
+  static var linkedInExportInstalled: Bool {
+    let destination = Bridge.linkedInDirectory.appendingPathComponent("Connections.csv")
+    guard FileManager.default.fileExists(atPath: destination.path),
+          let head = readHead(of: destination, bytes: 4096),
+          let kind = linkedInKind(of: head)
+    else { return false }
+    return kind.name == "Connections.csv"
+  }
+
+  /// THE FILE LINKEDIN ACTUALLY SENDS.
+  ///
+  /// "Get a copy of your data" arrives as `Complete_LinkedInDataExport_*.zip`
+  /// or `Basic_LinkedInDataExport_*.zip` — never as a bare CSV — so the picker
+  /// used to greet the owner's own download with "that's the zip, unzip it
+  /// yourself". The comment that justified it said extraction would mean a
+  /// subprocess and every check in this flow runs in this process; that was
+  /// true and it was the wrong trade. One `/usr/bin/unzip` beats asking the
+  /// owner to do the work by hand on the screen that is about handing a file
+  /// over. (Foundation has no archive API at all, so there is no third option.)
+  ///
+  /// ONE ENTRY, CHOSEN BY NAME, AND NOTHING ELSE.
+  ///
+  /// ~~"The pattern is the literal `Connections.csv` with no wildcard in it, so
+  /// unzip can match at most the one root entry."~~ True, and it was the wrong
+  /// entry to insist on (review finding 5, 2026-09-13): a Complete archive
+  /// NESTS its files under `Complete_LinkedInDataExport_<stamp>/`, and so does
+  /// any archive re-made with Finder's Compress. Those all came back `.notFound`
+  /// — and the sentence that answer produces tells the owner to ask LinkedIn for
+  /// "Connections", which they already did, and requesting again produces the
+  /// identical archive. A dead end reached by doing everything right.
+  ///
+  /// So the archive is LISTED first (`unzip -Z1`) and the entry is chosen here,
+  /// where a rule can be written, rather than left to a shell-glob-shaped
+  /// pattern:
+  ///
+  ///   the basename must be exactly `Connections.csv`, so Profile.csv and
+  ///   Contacts.csv — which share its anchor column and would destroy a good
+  ///   import — cannot be reached by any depth of nesting;
+  ///   `__MACOSX/` is skipped, because Finder's Compress puts a resource-fork
+  ///   stub of that very name in there and its body is not a CSV;
+  ///   the shallowest match wins, so a root entry beats a nested one;
+  ///   and a name that appears TWICE is refused rather than extracted, because
+  ///   `unzip -p` would concatenate both bodies into one file and the 4 KB head
+  ///   check downstream only ever sees the first (review finding 17).
+  ///
+  /// The chosen name is then escaped before it goes back to unzip, whose `-p`
+  /// pattern is a glob: an entry under a folder called `w[x]` does not match
+  /// itself unless its brackets are quoted. Verified both ways against a real
+  /// archive in linkedin-export-handoff.test.mjs.
+  ///
+  /// The zip's own modification date is stamped onto the extracted copy. Every
+  /// caller downstream reads that date — PASS ONE refuses an older export than
+  /// the installed one, and the swap records it as the vintage — and a freshly
+  /// extracted file is dated `now`, which would make last year's archive look
+  /// like today's export.
+  ///
+  /// Returns nil for an archive that could not be read at all, and
+  /// `.notFound` for one that opened and has no Connections.csv in it: those
+  /// are different sentences on the screen, and only the second has a remedy.
+  enum ZipExtraction {
+    case extracted(URL)
+    /// The archive opened and lists no `Connections.csv` ANYWHERE in it, at any
+    /// depth. The one failure with a remedy in it: the owner asked LinkedIn for
+    /// the wrong thing, and the next request can fix it.
+    case notFound
+    /// Could not be read as an archive at all — or could, and the entry it lists
+    /// could not be taken out of it. Either way there is nothing for the owner
+    /// to do differently, so they are not told to do anything.
+    case unreadable
+  }
+
+  /// A cap on what comes out of the archive. A 30k-connection Connections.csv
+  /// is 8-10 MB; this is three orders of magnitude of headroom and still stops
+  /// a hostile archive filling the owner's disk. Exceeding it kills unzip and
+  /// reports the archive as unreadable, which is what it is.
+  private static let zipExtractionCap = 512 * 1024 * 1024
+
+  /// The entry names in an archive, or nil if it could not be read as one.
+  /// `-Z1` is zipinfo's bare-name listing: one name per line, no columns to
+  /// parse and no sizes or dates to mistake for one.
+  ///
+  /// Bounded like everything else that reads a file the owner did not write: a
+  /// listing this large is not a LinkedIn export, and the alternative is holding
+  /// an arbitrary archive's whole name table in memory.
+  private static let zipListingCap = 4 * 1024 * 1024
+
+  static func zipEntries(in zip: URL) -> [String]? {
+    guard let data = runCapturing(
+      "/usr/bin/unzip", ["-Z1", zip.path], cap: zipListingCap),
+      data.status == 0, let text = String(data: data.output, encoding: .utf8)
+    else { return nil }
+    return text.split(whereSeparator: \.isNewline).map(String.init)
+  }
+
+  /// The one entry to take out, by the rule in extractConnections' docstring.
+  /// Returns nil when there is none, and `.some(nil)` is not a case: a duplicate
+  /// name is reported as no usable entry, because extracting it would
+  /// concatenate two bodies into one file.
+  static func connectionsEntry(among entries: [String]) -> String? {
+    let wanted = entries.filter { name in
+      // Finder's Compress puts a resource-fork stub under this prefix with the
+      // very same basename, and its body is not a CSV.
+      guard !name.hasPrefix("__MACOSX/"), !name.contains("/__MACOSX/") else { return false }
+      // A name carrying a control character cannot have come back intact from a
+      // newline-separated listing, so it is not a name we can hand back.
+      guard !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+      else { return false }
+      return (name as NSString).lastPathComponent == "Connections.csv"
+    }
+    // Shallowest first: a root entry beats a nested one, and among equals the
+    // archive's own order decides rather than anything this app invents.
+    guard let best = wanted.min(by: {
+      $0.filter { $0 == "/" }.count < $1.filter { $0 == "/" }.count
+    }) else { return nil }
+    // TWO ENTRIES OF ONE NAME. `unzip -p` writes both bodies to the stream and
+    // the 4 KB head check downstream only sees the first, so the second
+    // header row would reach the connector as data (review finding 17).
+    guard wanted.filter({ $0 == best }).count == 1 else { return nil }
+    return best
+  }
+
+  /// An entry name as an unzip PATTERN. `-p` globs, so a name is not literally
+  /// itself: `w[x]/Connections.csv` matches nothing until its brackets are
+  /// quoted. unzip's matcher takes backslash as the escape.
+  static func zipPattern(_ entry: String) -> String {
+    var out = ""
+    for character in entry {
+      if "*?[]\\".contains(character) { out.append("\\") }
+      out.append(character)
+    }
+    return out
+  }
+
+  /// Run a tool and keep its stdout, up to a cap. The child is always reaped and
+  /// the pipe is always closed — the two paths that used to `terminate()` and
+  /// return left a zombie and a leaked descriptor behind them every time an
+  /// archive failed (review finding 17).
+  private static func runCapturing(
+    _ tool: String, _ arguments: [String], cap: Int,
+    into sink: FileHandle? = nil
+  ) -> (status: Int32, output: Data, written: Int, overflowed: Bool)? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: tool)
+    // NO SHELL, and an absolute path. `arguments` goes to execve directly, so
+    // nothing in a file name is interpreted — and a file URL's `path` always
+    // begins with "/", so unzip can never read the archive's own name as a flag.
+    task.arguments = arguments
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    // unzip's own chatter is not for the owner; the reply says what happened.
+    task.standardError = FileHandle.nullDevice
+    guard (try? task.run()) != nil else {
+      try? pipe.fileHandleForReading.close()
+      try? pipe.fileHandleForWriting.close()
+      return nil
+    }
+    // OURS TO CLOSE. The child holds its own copy; leaving this open means the
+    // read below never sees EOF when the child exits.
+    try? pipe.fileHandleForWriting.close()
+    var collected = Data()
+    var written = 0
+    var overflowed = false
+    while true {
+      let chunk = pipe.fileHandleForReading.availableData
+      if chunk.isEmpty { break }
+      written += chunk.count
+      if written > cap {
+        overflowed = true
+        // Killed rather than left to fill the disk behind us. The drain below
+        // is what stops the child blocking in write() against a full pipe with
+        // nobody reading, which is a terminate() that never lands.
+        task.terminate()
+        break
+      }
+      if let sink { sink.write(chunk) } else { collected.append(chunk) }
+    }
+    if overflowed { while !pipe.fileHandleForReading.availableData.isEmpty {} }
+    try? pipe.fileHandleForReading.close()
+    // ALWAYS, on every path out of this function. A Process that is never waited
+    // on stays a zombie for the life of the app.
+    task.waitUntilExit()
+    return (task.terminationStatus, collected, written, overflowed)
+  }
+
+  static func extractConnections(fromZipAt zip: URL) -> ZipExtraction {
+    let fm = FileManager.default
+    // LISTED FIRST, so the entry is chosen by a rule written here rather than
+    // by a glob. See the docstring: a Complete archive nests, and the old
+    // root-only pattern answered `.notFound` for the ordinary case.
+    guard let entries = zipEntries(in: zip) else { return .unreadable }
+    guard let entry = connectionsEntry(among: entries) else { return .notFound }
+
+    let out = fm.temporaryDirectory
+      .appendingPathComponent("hazlie-linkedin-\(UUID().uuidString)")
+      .appendingPathComponent("Connections.csv")
+    do {
+      try fm.createDirectory(at: out.deletingLastPathComponent(),
+                             withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+    } catch { return .unreadable }
+    let discard = { try? fm.removeItem(at: out.deletingLastPathComponent()) }
+
+    guard fm.createFile(atPath: out.path, contents: nil,
+                        attributes: [.posixPermissions: 0o600]),
+          let sink = try? FileHandle(forWritingTo: out)
+    else { discard(); return .unreadable }
+
+    let run = runCapturing("/usr/bin/unzip",
+                           ["-p", zip.path, zipPattern(entry)],
+                           cap: zipExtractionCap, into: sink)
+    try? sink.close()
+    guard let run, !run.overflowed else { discard(); return .unreadable }
+
+    // unzip answers 11 for "no matching files". The listing above said the entry
+    // is there, so reaching this means the pattern and the name disagreed — an
+    // archive we cannot take the file out of, rather than one without it in.
+    if run.status == 11 { discard(); return .unreadable }
+    guard run.status == 0, run.written > 0 else {
+      discard()
+      // A zero-byte success is an empty entry, which is not an export either.
+      return run.status == 0 ? .notFound : .unreadable
+    }
+
+    // THE ARCHIVE'S OWN DATE, or the vintage is "now" and PASS ONE below cannot
+    // tell last year's download from today's.
+    if let vintage = try? zip.resourceValues(forKeys: [.contentModificationDateKey])
+      .contentModificationDate {
+      var dated = out
+      var values = URLResourceValues()
+      values.contentModificationDate = vintage
+      try? dated.setResourceValues(values)
+    }
+    return .extracted(out)
+  }
+
+  private func importLinkedIn(_ done: @escaping ([String: Any]) -> Void) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      let panel = NSOpenPanel()
+      panel.allowsMultipleSelection = true
+      panel.canChooseDirectories = false
+      panel.canChooseFiles = true
+      // THE ZIP IS THE ORDINARY CASE, so it is named first. LinkedIn mails a
+      // link to an archive; a bare Connections.csv only exists once somebody has
+      // already unzipped one.
+      panel.message = "choose the zip LinkedIn sent you, or Connections.csv from inside it"
+      panel.prompt = "import"
+      // ~~".zip is offered so the file the owner just downloaded is SELECTABLE
+      // rather than greyed out with no explanation. It is refused below with a
+      // sentence rather than extracted: unzipping would mean a subprocess, and
+      // every check in this flow runs in this process."~~ Still offered, no
+      // longer refused: extractConnections takes Connections.csv out of it and
+      // the checks below run on that, unchanged. The subprocess is real and is
+      // the smaller cost — see extractConnections.
+      var types: [UTType] = [.commaSeparatedText]
+      if let zip = UTType("public.zip-archive") { types.append(zip) }
+      panel.allowedContentTypes = types
+      // The onboarding scrim is a full-screen floating window; an ordinary
+      // panel opens underneath it. Same reason requestPermission yields.
+      self.delegate?.yieldForPrompt(true)
+      panel.begin { response in
+        self.delegate?.yieldForPrompt(false)
+        guard response == .OK, !panel.urls.isEmpty else {
+          done(["state": "cancelled"])
+          return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+          done(self.acceptLinkedInFiles(panel.urls))
+        }
+      }
+    }
+  }
+
+  /// THE WATCHER FOUND ONE. Hold it, and put it somewhere the owner can see.
+  ///
+  /// A notification was the whole of this and it produced nothing at all on the
+  /// Mac it was walked on -- see ExportWatch.offer. The panel is the surface
+  /// this app can actually guarantee, so the offer lives here until it is
+  /// answered and the delegate is what puts it on screen.
+  func linkedInExportFound(at url: URL, name: String, folder: String, dated: String,
+                           key: String) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    pendingExport = (url, name, folder, dated, key)
+    delegate?.linkedInExportOffered(name: name)
+  }
+
+  /// The same import, for files nobody picked in a panel: the Downloads watcher
+  /// noticing an export land, and a file dropped onto the settings panel. Same
+  /// check, same copy, same reply shape — acceptLinkedInFiles is the whole
+  /// import and neither caller gets a shortcut through it.
+  func importLinkedIn(files urls: [URL], _ done: @escaping ([String: Any]) -> Void) {
+    guard !urls.isEmpty else { done(["state": "cancelled"]); return }
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let self else { done(["state": "cancelled"]); return }
+      // ~~The repaint was announced here~~ and is announced by
+      // acceptLinkedInFiles itself now: this was the watcher's and the drop's
+      // way in, and the picker -- the commonest path of all -- went through the
+      // same import and told nobody. One import, one announcement.
+      done(self.acceptLinkedInFiles(urls))
+    }
+  }
+
+  /// Check every picked file, then copy — and answer with the count this app
+  /// counted itself.
+  ///
+  /// TWO PASSES, AND THAT IS THE POINT. The check and the copy used to share
+  /// one loop, so a multi-select of Connections.csv + Profile.csv copied the
+  /// first, failed on the second, painted an error and never started the
+  /// reader: a half-applied import with nothing scheduled to read it, and no
+  /// way for the owner to tell which half landed. A pick is ONE action. It
+  /// succeeds whole or it changes nothing on disk.
+  ///
+  /// The copies themselves are staged beside their destinations and swapped in
+  /// only once every one of them has landed. The swap is
+  /// `FileManager.replaceItemAt`, which is the atomic primitive: the old
+  /// `removeItem(destination)` + `moveItem` pair had a window in which the
+  /// previous export was already gone and the replacement was still named
+  /// `.importing`, and a crash there destroyed an export the owner had. Each
+  /// replace also leaves the file it displaced beside it as `.previous`, so a
+  /// failure on the SECOND file of a multi-select puts the first one back
+  /// rather than leaving Connections.csv new and messages.csv old. The
+  /// backups are removed once every file has landed.
+  ///
+  /// N FILES MEANS N DIFFERENT FILES. Two picks of the same kind -- the export
+  /// and the browser's second download of it -- share a destination, and the
+  /// whole-or-nothing story does not survive two turns round the swap loop
+  /// aimed at the same path: the second consumed the first one's backup and
+  /// then failed, leaving nothing to undo with. They are refused in the first
+  /// pass, by name, before anything is written.
+  ///
+  /// A ZIP IS A PICKED FILE TOO, and it is the one LinkedIn actually sends.
+  /// PASS ZERO takes Connections.csv out of each archive and hands the extracted
+  /// copy to the rest of this function; everything after it is unchanged, which
+  /// is the point — the archive buys no shortcut past the header check, the
+  /// vintage comparison or the atomic swap. The owner still sees the name they
+  /// picked in every refusal, because "Complete_LinkedInDataExport_2026.zip" is
+  /// what is in their Downloads folder and "Connections.csv" is not.
+  ///
+  /// ONE AT A TIME, ACROSS ALL THREE WAYS IN (review finding 10). The picker,
+  /// the Downloads watcher's notification press and a file dropped on the
+  /// settings panel can all land at once, on different queues, and they all
+  /// stage through the same `Connections.csv.importing` and
+  /// `Connections.csv.previous` paths. The staging step removes an existing
+  /// `.importing` unconditionally, so an overlapping call could delete another's
+  /// staged copy between its stage and its swap — and the undo it left behind
+  /// would then be operating on a file some other call had replaced. Everything
+  /// this function says about being whole-or-nothing was true only WITHIN one
+  /// call; the lock is what makes it true of the destination.
+  ///
+  /// The work inside is filesystem copies of an 8-10 MB file, so a blocked
+  /// second caller waits rather than fails: two imports the owner really did
+  /// start should both happen, in some order, and neither should lose.
+  private func acceptLinkedInFiles(_ urls: [URL]) -> [String: Any] {
+    Bridge.importLock.lock()
+    // Every failure in this function is an early return, and there are a dozen
+    // of them. Only a defer covers them all.
+    defer { Bridge.importLock.unlock() }
+    let fm = FileManager.default
+
+    // PASS ZERO: unpack the archives. Nothing is written outside the temporary
+    // directory, and every extracted copy is removed on the way out of this
+    // function however it leaves.
+    var extracted: [URL] = []
+    defer {
+      for temporary in extracted {
+        try? fm.removeItem(at: temporary.deletingLastPathComponent())
+      }
+    }
+    // `url` is what gets read and copied; `label` is what the owner picked and
+    // is the only one of the two that may appear in a message.
+    var picked: [(url: URL, label: String)] = []
+    for url in urls {
+      guard url.pathExtension.lowercased() == "zip" else {
+        picked.append((url, url.lastPathComponent))
+        continue
+      }
+      switch Bridge.extractConnections(fromZipAt: url) {
+      case .extracted(let csv):
+        extracted.append(csv)
+        picked.append((csv, url.lastPathComponent))
+      case .notFound:
+        // THE ONE ZIP FAILURE WITH A REMEDY IN IT: the archive is fine and the
+        // owner asked LinkedIn for the wrong thing, or for everything and got a
+        // partial first. Named separately so the screen can say which.
+        return [
+          "state": "error", "reason": "zip-connections",
+          "file": url.lastPathComponent,
+        ]
+      case .unreadable:
+        return ["state": "error", "reason": "zip", "file": url.lastPathComponent]
+      }
+    }
+
+    // PASS ONE: every file is checked, and nothing is written.
+    var accepted: [(url: URL, label: String, kind: (anchor: String, name: String))] = []
+    for (url, label) in picked {
+      // 4 KB is well past LinkedIn's Notes: preamble and its header, and a
+      // bounded read means a file the owner picked by mistake -- a 2 GB
+      // video renamed .csv -- costs one page, not a stall.
+      guard let head = Bridge.readHead(of: url, bytes: 4096) else {
+        return ["state": "error", "reason": "unreadable", "file": label]
+      }
+      guard let kind = Bridge.linkedInKind(of: head) else {
+        // NAME THE COLUMN BACK. "I cannot read this" is an accusation with no
+        // remedy in it; "the first one is Prénom" tells the owner exactly what
+        // happened and that an English export is the fix.
+        return [
+          "state": "error", "reason": "columns",
+          "file": label,
+          "firstColumn": Bridge.firstColumn(of: head),
+        ]
+      }
+      // ONE FILE PER KIND, AND NEITHER OF TWO IS A DEFAULT.
+      //
+      // `Connections.csv` and `Connections (1).csv` both classify as
+      // Connections.csv, so a multi-select of the two staged both copies to
+      // the SAME `.importing` path and swapped both into the same
+      // destination. The second turn round the swap loop removed the backup
+      // the first had just made, its replace then threw on a temporary that
+      // had already been consumed, and the undo had nothing left to put back:
+      // the export the owner had was gone and linkedin.mjs reported it
+      // missing. That is the one outcome this whole function is written to
+      // make impossible, and it happened in exactly the case the undo path
+      // was added for.
+      //
+      // The panel cannot say which of the two was meant — the order `urls`
+      // arrive in is the panel's, not a preference — so this refuses and
+      // names both files rather than silently picking one.
+      //
+      // TWO ZIPS ARE TWO PICKS OF THE SAME KIND, and they arrive here as two
+      // extracted Connections.csv files with the same name — so the names the
+      // owner needs to choose between are the ARCHIVES they picked, which is why
+      // the refusal reads `label` and not the extracted file's name.
+      if let clash = accepted.first(where: { $0.kind.name == kind.name }) {
+        return [
+          "state": "error", "reason": "duplicate",
+          "file": kind.name,
+          "files": [clash.label, label],
+        ]
+      }
+      let destination = Bridge.linkedInDirectory.appendingPathComponent(kind.name)
+      // DO NOT REPLACE A NEWER FILE WITH AN OLDER ONE. Onboarding can be
+      // replayed from the gear on a machine that already has an export, and
+      // the owner reaching for "the LinkedIn file" in Downloads may well find
+      // last year's. Compared by modification time, and refused out loud.
+      // ...unless this app could not establish the installed file's vintage at
+      // all. See unstampedImports: "now" is then a fact about the copy, not
+      // about the export, and refusing on it is the dead end.
+      //
+      // An extracted copy carries the ARCHIVE's date, not the moment it was
+      // unpacked — see extractConnections — so a zip from last year is refused
+      // here exactly like the CSV inside it would have been.
+      if !Bridge.unstampedImports.contains(kind.name),
+         let existing = Bridge.installedVintage(of: destination),
+         let pickedVintage = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+          .contentModificationDate,
+         existing > pickedVintage {
+        return [
+          "state": "error", "reason": "newer",
+          "file": kind.name,
+        ]
+      }
+      accepted.append((url, label, kind))
+    }
+
+    // PASS TWO: stage every copy, then swap them in.
+    do {
+      try fm.createDirectory(at: Bridge.linkedInDirectory, withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+      try fm.setAttributes([.posixPermissions: 0o700],
+                           ofItemAtPath: Bridge.linkedInDirectory.path)
+    } catch {
+      return ["state": "error", "reason": "copy", "file": accepted.first?.kind.name ?? ""]
+    }
+    var staged: [(temporary: URL, destination: URL, kind: (anchor: String, name: String),
+                  vintage: Date?)] = []
+    let discardStaged = { for entry in staged { try? fm.removeItem(at: entry.temporary) } }
+    for entry in accepted {
+      let destination = Bridge.linkedInDirectory.appendingPathComponent(entry.kind.name)
+      let temporary = Bridge.linkedInDirectory
+        .appendingPathComponent("\(entry.kind.name).importing")
+      do {
+        if fm.fileExists(atPath: temporary.path) { try fm.removeItem(at: temporary) }
+        try fm.copyItem(at: entry.url, to: temporary)
+        // The owner's professional graph, in a directory only they can open.
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+      } catch {
+        discardStaged()
+        try? fm.removeItem(at: temporary)
+        return ["state": "error", "reason": "copy", "file": entry.kind.name]
+      }
+      // Read from the PICKED file rather than the copy: this is the export's
+      // own date, and the swap below puts it on the destination's creation
+      // date so it survives the modification date being stamped to now.
+      let vintage = try? entry.url.resourceValues(forKeys: [.contentModificationDateKey])
+        .contentModificationDate
+      staged.append((temporary, destination, entry.kind, vintage))
+    }
+
+    var copied: [String] = []
+    // Names whose vintage could not be recorded; see unstampedImports. Carried
+    // back so the flow can say so rather than leaving it to a comment.
+    var unknownVintage: [String] = []
+    var connections = 0
+    // What has already been swapped in, and what it displaced. `backup` is nil
+    // where there was nothing to displace -- a first import -- and undoing
+    // that one means removing the file this pick put there.
+    var swapped: [(destination: URL, backup: URL?)] = []
+    let undoSwapped = {
+      for entry in swapped.reversed() {
+        guard let backup = entry.backup else {
+          // Nothing was displaced, so undoing it is removing what we put there.
+          try? fm.removeItem(at: entry.destination)
+          continue
+        }
+        do {
+          // `.usingNewMetadataOnly` here for the same reason as in the swap:
+          // the default keeps the metadata of the item being replaced, which
+          // is the file this pick just wrote and whose dates were stamped.
+          // The backup has to come back as itself, vintage included.
+          _ = try fm.replaceItemAt(entry.destination, withItemAt: backup,
+                                   options: [.usingNewMetadataOnly])
+        } catch {
+          // The atomic path refused. Fall back to a rename -- but never delete
+          // the backup, which at this point is the owner's only copy of the
+          // export this pick displaced.
+          try? fm.removeItem(at: entry.destination)
+          try? fm.moveItem(at: backup, to: entry.destination)
+        }
+      }
+      swapped = []
+    }
+    let dropBackups = {
+      for entry in swapped { if let backup = entry.backup { try? fm.removeItem(at: backup) } }
+    }
+    for entry in staged {
+      let backupName = "\(entry.kind.name).previous"
+      let backup = Bridge.linkedInDirectory.appendingPathComponent(backupName)
+      let hadPrevious = fm.fileExists(atPath: entry.destination.path)
+      do {
+        if hadPrevious {
+          // ATOMIC, and it keeps the file it displaced. A per-file
+          // remove-then-move is not a swap: it has a window with neither file
+          // at the destination, and nothing to put back when a later file in
+          // the same pick fails.
+          try? fm.removeItem(at: backup)
+          _ = try fm.replaceItemAt(
+            entry.destination, withItemAt: entry.temporary,
+            backupItemName: backupName,
+            // `.usingNewMetadataOnly` OR THE READER NEVER SEES THE FILE.
+            // replaceItemAt's default is to carry the DISPLACED item's
+            // metadata onto the replacement, and the displaced item here is
+            // the previous export — whose modification date is precisely the
+            // cursor linkedin.mjs compares against
+            // (`newestMtime <= stored` skips the scan). Keeping it would mean
+            // the new export lands, the screen reports its count, and the
+            // connector logs `unchangedSinceMtime: true` forever.
+            options: [.withoutDeletingBackupItem, .usingNewMetadataOnly]
+          )
+        } else {
+          // replaceItemAt needs something to replace; on a first import there
+          // is nothing, and a rename onto a free name is already atomic.
+          try fm.moveItem(at: entry.temporary, to: entry.destination)
+        }
+      } catch {
+        undoSwapped()
+        discardStaged()
+        return ["state": "error", "reason": "copy", "file": entry.kind.name]
+      }
+      swapped.append((entry.destination, hadPrevious ? backup : nil))
+      // AND THE FILE HAS TO LOOK NEW, not merely be new.
+      //
+      // `.usingNewMetadataOnly` above stops the previous export's date being
+      // carried over, but the staged copy's own date is the PICKED file's,
+      // and re-importing an export the connector has already read leaves that
+      // date equal to the stored cursor — the same silent skip by a different
+      // route. The modification date is therefore stamped to the moment the
+      // file landed, which is what the cursor is really asking about.
+      //
+      // The creation date keeps the export's own vintage, because the refusal
+      // in PASS ONE still has to be able to ask how old the installed export
+      // is. See installedVintage.
+      //
+      // Best effort: a stamp that fails costs one skipped scan (the connector
+      // catches up when the next export lands) and never the file.
+      //
+      // BUT ITS FAILURE MUST NOT MAKE THE FILE LOOK NEW. Both dates on a fresh
+      // copy are the moment it landed, so a stamp that throws leaves
+      // installedVintage answering "now" for an export from last year — and
+      // PASS ONE then refuses the owner's own file as "you already have a
+      // newer one", permanently, with no way past it but deleting the file by
+      // hand. One skipped scan is a cost; a flow that cannot be completed is
+      // not. So the fallback puts the export's OWN date back on the
+      // modification date: installedVintage takes the earlier of the two, so
+      // whichever half of the stamp did land, the vintage is honest again.
+      var stamped = entry.destination
+      var dates = URLResourceValues()
+      dates.contentModificationDate = Date()
+      if let vintage = entry.vintage { dates.creationDate = vintage }
+      var stampedVintage = entry.vintage != nil
+      do {
+        try stamped.setResourceValues(dates)
+      } catch {
+        stampedVintage = false
+        if let vintage = entry.vintage {
+          var fallback = entry.destination
+          var vintageOnly = URLResourceValues()
+          vintageOnly.contentModificationDate = vintage
+          // The fallback only counts if it LANDED. Inside `if let vintage` the
+          // old code could not reach the no-vintage case at all, and a `try?`
+          // that swallowed a second failure looked identical to a success.
+          stampedVintage = (try? fallback.setResourceValues(vintageOnly)) != nil
+        }
+      }
+      var unstamped = Set(Bridge.unstampedImports)
+      if stampedVintage { unstamped.remove(entry.kind.name) } else { unstamped.insert(entry.kind.name) }
+      Bridge.unstampedImports = unstamped.sorted()
+      if !stampedVintage { unknownVintage.append(entry.kind.name) }
+      copied.append(entry.kind.name)
+      if entry.kind.name == "Connections.csv" {
+        connections = Bridge.countRows(inCsvAt: entry.destination, anchor: entry.kind.anchor)
+      }
+    }
+    dropBackups()
+
+    // The reader only picks a source up when it runs, and the owner is
+    // watching this screen now.
+    //
+    // AND THE CONFIG IS WRITTEN HERE TOO. Connectors.start() returns silently
+    // when ~/.hazlie/connectors/config.json is absent, and screen 2's "skip"
+    // never calls startSources — so on the skip path this whole import landed
+    // a file, reported "N connections", and scheduled nothing to read it. The
+    // same call startSources makes, on the queue it is allowed to be made on.
+    // AND EVERY SURFACE THAT RENDERS THIS FACT IS TOLD, FROM HERE.
+    //
+    // ~~Announced by importLinkedIn(files:)~~, which is the watcher's and the
+    // drop's way in and NOT the picker's -- so screen 4's "i have it", the
+    // settings row and the connector card all landed a file and told nobody.
+    // Live on run 8 with the offer panel: the import succeeded, the server
+    // lifted the hold within seconds, and the reconnect card went on saying
+    // "investor cards start when your linkedin export lands" until its next
+    // poll, which is a sentence about a file the owner had just handed over.
+    //
+    // This function is the one place all three callers pass through, and it is
+    // the line after which the file is really on disk, so it is where the
+    // announcement belongs.
+    DispatchQueue.main.async { [weak self] in
+      _ = self?.startReadingSources()
+      self?.delegate?.linkedInExportChanged()
+    }
+    return [
+      "state": "ok", "files": copied, "connections": connections,
+      "unknownVintage": unknownVintage,
+    ]
+  }
+
+  /// What is already on disk, for a second run of the flow.
+  ///
+  /// THE SECOND-RUN CASE (design P12). A machine that imported an export last
+  /// month still met screen 4 saying only "choose the file", with `next`
+  /// disabled — the flow asking again for something the owner had already
+  /// given it, and the only way forward being to hand over the same file
+  /// twice. This reports the export the app can see: when it landed, and how
+  /// many records it holds.
+  ///
+  /// COUNTS ONLY. No names, no companies, no row content ever crosses the
+  /// bridge from this file; the page renders a number and a date and offers to
+  /// replace it.
+  private func linkedInState() -> [String: Any] {
+    let fm = FileManager.default
+    let destination = Bridge.linkedInDirectory.appendingPathComponent("Connections.csv")
+    guard fm.fileExists(atPath: destination.path),
+          let head = Bridge.readHead(of: destination, bytes: 4096),
+          let kind = Bridge.linkedInKind(of: head), kind.name == "Connections.csv"
+    else { return ["state": "ok", "present": false] }
+    let modified = (try? destination.resourceValues(forKeys: [.contentModificationDateKey])
+      .contentModificationDate)?.timeIntervalSince1970
+    return [
+      "state": "ok",
+      "present": true,
+      "file": kind.name,
+      "connections": Bridge.countRows(inCsvAt: destination, anchor: kind.anchor),
+      "modifiedTs": modified.map { $0 * 1000 } ?? NSNull(),
+    ]
+  }
+
+  /// HOW OLD THE INSTALLED EXPORT IS, which is no longer its modification date.
+  ///
+  /// The swap stamps the destination's modification date to the moment the
+  /// file landed, so the reader's mtime cursor sees a new file. That makes the
+  /// modification date answer "when did this arrive" — and the refusal in PASS
+  /// ONE has to ask the other question, "how old is the export sitting here",
+  /// or replaying onboarding and handing back the same file in Downloads comes
+  /// out as "that one is older than the one you have".
+  ///
+  /// The same swap puts the export's own date on the CREATION date, so that
+  /// carries the vintage. A file the owner dropped into the directory by hand
+  /// has had neither treatment: its modification date IS its vintage, and its
+  /// creation date is when it was copied in, which is at or after it. The
+  /// earlier of the two is therefore the vintage in both cases, and nothing
+  /// has to be stored anywhere to tell the two kinds of file apart.
+  private static func installedVintage(of url: URL) -> Date? {
+    let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+    return [values?.contentModificationDate, values?.creationDate].compactMap { $0 }.min()
+  }
+
+  private static func readHead(of url: URL, bytes: Int) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    guard let data = try? handle.read(upToCount: bytes) else { return nil }
+    // A LinkedIn export is UTF-8; a Latin-1 fallback is what lets a French
+    // export reach the "your columns are Prénom" message instead of the
+    // "unreadable" one, which would be a worse answer to the same file.
+    return String(data: data, encoding: .utf8)
+      ?? String(data: data, encoding: .isoLatin1)
+  }
+
+  /// The first field of the first non-empty line, for the failure message.
+  /// Bounded and stripped: this is file content on its way to a screen.
+  private static func firstColumn(of head: String) -> String {
+    let line = head.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first ?? ""
+    let field = line.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+    let cleaned = String(field)
+      .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+      .filter { !$0.isNewline && !($0.unicodeScalars.first.map(CharacterSet.controlCharacters.contains) ?? false) }
+    return String(cleaned.prefix(60))
+  }
+
+  /// How many records the file holds, counted rather than guessed.
+  ///
+  /// QUOTE-AWARE, because a LinkedIn position or company can contain a comma
+  /// AND a newline inside a quoted field, and counting "\n" would then report
+  /// more connections than the owner has. Rows are counted from the row after
+  /// the anchor's header, which is also how csvObjects slices them.
+  ///
+  /// ONE HEADER RULE, NOT TWO. This used to find the header with
+  /// `line.contains(anchor)` -- the substring test linkedInKind was rewritten
+  /// to abolish, for the same reasons and on the same file. The consequence was
+  /// not hypothetical: LinkedIn's export opens with a "Notes:" preamble whose
+  /// paragraph mentions the columns, so the same file could be CLASSIFIED on an
+  /// exact field match at the real header and COUNTED from a preamble line that
+  /// merely contains "First Name", inflating the "N connections already here"
+  /// the screen shows by the preamble's offset. Both now find the header by the
+  /// same rule, over whole trimmed fields.
+  ///
+  /// AND THE HEADER IS FOUND IN THE HEAD, then the body is STREAMED. Sharing
+  /// the rule used to mean sharing csvRows over the whole file, which for a
+  /// 30k-connection export is ~8-10 MB collected into ~400k live Strings on a
+  /// background queue while the import button spins. The header is found the
+  /// same way on the same bounded 4 KB head linkedInKind classifies from — a
+  /// file whose header does not fit in that head never reaches this function,
+  /// because the classifier would already have refused it — and the rest of
+  /// the file is walked a row at a time and counted, keeping one row.
+  private static func countRows(inCsvAt url: URL, anchor: String) -> Int {
+    guard let head = readHead(of: url, bytes: 4096),
+          let headerIndex = csvRows(head).firstIndex(where: { csvFields($0).contains(anchor) })
+    else { return 0 }
+    let data = (try? Data(contentsOf: url)) ?? Data()
+    guard let text = String(data: data, encoding: .utf8)
+      ?? String(data: data, encoding: .isoLatin1) else { return 0 }
+    // Rows are ordered and the head is a prefix, so the header's index in the
+    // head is its index in the file.
+    var index = -1
+    var count = 0
+    csvScan(text) { row in
+      index += 1
+      guard index > headerIndex else { return }
+      // Blank rows are not records. The old walk skipped empty LINES for the
+      // same reason; a row whose every field is empty is the same thing here.
+      if row.contains(where: { !$0.trimmingCharacters(in: csvFieldTrim).isEmpty }) { count += 1 }
+    }
+    return count
   }
 
   private func bridgeCall(

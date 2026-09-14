@@ -4,6 +4,19 @@ Status: ~~plan only; nothing in this document is shipped~~ steps 1-10 of the
 implementation order are built on the experiment branch as of 2026-08-30; the
 sealed Phase 0 (step 8) and shadow-mode scheduling (step 9) remain open.
 
+A later follow-on to step 10 (its own "step 8" in the follow-on work log, not
+to be confused with the sealed Phase 0 ablation named above) added a SECOND
+card producer alongside the eligibility/reconnect one: Owe
+(`ui/server/relationship/owe.mjs`), surfacing an unanswered direct-message
+question (owe:open-loop) or an owner commitment/page-ask past its due date
+(owe:expired-commitment). No model call, same discipline as the reconnect
+producer. The two alternate day-to-day -- `daily.mjs`'s pickProducer serves
+whichever kind was least recently shown -- sharing one card queue, one
+frequency cap, and one set of owner controls (rm_suppression/rm_mute), scoped
+per-kind where the two must not interfere with each other's judged/mute
+history and kind-agnostic where a shown card of either kind is a real
+interruption for both.
+
 This branch is an explicit exception to the repository's normal rule against
 checking in experiment plans. It exists so the L5 memory experiment can be
 reviewed publicly without mixing the experiment into a shipping branch.

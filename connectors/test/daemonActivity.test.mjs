@@ -208,3 +208,48 @@ test('startup advances an already-completed durable year before the first tick',
   assert.equal(snapshot.backfillYear, 2023);
   assert.deepEqual(snapshot.backfill, ['imessage']);
 });
+
+// THE DAEMON'S OWN VIEW OF THE REGISTRY, WHERE ANOTHER PROCESS CAN SEE IT.
+//
+// daemon.mjs resolves the feature registry ONCE, at module scope; connect
+// re-reads it per request. Repair a broken ops/features.json under a running
+// daemon and the shelf's red line clears and the tiles come back while the
+// daemon is still holding ALL_OFF and scheduling nothing — the notice now
+// asserting a recovery that has not happened. The activity file is the cheap
+// channel between the two: it is already written, already read by the app, and
+// it costs one word.
+test('the activity snapshot says which registry this daemon is running on', async () => {
+  const snapshot = await publishedSnapshot([source('imessage')], {}, { settleMs: 600 });
+  assert.equal(snapshot.registryState, 'ok', 'this checkout ships a readable ops/features.json');
+});
+
+// AND IT SAYS SO EVEN WITH NOTHING TO SCHEDULE, which is exactly the state an
+// unreadable registry produces: every connector off, no queue, and therefore —
+// until this — no activity file written at all, so the one outage the owner
+// cannot diagnose was also the one the daemon stayed silent about.
+test('a daemon with nothing scheduled still publishes where it stands', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hazlie-activity-empty-'));
+  const activityPath = join(dir, 'activity.json');
+  const daemon = createDaemon({
+    config: { retention: { maintainHour: '03:30' } },
+    state: fakeState({}),
+    log: silent,
+    sources: [],
+    cacheDir: dir,
+    activityPath,
+  });
+  try {
+    daemon.start();
+    await sleep(200);
+    const snapshot = JSON.parse(readFileSync(activityPath, 'utf8'));
+    assert.equal(snapshot.registryState, 'ok');
+    assert.deepEqual(
+      snapshot.queue.map((task) => task.connector).filter((name) => name !== 'maintenance'),
+      [],
+      'no connector is scheduled — maintenance runs whatever the registry says'
+    );
+  } finally {
+    daemon.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

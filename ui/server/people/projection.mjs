@@ -15,7 +15,9 @@ import { buildPersonEventLinkBatch, buildPersonEventLinks } from './evidence.mjs
 import { resolutionFingerprint } from './resolve.mjs';
 
 const DAY = 86_400_000;
-const PROJECTION_VERSION = 4;
+const PROJECTION_VERSION = 8; // 8: LinkedIn signal now carries the profile url (people/graph.mjs personSignalsForRow,
+// case 'linkedin'); people.linkedin rows built before this need to be re-derived to gain it.
+// 7: sub-role rules changed (investing platforms are fund-side); rows must be re-derived
 const sourceSql = RELATIONSHIP_SOURCES.map((source) => `'${source.replaceAll("'", "''")}'`).join(',');
 
 export const PEOPLE_PROJECTION_SCHEMA = `
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS people(
   role             TEXT NOT NULL,
   roles_by_year    TEXT NOT NULL, /* canonical JSON object */
   linkedin         TEXT,          /* canonical JSON object or NULL */
+  sub_roles        TEXT NOT NULL DEFAULT '[]', /* canonical JSON array of strings */
   built_at         INTEGER NOT NULL
 );
 
@@ -87,6 +90,18 @@ CREATE INDEX IF NOT EXISTS person_event_links_context ON person_event_links(cont
 CREATE INDEX IF NOT EXISTS person_event_links_source_authored ON person_event_links(source, authored, context_id);
 CREATE INDEX IF NOT EXISTS person_event_links_source_role ON person_event_links(source, role, context_id);
 CREATE INDEX IF NOT EXISTS person_event_links_conversation ON person_event_links(person_key, conversation_key, context_id);
+-- The two scans behind /admin/onboarding/progress, which a live setup screen
+-- polls. Both are COUNT(DISTINCT person_key) and NEITHER index above covers
+-- person_key, so both fell back to a full table scan plus a temp B-tree per
+-- group -- over a table that is a multiple of the corpus, on a poll, on the one
+-- screen whose whole job is to be watched while the corpus is being built.
+--
+-- Column order is the query's order: the equality/filter columns first, then
+-- person_key last so the count is answered from the index alone.
+--   WHERE authored = 1 AND room = 0 GROUP BY source
+CREATE INDEX IF NOT EXISTS person_event_links_authored_room ON person_event_links(authored, room, source, person_key);
+--   WHERE source = ? AND role IN (...)   (linkedin profiles, calendar attendance)
+CREATE INDEX IF NOT EXISTS person_event_links_source_role_person ON person_event_links(source, role, person_key);
 
 CREATE TABLE IF NOT EXISTS person_channels(
   person_key TEXT NOT NULL REFERENCES people(person_key) ON DELETE CASCADE,
@@ -183,6 +198,16 @@ export function ensurePeopleProjectionSchema(db) {
         'CHECK (owner_authored IN (0,1))'
     );
   }
+  const peopleColumns = new Set(
+    db.prepare("SELECT name FROM pragma_table_info('people')").all().map((row) => row.name)
+  );
+  if (!peopleColumns.has('sub_roles')) {
+    // CREATE TABLE IF NOT EXISTS leaves an old-shape `people` table alone, so an
+    // install that predates sub-role tags needs an explicit migration -- an
+    // existing DB must rebuild cleanly, not throw "no such column" on the next
+    // insert.
+    db.exec("ALTER TABLE people ADD COLUMN sub_roles TEXT NOT NULL DEFAULT '[]'");
+  }
   db.exec(
     'CREATE INDEX IF NOT EXISTS person_event_links_source_owner_authored ' +
       'ON person_event_links(source, owner_authored, context_id)'
@@ -264,6 +289,7 @@ export function peopleIdentityFingerprint(stateDb, aliases, owner) {
       highSchools: owner?.highSchools ?? [],
       roles: owner?.roles ?? new Map(),
       rolesByYear: owner?.rolesByYear ?? new Map(),
+      subRoles: owner?.subRoles ?? new Map(),
     },
   });
 }
@@ -325,6 +351,7 @@ export function readPeopleProjection(db, { now = Date.now() } = {}) {
       identityEvidence: [],
       role: row.role,
       rolesByYear: parseJson(row.roles_by_year, {}),
+      subRoles: parseJson(row.sub_roles, []),
     });
   }
 
@@ -399,6 +426,7 @@ function comparable(graph) {
     lastFromOwner: person.lastFromOwner,
     role: person.role,
     rolesByYear: person.rolesByYear ?? {},
+    subRoles: [...(person.subRoles ?? [])].sort(),
     linkedin: person.linkedin ?? null,
     activity: [...(person.activity ?? [])].sort((a, b) =>
       a.ym.localeCompare(b.ym) || a.source.localeCompare(b.source)
@@ -414,8 +442,9 @@ function projectionWriters(db) {
   return {
     person: db.prepare(
     'INSERT INTO people(person_key, display_name, first_seen, last_seen, last_from_them, last_from_owner, ' +
-      'sent, received, met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year, linkedin, built_at) ' +
-      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+      'sent, received, met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year, linkedin, ' +
+      'sub_roles, built_at) ' +
+      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
     ),
     identifier: db.prepare('INSERT INTO person_identifiers(identifier, person_key) VALUES(?,?)'),
     evidence: db.prepare(
@@ -493,7 +522,8 @@ function insertPeople(writers, graph, now) {
       person.sent ?? 0, person.received ?? 0, person.metInPerson ?? 0,
       person.roomMessages ?? 0, person.directMessages ?? 0, person.meetingNotes ?? 0,
       person.role ?? 'friend', JSON.stringify(canonical(person.rolesByYear ?? {})),
-      person.linkedin ? JSON.stringify(canonical(person.linkedin)) : null, now
+      person.linkedin ? JSON.stringify(canonical(person.linkedin)) : null,
+      JSON.stringify([...new Set(person.subRoles ?? [])].sort()), now
     );
       for (const identifier of keep.get(person.key) ?? []) {
         writers.identifier.run(identifier, person.key);

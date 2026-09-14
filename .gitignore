@@ -16,6 +16,19 @@ dist/
 .hazlie/
 secrets/
 credentials*.json
+# Google OAuth clients. This repository is PUBLIC: a client id committed here is
+# a Google project handed to whoever clones it.
+#
+# widget/build.sh does not write into the checkout -- it stages the build
+# machine's clients straight into $BE, which is either /private/tmp or
+# widget/build/, both already ignored above. ops/google-clients/ is the READ
+# path bundledClientsDir() resolves to in a dev checkout, so the entry below
+# covers a developer who puts real clients there by hand to exercise the
+# bundled-client path. google-client-*.json is unanchored and so matches at any
+# depth, which is the rule that actually protects a credential dropped anywhere
+# in the tree; an explicit `git add` of an ignored path still errors without -f.
+ops/google-clients/
+google-client-*.json
 *.pem
 *.key
 *.p12

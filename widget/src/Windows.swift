@@ -80,6 +80,78 @@ final class ClickThroughWebView: WKWebView {
   // No super call, deliberately: NSView's implementation returns false, and
   // WKWebView does not override it. There is nothing to defer to.
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  // DROPPING A FILE ON A PAGE, WHICH THE PAGE CANNOT DO ITSELF.
+  //
+  // "drop it here" on the settings LinkedIn row needs a PATH, and a web page
+  // never gets one: WebKit hands JavaScript a File object with a name and bytes
+  // and deliberately no filesystem location. Reading the bytes in JS and posting
+  // them across the bridge would put the owner's whole professional graph
+  // through a message channel, which is the one thing linkedInState's
+  // counts-only rule exists to prevent. So the drop is taken natively, here,
+  // where the pasteboard still carries the URL.
+  //
+  // WebKit registers its dragged types on the WKWebView itself, so these are the
+  // overrides AppKit calls. The handler is installed on one page (main.swift,
+  // openConnections) and is nil on every other, which is what leaves every other
+  // webview's drag handling exactly as WebKit wrote it.
+  //
+  // AND ONCE IT IS INSTALLED, IT SWALLOWS EVERY FILE DROP.
+  //
+  // ~~"Anything the handler does not claim falls through to `super` and WebKit
+  // behaves exactly as it did."~~ That sentence WAS the bug (review finding 1,
+  // 2026-09-13), and it reads like caution, which is how it survived being
+  // written down twice. WebKit's answer to a file dropped on a page is to
+  // NAVIGATE TO IT -- and the bridge compartment is keyed on the VIEW
+  // (Bridge.pageOf), not on the document -- so an unmatched drop loaded the
+  // dropped file INTO the settings panel, where it inherited `connections`:
+  // quitApp, uninstallApp, connectSecret, googleAuth, setEngine, openExternal.
+  // Dropping a CSV replaced the settings UI with raw text and no way back but
+  // closing the panel; dropping an .html file handed that document the owner's
+  // bridge.
+  //
+  // So the handler no longer returns whether the drop was CONSUMED -- it always
+  // is -- only what to do with it: take the file, or tell the panel it was not
+  // an export. draggingEntered and draggingUpdated may still defer to super,
+  // because they paint a cursor and navigate nothing.
+  //
+  // Bridge's navigation policy is the second fence, and the one that covers
+  // whatever surface accepts a drop after this one.
+  //
+  // NOT COVERED BY A TEST AT THE GESTURE, AND IT CANNOT BE from here: a drag is
+  // live AppKit with no source-shaped surface to pin from node. What the tests
+  // hold down is that nothing falls through, that the handler is installed on
+  // the settings panel alone, and that it imports through the picker's own path.
+  var onFileDrop: (([URL]) -> Void)?
+
+  private func droppedFiles(_ sender: NSDraggingInfo) -> [URL]? {
+    guard onFileDrop != nil else { return nil }
+    let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+    guard let urls = sender.draggingPasteboard.readObjects(
+      forClasses: [NSURL.self], options: options) as? [URL], !urls.isEmpty
+    else { return nil }
+    return urls
+  }
+
+  override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+    if droppedFiles(sender) != nil { return .copy }
+    return super.draggingEntered(sender)
+  }
+
+  override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+    if droppedFiles(sender) != nil { return .copy }
+    return super.draggingUpdated(sender)
+  }
+
+  override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    guard let urls = droppedFiles(sender), let handler = onFileDrop else {
+      // No handler on this view: WebKit's own behaviour, unchanged. This is the
+      // path every other page in the app takes.
+      return super.performDragOperation(sender)
+    }
+    handler(urls)
+    return true
+  }
 }
 
 final class PopupPanel: NSPanel {
@@ -192,7 +264,13 @@ func makeWebView(bridge: Bridge, page: String) -> WKWebView {
   }
   // Identity for the bridge's capability check (Bridge.pageCapabilities). The
   // page name is the one the caller asked for, not one read back off the view.
-  bridge.register(web, as: page)
-  web.loadFileURL(ui.appendingPathComponent("\(page).html"), allowingReadAccessTo: ui)
+  //
+  // ...and the one document this view may ever load, which is the same URL the
+  // next line hands it. Registered together because they are the same fact: a
+  // compartment keyed on a view is only a compartment while the view keeps
+  // showing the document it was built for. See the navigation policy.
+  let document = ui.appendingPathComponent("\(page).html")
+  bridge.register(web, as: page, document: document)
+  web.loadFileURL(document, allowingReadAccessTo: ui)
   return web
 }

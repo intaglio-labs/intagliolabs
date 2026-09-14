@@ -49,6 +49,18 @@ final class Connectors {
   }
   private var activityFile: URL { home.appendingPathComponent(".hazlie/connectors/activity.json") }
 
+  /// HOW LONG A PUBLISHED `syncing` MAY STILL BE BELIEVED.
+  ///
+  /// `startedTs` is published BEFORE the forward pass, and one pass is bounded by
+  /// FORWARD_BUDGET_MS (120 s) plus a history slice on top. ~~Ninety seconds~~
+  /// was sized against the ordinary 20 s history budget and was already short of
+  /// the forward budget alone; the first-load sprint raises the history half to
+  /// 60 s, so a real pass can run for three minutes while the menu shows nothing
+  /// happening — during the half hour when the most is happening. 240 s covers
+  /// 120 + 60 with room, and is still short enough that a daemon killed
+  /// mid-syncing stops claiming it within one polling interval.
+  static let syncingWindowMs: Double = 240_000
+
   private var activitySnapshot: [String: Any]? {
     guard let data = try? Data(contentsOf: activityFile),
           let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -94,7 +106,7 @@ final class Connectors {
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,
-       now - started < 90_000 {
+       now - started < Connectors.syncingWindowMs {
       let platforms = raw["platforms"] as? [String] ?? []
       let label = connector == "matrix" && !platforms.isEmpty
         ? platforms.joined(separator: " · ")
@@ -231,7 +243,7 @@ final class Connectors {
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,
-       Date().timeIntervalSince1970 * 1000 - started < 90_000 {
+       Date().timeIntervalSince1970 * 1000 - started < Connectors.syncingWindowMs {
       let platforms = raw["platforms"] as? [String] ?? []
       if connector == "matrix", !platforms.isEmpty {
         return "syncing \(platforms.joined(separator: " · "))"
@@ -275,24 +287,173 @@ final class Connectors {
     process?.qualityOfService = PowerBudget.current == .full ? .userInitiated : .utility
   }
 
+  /// Every directory the daemon's `hazlie-tree-perms` check inspects, which is
+  /// `TREE_DIRS` in connectors/lib/checks.mjs and nothing else. The two lists
+  /// are pinned to each other by widget/test/daemon-tree-perms.test.mjs, which
+  /// reads checks.mjs rather than restating it: a directory added there and
+  /// not here becomes a fatal check the app cannot satisfy, and the failure is
+  /// written only to the daemon's own log.
+  static let treeDirectories = ["bin", "lib", "cache", "connectors", "secrets", "context", "logs"]
+
+  /// THE DAEMON REFUSES A HOME IT CANNOT TRUST, AND IT MEANS THE WHOLE TREE.
+  ///
+  /// hazlie-tree-perms is fatal when ~/.hazlie **or any of TREE_DIRS** is wider
+  /// than 0700, and it says so only in the daemon's own log: on the first
+  /// clean-machine run (2026-09-12) a ~/.hazlie created by hand as 755 left the
+  /// reader dead four starts in a row while onboarding waited for rows. Fixing
+  /// only the top directory left the same silent death one level down — a
+  /// `mkdir -p ~/.hazlie/connectors` under umask 022 lands BOTH at 755, and
+  /// writeConnectorsConfigIfMissing does not re-attribute a directory that
+  /// already exists. The app owns this tree, so it reasserts the mode it would
+  /// have created every part of it with.
+  ///
+  /// SYMLINKS ARE READ, NOT FOLLOWED. `attributesOfItem` is lstat's answer, so
+  /// a linked directory reports as a link and is skipped; `chmod` would follow
+  /// it and change the mode of something on the other side of the link that
+  /// this app does not own. Missing directories are skipped too — the check
+  /// only WARNs on those, and creating them here would invent a tree the
+  /// setup script is responsible for.
+  /// AND WHAT THE PASS COULD NOT FIX, said out loud.
+  ///
+  /// The skip and the swallowed EPERM above are both right and both silent, and
+  /// the check they are trying to satisfy is FATAL: the daemon exits, the reader
+  /// is dead, and the only record is a line in the daemon's own log. That is the
+  /// 2026-09-12 failure exactly — four starts in a row with onboarding waiting
+  /// for rows and nothing anywhere saying why.
+  ///
+  /// Three shapes reach here and leave without a repair, and the check fails on
+  /// all three: a directory symlinked to a wider target (`statSync` follows the
+  /// link, this deliberately does not), a TREE_DIR path that exists and is not a
+  /// directory, and a directory this app cannot chmod — one created by a `sudo`
+  /// setup run and owned by root. Named, so the owner gets a path to chmod
+  /// instead of a dead reader.
+  /// A PATH, AND WHERE IT POINTS -- two fields rather than one string.
+  ///
+  /// `blocked` used to gain "\(path) → \(target)" alongside plain paths, so
+  /// anything downstream that treated an entry as a path (opening it, comparing
+  /// it, handing it to a shell hint) broke on that one element. The arrow is a
+  /// rendering decision and belongs at the edge.
+  struct TreeBlocker {
+    let path: String
+    let target: String?
+    var describedForOwner: String {
+      target == nil || target == path ? path : "\(path) → \(target!)"
+    }
+  }
+
+  private(set) var treePermsBlockerDetails: [TreeBlocker] = []
+  /// The owner-facing sentences, which is all the bridge and the page ever want.
+  var treePermsBlockers: [String] { treePermsBlockerDetails.map(\.describedForOwner) }
+
+  private func reassertTreePerms() {
+    let root = home.appendingPathComponent(".hazlie")
+    let paths = [root.path] + Connectors.treeDirectories.map {
+      root.appendingPathComponent($0).path
+    }
+    var blocked: [TreeBlocker] = []
+    for path in paths {
+      // THE SAME QUESTION THE DAEMON ASKS, which is about the TARGET.
+      //
+      // checks.mjs uses statSync, which traverses a final symlink;
+      // attributesOfItem does not, and reporting every link as unrepairable made
+      // the two disagree about a working install. `ln -s /Volumes/Data/logs
+      // ~/.hazlie/logs` with the target at 0700 PASSES the daemon's fatal check
+      // and the reader runs -- while screen 6 said "i cannot start reading" and
+      // hid the only button on it. The round-5 fix shared the MODE between the
+      // two files and left the STAT SEMANTICS divergent, which is the same drift
+      // one level down.
+      //
+      // resolvingSymlinksInPath is the traversal; `attributesOfItem` on the
+      // RESOLVED path is then stat's answer, like the daemon's.
+      // THE FINAL COMPONENT, and only that.
+      //
+      // ~~resolvingSymlinksInPath and compare.~~ That resolves the WHOLE path, so
+      // one intermediate link made every entry look linked: a `~/.hazlie` that is
+      // itself a symlink (a home moved to an external volume), or a home under
+      // /private, marked a `logs` directory this app genuinely owns as
+      // unrepairable instead of chmod-ing it. The rule was always about the last
+      // component -- lstat's question -- because that is the one chmod would
+      // follow.
+      let url = URL(fileURLWithPath: path)
+      let isLink = (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?
+        .isSymbolicLink == true
+      let target = isLink ? url.resolvingSymlinksInPath().path : path
+      guard let attrs = try? fm.attributesOfItem(atPath: target) else {
+        // A DANGLING LINK IS NOT A MISSING DIRECTORY. `attributesOfItem` fails
+        // for both, and a missing path is the daemon's WARN while a link to
+        // nowhere is its FAIL -- so the one that kills the reader must not be
+        // dropped here the way the harmless one is.
+        if isLink { blocked.append(TreeBlocker(path: path, target: target)) }
+        continue
+      }
+      // A missing path is the check's WARN, not its FAIL, and creating one here
+      // would invent a tree the setup script owns.
+      guard attrs[.type] as? FileAttributeType == .typeDirectory else {
+        if fm.fileExists(atPath: target) {
+          blocked.append(TreeBlocker(path: path, target: isLink ? target : nil))
+        }
+        continue
+      }
+      guard let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue,
+            mode & 0o777 != 0o700
+      else { continue }
+      // STILL NOT CHMOD'ING THROUGH A LINK. The round-5 reasoning holds: the
+      // thing on the other side is somewhere this app does not own, and widening
+      // or narrowing it is not ours to do. But the daemon FAILS on it, so
+      // staying silent is a dead reader -- it is named instead, with the path
+      // the owner can act on.
+      if isLink {
+        blocked.append(TreeBlocker(path: path, target: target))
+        continue
+      }
+      do {
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+      } catch {
+        blocked.append(TreeBlocker(path: path, target: nil))
+      }
+    }
+    treePermsBlockerDetails = blocked
+    if !blocked.isEmpty {
+      let named = blocked.map(\.describedForOwner).joined(separator: ", ")
+      NSLog("Intaglio Labs: cannot make these owner-only, the reader will refuse to start: \(named)")
+    }
+  }
+
+  /// WHY A START DID NOT HAPPEN, because six guards used to swallow that
+  /// question and the settings panel now has a button the owner presses and
+  /// watches. `alreadyRunning` and `started` are both "it is reading"; `queued`
+  /// is the throttle, which means it WILL be. The rest are states the owner can
+  /// do something about only if somebody tells them.
+  enum StartOutcome: String {
+    case started, alreadyRunning, queued
+    case stopping, modelMaintenance, missingRuntime, missingConfig
+    /// Is the reader up, or certain to be in a moment.
+    var isUp: Bool { self == .started || self == .alreadyRunning || self == .queued }
+  }
+
   /// Start the daemon if it is not already up and its config exists. Safe to
   /// call repeatedly — onboarding calls it the moment it writes the config.
-  func start(bypassingThrottle: Bool = false) {
-    guard !isRunning, !stopping, !modelMaintenancePaused else { return }
+  @discardableResult
+  func start(bypassingThrottle: Bool = false) -> StartOutcome {
+    if isRunning { return .alreadyRunning }
+    if stopping { return .stopping }
+    if modelMaintenancePaused { return .modelMaintenance }
     let node = home.appendingPathComponent(".hazlie/bin/node")
     let script = backend.appendingPathComponent("connectors/daemon.mjs")
     let config = home.appendingPathComponent(".hazlie/connectors/config.json")
-    guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path) else { return }
+    guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path)
+    else { return .missingRuntime }
     // No config means the daemon would exit(1) immediately and we would respawn
     // it forever. Onboarding writes it and then calls start().
-    guard fm.fileExists(atPath: config.path) else { return }
+    guard fm.fileExists(atPath: config.path) else { return .missingConfig }
+    reassertTreePerms()
 
     let since = Date().timeIntervalSince(lastStart)
     if !bypassingThrottle && since < throttle {
       DispatchQueue.main.asyncAfter(deadline: .now() + (throttle - since)) { [weak self] in
         self?.start()
       }
-      return
+      return .queued
     }
     lastStart = Date()
 
@@ -304,6 +465,17 @@ final class Connectors {
     p.arguments = [script.path]
     var environment = ProcessInfo.processInfo.environment
     environment["INTAGLIO_CONNECTOR_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+    // WHICH MACHINE THE OWNER ASKED FOR, in the one channel that already carries
+    // a parent fact to this child. The daemon's first-load sprint re-arms in ten
+    // seconds at full speed and twenty otherwise; a config key would be a
+    // SECOND writer for a setting that already has one here, and two definitions
+    // of the same switch is how they come to disagree.
+    //
+    // Read at spawn, so a mode changed under a running daemon reaches it at the
+    // next start -- which is the same bargain applyPerformanceMode() already
+    // strikes, and for the same reason: bouncing the reader to change a dial
+    // throws away the pass the dial exists to speed up.
+    environment["INTAGLIO_PERFORMANCE"] = PowerBudget.current == .full ? "full" : "trickle"
     p.environment = environment
     // Same log files the agent wrote, so nothing that reads them has to change.
     let logs = home.appendingPathComponent(".hazlie/logs")
@@ -349,8 +521,10 @@ final class Connectors {
       try p.run()
       process = p
       NSLog("Intaglio Labs: connectors running as a child of this app (pid \(p.processIdentifier))")
+      return .started
     } catch {
       NSLog("Intaglio Labs: could not start connectors: \(error.localizedDescription)")
+      return .missingRuntime
     }
   }
 
@@ -376,6 +550,53 @@ final class Connectors {
     p.terminate()
   }
 
+  /// TELL THE READER THE OWNER HAS JUST CONNECTED SOMETHING.
+  ///
+  /// The daemon starts at app launch, which on a first run is BEFORE the owner
+  /// signs in to Google on screen 3 and before they hand over their LinkedIn
+  /// export on screen 4. Both sources answer "not ready" at that point and then
+  /// wait out a back-off before asking again. This app is the process that knows
+  /// the wait is over, so it says so instead of leaving the daemon to find out.
+  ///
+  /// NOT A RESTART. restart() exists for a TCC grant, which the child evaluates
+  /// when it opens a file and which its startup preflight already ran — there is
+  /// nothing to re-examine short of a new process. A missing token file is the
+  /// opposite: the daemon asks every source on every tick, so all it needs is to
+  /// be asked to tick now. Bouncing it would throw away whatever pass is in
+  /// flight to learn something a signal delivers for free.
+  ///
+  /// A DAEMON TOO YOUNG TO SIGNAL IS LEFT ALONE. SIGUSR2's default action is
+  /// terminate, and the child installs its handler early but not instantly; a
+  /// process that started moments ago is also one whose own startup probe is
+  /// about to ask this very question. So: no signal, and nothing lost.
+  /// WHAT THE CHILD SAID, not what this process guessed.
+  ///
+  /// ~~Three seconds since lastStart.~~ That is the parent's own bookkeeping
+  /// measured against nothing the child ever confirmed, and the window it is
+  /// covering is node booting and evaluating seventeen static imports --
+  /// node:sqlite among them -- before its handler is installed. Anything landing
+  /// in that window takes SIGUSR2's default action and KILLS the reader, with no
+  /// log line, because the process never reached its logger. On a warm Mac three
+  /// seconds is plenty; a first-ever launch with a cold page cache and a
+  /// code-signature check of the bundled node is exactly the case the nudge was
+  /// built for, and the one where a guess is worth least.
+  ///
+  /// So the daemon writes this file once its handler is armed, with its own pid
+  /// in it, and a nudge is sent only to a process that has said it can take one.
+  /// A stale marker from a previous daemon names a different pid and is ignored.
+  private var nudgeReadyFile: URL {
+    home.appendingPathComponent(".hazlie/connectors/nudge-ready")
+  }
+
+  func nudge() {
+    guard !stopping, !modelMaintenancePaused else { return }
+    guard let p = process, p.isRunning else { return }
+    guard let raw = try? String(contentsOf: nudgeReadyFile, encoding: .utf8),
+          Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)) == p.processIdentifier
+    else { return }
+    kill(p.processIdentifier, SIGUSR2)
+  }
+
   /// Hold the always-running daemon only for the short model activation handoff.
   /// The multi-gigabyte staging download runs beside the active model.
   func pauseForModelMaintenance() {
@@ -396,5 +617,71 @@ final class Connectors {
     stopping = true
     process?.terminate()
     process = nil
+  }
+
+  /// Stop it AND WAIT FOR IT TO BE GONE, up to `timeout`. Returns whether the
+  /// child is actually gone; a child that will not stop is reported, not shot.
+  ///
+  /// WHY THE WAIT EXISTS: the uninstall deletes the app bundle, and the daemon
+  /// is running from `Bundle.main/backend/connectors/daemon.mjs`. stop() is
+  /// SIGTERM and an immediate return, so deleting the bundle on the next line
+  /// unlinks the tree out from under a graceful shutdown that is still doing
+  /// lazy import()s — already-open fds survive an unlink, a module that has not
+  /// been loaded yet does not. What is lost is the shutdown's cursor and lock
+  /// flush into ~/.hazlie, which is the one directory an uninstall keeps.
+  ///
+  /// CALLED OFF THE MAIN THREAD, AND THIS CLASS IS MAIN-CONFINED. Plain vars,
+  /// no lock and no queue: main.swift hops to main to call start(), Bridge's
+  /// starter carries a dispatchPrecondition, and the child's terminationHandler
+  /// hops to main before it touches `process`. The settings panel polls
+  /// `activity` every two seconds, and that reads `isRunning` — so a write to
+  /// `process` from a background queue is not a stale read, it is a non-atomic
+  /// Optional<Process> read against a concurrent write. Every mutation here
+  /// therefore hops to main; only the waiting happens on the caller's queue.
+  ///
+  /// AND THE HANDLE IS KEPT UNTIL THE CHILD IS PROVEN DEAD. Clearing `process`
+  /// up front means nothing in the app owns that child any more: it cannot be
+  /// re-signalled or reaped, `isRunning` answers false for something that is
+  /// still alive, and the next start() spawns a second daemon onto the same
+  /// SQLite files. ~~kill(pid, SIGKILL)~~ went with it — signalling a pid this
+  /// app may already have stopped owning is a race against pid reuse, and a
+  /// reader that ignores SIGTERM is a thing to report rather than to shoot.
+  func stopAndWait(timeout: TimeInterval = 5) -> Bool {
+    // Same reason as Uninstall.run's: main.sync from the main queue is a
+    // deadlock, and a precondition says so where a comment would not.
+    dispatchPrecondition(condition: .notOnQueue(.main))
+    var child: Process?
+    DispatchQueue.main.sync {
+      stopping = true
+      child = process
+    }
+    let clear = { [weak self] in
+      DispatchQueue.main.sync {
+        guard let self, self.process === child else { return }
+        self.process = nil
+      }
+    }
+    guard let child, child.isRunning else { clear(); return true }
+    child.terminate()
+    let deadline = Date().addingTimeInterval(timeout)
+    while child.isRunning, Date() < deadline { usleep(100_000) }
+    guard !child.isRunning else {
+      NSLog("Intaglio Labs: the reader did not stop in \(Int(timeout))s")
+      return false
+    }
+    clear()
+    return true
+  }
+
+  /// Let it be started again after a stop() that turned out not to be final.
+  ///
+  /// `stopping` is a one-way latch everywhere else, and correctly so: it is set
+  /// on quit, where nothing should respawn the child on the way out. An
+  /// uninstall that FAILED is the one case where the app keeps running after a
+  /// stop, and without this the reader could never be restarted for the rest of
+  /// the session — the "start it" button would report success and do nothing.
+  func allowRestart() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    stopping = false
   }
 }

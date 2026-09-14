@@ -61,6 +61,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // The reconnect card: one card, its receipt, four verdict buttons. Height
   // is a base guess; the page fits itself via fitContent once rendered.
   private static let reconnectBase = NSSize(width: 340, height: 430)
+  // The export offer: a lead, a filename, where it is, and two buttons. Short
+  // by construction, and the page fits itself through fitContent once drawn.
+  private static let exportBase = NSSize(width: 340, height: 200)
 
   private let bridge = Bridge()
   private var widgetWindow: WidgetWindow!
@@ -70,8 +73,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var connectionsPanel: PopupPanel?
   private var peoplePanel: PopupPanel?
   private var reconnectPanel: PopupPanel?
+  /// The Downloads watcher's "found your export" offer. See linkedInExportOffered.
+  private var exportPanel: PopupPanel?
+  /// An offer that arrived while the onboarding scrim was up, waiting for the
+  /// flow to end. See presentDeferredExportOffer.
+  private var deferredExportOffer: String?
   private var monthsPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
+  // Set while the onboarding scrim is standing aside for the system browser
+  // during Google sign-in. See yieldOnboardingToBrowser.
+  private var onboardingYieldedToBrowser = false
   private var earWeb: WKWebView?
   // Messages submitted (typed or spoken) before the chat page is alive, in
   // arrival order. The chatReady handshake takes the first; the bridge pulls
@@ -107,8 +118,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // Synchronous and tiny: the connector child is started later in this same
     // launch, so its config must exist before that race begins. The expensive
     // backend copy remains asynchronous inside ensureBackend().
+    // WHAT IS ON, BEFORE ANYTHING ACTS ON IT. Names only — see ops/FEATURES.md.
+    // This is the first line in the log that explains why a panel does not open.
+    Features.logEnabled()
+
     Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
+    // AND THE PRESS THAT NEVER REACHED HERMES. A previous launch recorded the
+    // owner's one-card-a-day choice and could not deliver it — hermes warming,
+    // or not up at all — so it is carried here and retried until it lands once.
+    // A no-op on every machine whose settings already arrived. See
+    // Bridge.cardDefaultsPending.
+    bridge.resumeCardDefaultsIfPending()
+    // Self-gating: with `bridges` off this skips the prefetch AND retires an
+    // io.intaglio.bridges agent a previous install left running under launchd.
     Provision.prefetchBridgeRuntime()
       // ~~PowerBudget.syncRuntimeFile()~~ removed with its reader. The mirror
       // existed because hermes could not see this app's UserDefaults; c00541a
@@ -223,10 +246,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // The ear: a hidden, zero-size webview kept INSIDE the widget window so
     // WebKit doesn't throttle its timers or its capture session. It stays a
     // light empty page until the first arm; models load lazily then.
-    let ear = makeEarWebView(bridge: bridge)
-    ear.frame = .zero
-    w.contentView?.addSubview(ear)
-    earWeb = ear
+    //
+    // NOT BUILT AT ALL while `voice` is off, rather than built and left unarmed.
+    // The page is cheap but it is not free — it is a live WKWebView in the
+    // widget's own window, and the point of stage 1 is that a dormant feature
+    // costs nothing at runtime. armVoice/speakAnswer below no-op to match, so
+    // earWeb staying nil is never dereferenced.
+    if Features.shouldBuildEarWebView(Features.current) {
+      let ear = makeEarWebView(bridge: bridge)
+      ear.frame = .zero
+      w.contentView?.addSubview(ear)
+      earWeb = ear
+    }
 
     // A wake from sleep is the moment status is most likely stale.
     NSWorkspace.shared.notificationCenter.addObserver(
@@ -278,12 +309,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // Hardware/app upgrades may change the safest model tier. The bridge
       // waits for the published processing queues to become idle, stages the
       // new weights beside the current model, and only then switches it.
-      DispatchQueue.main.async { self.bridge.reconcileAutomaticModelWhenSafe() }
+      //
+      // ONLY WHEN THERE IS A MODEL TO RECONCILE. This is the launch sequence,
+      // which is where a reader looks to answer "what does a first launch do",
+      // so the answer is written here rather than inferred three files away:
+      // with no weights on disk there is nothing to upgrade, and the timer is
+      // not armed at all. ModelSetup.automaticTarget refuses the same case on
+      // its own — two locks on purpose, because stage 2's checkpoint is "first
+      // launch downloads nothing unless asked" and one of these is in a file
+      // this stage does not own.
+      DispatchQueue.main.async {
+        guard ModelSetup.isInstalled || ModelSetup.hasUnfinishedDownload else {
+          NSLog("Intaglio Labs: no local model installed — nothing to reconcile, "
+                + "and nothing downloads until onboarding asks")
+          return
+        }
+        self.bridge.reconcileAutomaticModelWhenSafe()
+      }
       // And notice the grant arriving later. Granting Full Disk Access makes
       // macOS offer "Quit & Reopen"; this app does not need either half of that
       // offer, but the daemon just started above does need respawning. See
       // FullDiskWatch for why that is the only thing that happens.
       DispatchQueue.main.async { FullDiskWatch.begin() }
+      // And notice the LinkedIn export arriving. It lands in ~/Downloads minutes
+      // or hours after the owner asked LinkedIn for it, long after the setup
+      // flow that asked has closed — so the app watches for it rather than
+      // waiting to be reopened.
+      //
+      // ONLY FOR AN OWNER WHO IS PAST THE FLOW. Starting it here unconditionally
+      // put the Downloads and Desktop consent dialogs on screen over onboarding
+      // screens 1 to 3, with no context, while screen 2 is telling its own story
+      // about a different grant — and before anything had mentioned an export
+      // (review finding 2, 2026-09-13). A first-run owner arms it from screen 4
+      // instead, where the file has just been explained; see the
+      // `watchForExport` bridge verb.
+      DispatchQueue.main.async {
+        guard Bridge.onboarded else { return }
+        ExportWatch.shared.begin(bridge: self.bridge)
+      }
     }
 
     // THE DISPLAY CHANGING IS AN EVENT, and until now nothing treated it as one.
@@ -309,6 +372,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       let work = DispatchWorkItem { [weak self] in self?.rehomeWidget() }
       self.screenChangeWork = work
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    // COMING BACK FROM THE BROWSER, by either of the two routes there are.
+    //
+    // yieldOnboardingToBrowser puts the scrim behind for the length of a
+    // Google sign-in. Activating this app is the obvious return, but the
+    // onboarding panel is a .nonactivatingPanel: clicking it can make it key
+    // without making this app active, which is exactly the return the page's
+    // own `focus` probe already relies on. Watching only the application
+    // notification would leave the scrim behind in that case, so both are
+    // watched and the flag makes the second one a no-op.
+    //
+    // ANY OF THIS APP'S WINDOWS, NOT ONLY THE ONBOARDING PANEL (round-5
+    // finding 15). The filter was `note.object === onboardingPanel`, and the
+    // widget window is ordered out for the flow's duration, so the
+    // non-activating route only ever fired for a click on the scrim itself. An
+    // owner who cancels in the browser and then clicks some other panel of ours
+    // left a full-screen `.normal` scrim reading "waiting for you in the
+    // browser…" sitting under everything until openOnboarding was called again.
+    // didBecomeKey is posted only for windows in THIS process, so dropping the
+    // filter widens it to exactly "we are being used again" — and
+    // restoreOnboardingFromBrowser is guarded on the yielded flag, so every
+    // other window becoming key is already a no-op.
+    for name in [NSApplication.didBecomeActiveNotification, NSWindow.didBecomeKeyNotification] {
+      NotificationCenter.default.addObserver(
+        forName: name, object: nil, queue: .main
+      ) { [weak self] _ in
+        self?.restoreOnboardingFromBrowser()
+      }
     }
 
     // First launch shows the welcome flow. Only completing it sets the flag,
@@ -583,6 +675,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     }
   }
 
+  /// Show a panel the owner did not ask for, without taking the screen.
+  ///
+  /// present() below calls NSApp.activate(ignoringOtherApps:), which is right
+  /// for every panel that answers a press: the owner just clicked something and
+  /// a popup behind another app's window is not presented. The export offer is
+  /// the one panel nobody pressed for -- it arrives when a download finishes --
+  /// and its most likely moment is while the owner is in the browser at
+  /// LinkedIn, where "request a copy" sent them (review finding 6).
+  ///
+  /// orderFrontRegardless puts it in front of this app's own windows without
+  /// activating the app, so it is waiting when they come back and it does not
+  /// interrupt what they are doing to get there.
+  private func presentWithoutStealingFocus(_ panel: PopupPanel) {
+    watchForOutsideClicks()
+    defer { notifyPanelState() }
+    place(panel)
+    panel.orderFrontRegardless()
+  }
+
   private func present(_ panel: PopupPanel) {
     watchForOutsideClicks()
     defer { notifyPanelState() } // something now covers the dream band
@@ -662,13 +773,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.willOrderOut = { [weak self] in
         reportPanels?()
         self?.spotlightWidget(false)
+        // AND THE OFFER THE SCRIM WAS COVERING. An export found while the flow
+        // was open is held rather than drawn under it; this is the moment it
+        // can be seen. See linkedInExportOffered.
+        self?.presentDeferredExportOffer()
         // ...and the widget comes back however the flow ended — finished,
         // escaped from scene 1, or the panel closed by any native path. At
         // its own level: below every window, exactly as it lives.
         self?.widgetWindow.orderFrontRegardless()
-        // A finished flow opens People from onboarding.js after this scrim is
-        // gone. Escape still only restores the widget; it does not finish or
-        // open the next scene.
+        // ~~"A finished flow opens People from onboarding.js after this scrim
+        // is gone."~~ It does not, and has not for some time: the flow ends on
+        // the reconnect card (onboarding.js finish() posts openReconnect), and
+        // `openPeople` is in no page's grant that the widget can reach. Left
+        // struck through rather than deleted because this file is the gate that
+        // closes the timeline's last door, and a comment asserting an extra one
+        // is exactly the trap the next reader would fall into.
+        // Escape still only restores the widget; it does not finish or open the
+        // next scene.
       }
       onboardingPanel = p
     }
@@ -676,6 +797,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // Re-set every time: the display can change between one showing and the
     // next, and a stale frame would dim the wrong rectangle.
     p.setFrame(frame, display: false)
+    // ...and the LEVEL, for the same reason. yieldOnboardingToBrowser leaves
+    // this panel at .normal and behind, and the way back is the owner
+    // returning to the app -- which a flow escaped from inside the browser
+    // never does. Without this, the next showing would be a scrim that no
+    // longer covers anything, which is a broken flow rather than a broken
+    // moment. Every showing starts above ordinary windows.
+    p.level = .floating
+    onboardingYieldedToBrowser = false
     // And rewind the flow. The panel and its page are both reused, so without
     // this, reopening from settings resumes on whatever screen it was last
     // abandoned on rather than on the welcome. Guarded because on the very
@@ -687,22 +816,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // mid-flow is a CONTINUATION — macOS offers "Quit & Reopen" the moment Full
     // Disk Access is granted, and taking it used to throw away every step
     // already done and start again from the welcome, immediately after the
-    // hardest step in the flow. Guarded because on the very first open the page
-    // has not loaded yet, which is harmless: a fresh page starts on screen 1.
+    // hardest step in the flow. On the very first open the page has not loaded
+    // yet and hears neither word — which is NOT harmless for a resume, so the
+    // delivery is acknowledged and repeated once the page exists. See
+    // deliverToOnboarding.
     let web = p.contentView as? WKWebView
     if resume, let step = Bridge.onboardingStep,
        let json = String(data: (try? JSONSerialization.data(withJSONObject: [step])) ?? Data(),
                          encoding: .utf8) {
-      web?.evaluateJavaScript(
-        "window.__hzOnboardingResume && window.__hzOnboardingResume(\(json)[0])")
+      deliverToOnboarding(
+        web, "window.__hzOnboardingResume && window.__hzOnboardingResume(\(json)[0])")
     } else {
-      web?.evaluateJavaScript("window.__hzOnboardingReset && window.__hzOnboardingReset()")
+      deliverToOnboarding(web, "window.__hzOnboardingReset && window.__hzOnboardingReset()")
     }
     NSApp.activate(ignoringOtherApps: true)
     p.makeKeyAndOrderFront(nil)
   }
 
+  /// One delivery: the word to say, and whether the page took it.
+  /// Main queue only, like every other webview touch here: `didFinish` and an
+  /// `evaluateJavaScript` completion are both delivered there, so this is
+  /// shared state with one writer and no concurrency.
+  private final class OnboardingDelivery {
+    let js: String
+    var answered = false
+    init(_ js: String) { self.js = js }
+  }
+
+  /// The delivery a booked repeat would make, and the page it is booked on.
+  ///
+  /// ONE BOOKING PER PAGE, REPLACED RATHER THAN STACKED (round-5 finding 14).
+  /// whenPageFinishes appends, and didFinish drains — so from the second
+  /// showing onward, on a page that has long since finished, every
+  /// openOnboarding added a closure that would never run. Harmless as leaks go,
+  /// until the webview reloads: WebKit content-process recovery or a re-issued
+  /// loadFileURL fires the whole accumulated pile at once, and the ones whose
+  /// delivery was never acknowledged deliver a resume step from an earlier
+  /// showing, jumping the owner to a screen they left behind.
+  ///
+  /// So the pending delivery lives here, where a later showing REPLACES it, and
+  /// the booked closure reads it when it runs rather than capturing it. The
+  /// booking itself is made only when this page does not already hold one.
+  private var pendingOnboardingDelivery: OnboardingDelivery?
+  private var onboardingRepeatBookedFor: ObjectIdentifier?
+
+  /// Say it once, and say it again if the page was not there to hear it.
+  ///
+  /// SENDING IS NOT ARRIVING. Both onboarding entry points are evaluated
+  /// against a panel built moments earlier, and on the very first launch that
+  /// document has not parsed onboarding.js yet — the comment above says WebKit
+  /// can run the evaluation seconds later, and the page's own gate bounds its
+  /// wait at ENTRY_WAIT_MS. A delivery that lands after that bound is a
+  /// delivery the page is entitled to ignore, and the cost of ignoring it is
+  /// the owner redoing screens 2 to 4 on the cold launch that follows granting
+  /// Full Disk Access — the one launch where this matters most.
+  ///
+  /// So the page acknowledges: both functions return true, and `false` or nil
+  /// means nothing was listening. The delivery is then made again the moment
+  /// the page finishes loading, which is the first instant there is anything
+  /// to deliver to. Once, not on a timer: the second attempt is talking to a
+  /// parsed document, and if that fails the page's own late-arrival rule is
+  /// what is left.
+  ///
+  /// AND THE REPEAT IS BOOKED BEFORE THE FIRST ATTEMPT, NOT INSIDE ITS ANSWER.
+  /// Registering from the completion handler assumes WebKit answers the
+  /// evaluation before it reports didFinish for that navigation; if it defers
+  /// the evaluation past didFinish instead, the repeat is appended to a list
+  /// that has already been drained and nothing ever runs it — the exact cold
+  /// first launch this function exists for. Booked first and cancelled by a
+  /// page that answered, so the race has no losing side: the worst case is one
+  /// redundant delivery to a page that already took the first one.
+  ///
+  /// AND THE BOOKING IS REPLACED, NOT REPEATED. The pending delivery is a
+  /// property this showing overwrites, so a reload can only ever replay the
+  /// LATEST word — never a resume step from a showing the owner has moved on
+  /// from — and the list holds one closure per page rather than one per
+  /// showing. See pendingOnboardingDelivery.
+  private func deliverToOnboarding(_ web: WKWebView?, _ js: String) {
+    guard let web else { return }
+    let delivery = OnboardingDelivery(js)
+    pendingOnboardingDelivery = delivery
+    let page = ObjectIdentifier(web)
+    if onboardingRepeatBookedFor != page {
+      onboardingRepeatBookedFor = page
+      bridge.whenPageFinishes(web) { [weak self] loaded in
+        guard let self else { return }
+        // One-shot: didFinish removed it as it ran, so the next showing books
+        // again rather than relying on a closure that is no longer on the list.
+        self.onboardingRepeatBookedFor = nil
+        guard let pending = self.pendingOnboardingDelivery, !pending.answered else { return }
+        self.pendingOnboardingDelivery = nil
+        loaded.evaluateJavaScript(pending.js)
+      }
+    }
+    web.evaluateJavaScript(js) { [weak self] answered, _ in
+      guard (answered as? Bool) == true else { return }
+      delivery.answered = true
+      if self?.pendingOnboardingDelivery === delivery { self?.pendingOnboardingDelivery = nil }
+    }
+  }
+
+  // ONE GATE, AT THE CONSTRUCTOR. Every chat entry point — the bar, a voice
+  // transcript, a voice failure note — goes through ensureChatPanel, so
+  // refusing here is what guarantees the page is never loaded while `chat` is
+  // off. The callers each guard too, because `chatPanel` staying nil has to
+  // mean "do nothing" rather than "fall through to a nil unwrap".
   private func ensureChatPanel() {
+    guard Features.shouldBuildChatPanel(Features.current) else {
+      NSLog("Intaglio Labs: chat is off — not building the chat panel")
+      return
+    }
     if chatPanel == nil {
       // No glass, no box: the chat is transparent and its elements float
       // directly on the wallpaper. Window shadow off — AppKit would draw
@@ -783,7 +1006,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   // MARK: voice
 
+  // With `voice` off there is no ear webview to talk to (see the build site in
+  // applicationDidFinishLaunching), so these would already be no-ops on a nil
+  // optional. The explicit guard is here so the REASON is in the log rather
+  // than the silence — a tap that does nothing and says nothing is the failure
+  // mode this whole stage is meant to avoid.
   func armVoice() {
+    guard Features.on("voice") else {
+      NSLog("Intaglio Labs: voice is off — ignoring an arm request")
+      return
+    }
     eval(earWeb, "window.__earArm && window.__earArm()")
   }
 
@@ -792,9 +1024,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   }
 
   func voiceNote(_ message: String) {
-    if chatPanel != nil, let web = chatWeb {
+    // DROPPED, NOT QUEUED, when there is no panel it could ever reach.
+    //
+    // The else arm below sets pendingVoiceNote and calls ensureChatPanel(),
+    // which with `chat` off builds nothing — so takePendingVoiceNote(), which
+    // only the chat page's ready handshake calls, is never reached. The note sat
+    // in a property for the life of the process: not shown, not delivered, not
+    // dropped, not logged. Dead today only because the ear is not built without
+    // `voice`; live the moment an override says voice:true without chat:true,
+    // which the override explicitly allows.
+    //
+    // The log carries a LENGTH and never the words. A voice note is the owner
+    // talking, and this file's rule for saying what happened is names and counts.
+    guard Features.shouldBuildChatPanel(Features.current) else {
+      NSLog("Intaglio Labs: chat is off — dropped a voice note of \(message.count) characters")
+      return
+    }
+    // `if let panel`, not `chatPanel != nil` + `chatPanel!`. The two were
+    // equivalent while the panel was always built; with `chat` off it is
+    // legitimately nil, and a force-unwrap two lines under its own nil check is
+    // the shape that survives a refactor by crashing.
+    if let panel = chatPanel, let web = chatWeb {
       eval(web, "window.__hzVoiceNote && window.__hzVoiceNote(\(jsString(message)))")
-      present(chatPanel!)
+      present(panel)
     } else {
       pendingVoiceNote = message
       ensureChatPanel()
@@ -813,6 +1065,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   }
 
   func speakAnswer(_ text: String) {
+    guard Features.on("voice") else { return }
     eval(earWeb, "window.__earSpeak && window.__earSpeak(\(jsString(text)))")
   }
 
@@ -833,6 +1086,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // connection is visible without scrolling — the owner's constraints.
       connectionsPanel = makePanel(page: "connections", size: capped(Self.scaled(Self.connectionsBase, Bridge.scale)))
       connectionsPanel!.hasShadow = false
+      // "drop it here" on the LinkedIn settings row. A page cannot see a
+      // dropped file's PATH — WebKit gives JavaScript bytes and a name and
+      // nothing else — so the drop is taken natively and handed to the same
+      // import the picker uses. Installed on this panel only; every other
+      // webview leaves WebKit's own drag handling alone.
+      // See ClickThroughWebView.onFileDrop.
+      (connectionsPanel?.contentView as? ClickThroughWebView)?.onFileDrop = { [weak self] urls in
+        guard let self else { return }
+        let wanted = urls.filter { ExportWatch.looksLikeExport($0.lastPathComponent) }
+        guard !wanted.isEmpty else {
+          // ~~`return false`, handing it to WebKit.~~ WebKit NAVIGATES to a
+          // dropped file, and the compartment is keyed on this view, so falling
+          // through gave the dropped document the settings panel's own grants
+          // (review finding 1). Nothing falls through now.
+          //
+          // Which leaves the owner, who aimed a file at a row that says "drop it
+          // here" and is owed an answer. The row says what the file was not.
+          // Through jsString because this is a filename off the owner's disk on
+          // its way into a JavaScript string literal.
+          let name = urls.first?.lastPathComponent ?? ""
+          self.eval(self.connectionsPanel?.contentView as? WKWebView,
+                    "window.__hzLinkedInDropRefused && "
+                      + "window.__hzLinkedInDropRefused(\(self.jsString(name)))")
+          return
+        }
+        self.bridge.importLinkedIn(files: wanted) { _ in }
+      }
     }
     present(connectionsPanel!)
     // Tell the page whether this open is the guided one. On the panel's very
@@ -856,11 +1136,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     if reconnectPanel == nil {
       reconnectPanel = makePanel(page: "reconnect", size: capped(Self.scaled(Self.reconnectBase, Bridge.scale)))
       reconnectPanel!.hasShadow = false
+      // Closing this panel, by any route, may leave the orb showing a card
+      // the owner already judged -- chained onto makePanel's own hook (set
+      // there; see openOnboarding for the same pattern), not replacing it.
+      let reportPanel = reconnectPanel!.willOrderOut
+      reconnectPanel!.willOrderOut = { [weak self] in
+        reportPanel?()
+        self?.relCardChanged()
+      }
     } else {
       (reconnectPanel?.contentView as? WKWebView)?
         .evaluateJavaScript("window.__hzReconnectShow && window.__hzReconnectShow()")
     }
     present(reconnectPanel!)
+  }
+
+  // Native pokes the WIDGET webview (not the reconnect popup itself) so the
+  // orb re-lights or goes dark immediately after a judgment or a panel
+  // close, instead of waiting out refreshRelCard's poll.
+  func relCardChanged() {
+    eval(widgetWeb, "window.__hzRelCardChanged && window.__hzRelCardChanged()")
   }
 
   // The People popup — the door into the who's-who / person-index feature.
@@ -891,6 +1186,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // time. (It absorbed the constellation/sky list, retired 2026-08-24 —
   // people-sky.css survives as this popup's base stylesheet.)
   func openMonths() {
+    // ~~THE BUTTON KEEPS ITS DOOR, IT JUST CHANGES WHAT IS BEHIND IT.~~ It used
+    // to route here to openPeople() when the timeline was off, so that the
+    // "Same person?" review — reachable only from inside the timeline — kept a
+    // door. That was the right call while find-pairs was a KEEP. It is not one
+    // any more: the review IS the find-pairs window the owner asked to have off
+    // the surface, so the door it was keeping is the door being closed.
+    //
+    // The button itself is hidden with the same flag in widget.js, before the
+    // first paint. This is the second half of the same gate, because the page
+    // can post a verb the button no longer offers.
+    //
+    // NOT DELETED: people.html, people.js, Bridge.pageCapabilities["people"] and
+    // openPeople() below all stay where they are, unreachable rather than gone.
+    // If find-pairs should ever be separable from the timeline, that is the
+    // moment to add an `identity` flag — in ops/features.json, Features.swift
+    // and connectors/lib/features.mjs together, never one of the three.
+    guard Features.shouldBuildTimelinePanel(Features.current) else {
+      NSLog("Intaglio Labs: the timeline is off — the People button opens nothing")
+      return
+    }
     if let p = monthsPanel, p.isVisible {
       p.orderOut(nil)
       return
@@ -967,7 +1282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // change again, and acting on it is what turned one drag into a stream of
     // window resizes.
     if scaleDragging {
-      for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (monthsPanel, 0)] {
+      for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (monthsPanel, 0), (reconnectPanel, 0)] {
         guard let p = panel, p.contentView === webView
           || p.contentView?.subviews.first === webView else { continue }
         contentHeights[p] = CGFloat(contentHeight)
@@ -978,6 +1293,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let panels: [(PopupPanel?, NSSize)] = [
       (connectionsPanel, Self.connectionsBase), (chatPanel, Self.chatBase),
       (peoplePanel, Self.peopleBase), (monthsPanel, Self.monthsBase),
+      // The reconnect card's own content varies a lot per-card (a page's who
+      // line, tie, quote and asks list can push it well past reconnectBase) --
+      // it was missing from this list entirely, so its fitContent posts were
+      // silent no-ops and the panel never grew past its fixed base height.
+      // capped() still applies (it is not overlay-placed), so this only
+      // reaches as tall as popupCeiling allows; the page's own scrolling
+      // footer covers whatever is left over.
+      (reconnectPanel, Self.reconnectBase),
+      // AND THE EXPORT OFFER, for the same reason and caught by reading the
+      // paragraph above rather than by running it: a panel that posts
+      // fitContent and is not named here gets a silent no-op and stays at its
+      // base height. This one's height is a filename the owner has never seen
+      // before, so it is exactly the panel that cannot be sized by guess.
+      (exportPanel, Self.exportBase),
     ]
     for (panel, base) in panels {
       guard let p = panel, p.contentView === webView
@@ -1186,6 +1515,141 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.level = .floating
       p.orderFrontRegardless()
     }
+  }
+
+  // GET OUT OF THE BROWSER'S WAY, WITH NOTHING TO TELL US WHEN IT IS OVER.
+  //
+  // Google will not run OAuth in an embedded webview, so sign-in happens in
+  // the owner's own browser (see GoogleLogin). The scrim is full-screen at
+  // .floating and a browser window is an ordinary one, so the consent page
+  // came up UNDERNEATH it: visible through nothing, unclickable, and the only
+  // way through was Escape -- which closes the flow rather than reaching
+  // Google. Seen live on the clean-machine walk (2026-09-12).
+  //
+  // Lowering to .normal alone is a race this cannot afford to lose. The panel
+  // is non-activating, so this app may well be inactive already; NSWorkspace
+  // brings the browser forward asynchronously, and whichever of the two moves
+  // last wins the ordering. So the scrim goes BEHIND as well -- the same
+  // answer yieldForSettings reached, and for the same reason: this is a
+  // window the owner works in for a while, not a dialog they dismiss.
+  //
+  // It stays VISIBLE rather than hidden: the page is showing "waiting for you
+  // in the browser…" and a scrim that vanished would read as the flow ending.
+  //
+  // There is no completion to restore on, because consent finishes in another
+  // application. The way back is the owner returning here -- see the two
+  // observers in applicationDidFinishLaunching -- and, whatever happens, the
+  // next showing of the flow re-raises it in openOnboarding.
+  func yieldOnboardingToBrowser() {
+    guard let p = onboardingPanel, p.isVisible else { return }
+    onboardingYieldedToBrowser = true
+    p.level = .normal
+    p.orderBack(nil)
+  }
+
+  // THE WATCHER FOUND AN EXPORT, AND THE OWNER HAS TO BE ABLE TO SEE THAT.
+  //
+  // This was a system notification and nothing else, and on the Mac it was
+  // walked on it produced NOTHING: three archives found, three offers recorded
+  // in the defaults, no banner before or after the owner allowed notifications,
+  // and nothing from usernotifications in the system log for the bundle. There
+  // is no diagnosing that from inside this app, and no need to: a feature whose
+  // only output is a notification has no output wherever notifications do not
+  // arrive, and the owner cannot tell that from "it never found anything".
+  //
+  // TWO SURFACES, because either one alone can be missed. The panel carries the
+  // decision; the gear carries the fact, because a panel can be behind
+  // something and the widget is on the desktop by definition.
+  func linkedInExportOffered(name: String) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    // NOT UNDER THE SCRIM. makePanel builds at .normal and the onboarding panel
+    // is full-screen at .floating, with the widget window ordered out for the
+    // flow's duration -- so both of this offer's surfaces are invisible while
+    // the flow is open, and the owner would never see the one thing they had
+    // just been told to expect. The offer is held; it is not spent, because the
+    // key is written by the ANSWER now. The same guard the dream band uses.
+    guard onboardingPanel?.isVisible != true else {
+      deferredExportOffer = name
+      return
+    }
+    showExportOffer(name)
+  }
+
+  /// The offer the scrim was covering, once it is gone.
+  func presentDeferredExportOffer() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let name = deferredExportOffer else { return }
+    deferredExportOffer = nil
+    // Only if it is still the offer: answering it from the notification while
+    // the flow was open leaves nothing to present, and the page closes itself
+    // on an empty exportOffer either way.
+    showExportOffer(name)
+  }
+
+  private func showExportOffer(_ name: String) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    if exportPanel == nil {
+      exportPanel = makePanel(page: "export", size: capped(Self.scaled(Self.exportBase, Bridge.scale)))
+      exportPanel!.hasShadow = false
+    } else {
+      // Re-shown for a new offer. The page refetches, the way the reconnect
+      // card does on every show: a panel that survived hidden must never come
+      // back describing the file before this one.
+      (exportPanel?.contentView as? WKWebView)?
+        .evaluateJavaScript("window.__hzExportShow && window.__hzExportShow()")
+    }
+    // WITHOUT PULLING THE APP IN FRONT OF THE OWNER (review finding 6). present()
+    // calls NSApp.activate(ignoringOtherApps:), and the moment this is most
+    // likely to fire is while the owner is in the browser at LinkedIn -- which
+    // is exactly where "request a copy" sent them. A file-arrival notice is not
+    // worth taking the screen for.
+    presentWithoutStealingFocus(exportPanel!)
+    eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(\(jsString(name)))")
+  }
+
+  // ...and the answer, either way. The glow goes back and the panel goes away,
+  // or the app keeps asking about a decision the owner has already made.
+  func linkedInExportOfferClosed() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(null)")
+  }
+
+  // AN EXPORT LANDED WITHOUT ANYBODY PRESSING ANYTHING ON A PAGE -- the
+  // Downloads watcher found one and the owner said yes to a notification, or a
+  // file was dropped on the settings panel. Both surfaces that render the
+  // export's state read it once, on entry, so without this the settings row
+  // goes on offering a picker and onboarding screen 4 goes on saying "waiting
+  // for your file" about a file that is installed.
+  //
+  // Guarded probes rather than pushes into a known page: either panel may not
+  // exist, and the onboarding page in particular is often a loaded webview
+  // sitting behind a closed scrim.
+  func linkedInExportChanged() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    eval(connectionsPanel?.contentView as? WKWebView,
+         "window.__hzLinkedInChanged && window.__hzLinkedInChanged()")
+    eval(onboardingPanel?.contentView as? WKWebView,
+         "window.__hzLinkedInChanged && window.__hzLinkedInChanged()")
+    // AND THE CARD, WHICH IS SHOWING A SENTENCE ABOUT THIS FILE.
+    //
+    // The mode hold lifts on the server within seconds of an export landing,
+    // and the card page only finds out on its next pull -- so on run 8 the
+    // import succeeded and "investor cards start when your linkedin export
+    // lands" stayed on screen, contradicting the owner's own last action.
+    // __hzReconnectShow is pull(), so this both clears the line and can bring
+    // the standing pick's first real card with it.
+    eval(reconnectPanel?.contentView as? WKWebView,
+         "window.__hzReconnectShow && window.__hzReconnectShow()")
+  }
+
+  // ...and back on top when the owner comes back. Guarded on the flag so this
+  // never lifts a scrim that some other path deliberately lowered.
+  private func restoreOnboardingFromBrowser() {
+    guard onboardingYieldedToBrowser else { return }
+    onboardingYieldedToBrowser = false
+    guard let p = onboardingPanel, p.isVisible else { return }
+    p.level = .floating
+    p.orderFrontRegardless()
   }
 
   func setupProgress(_ payload: [String: Any]) {

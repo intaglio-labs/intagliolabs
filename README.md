@@ -26,13 +26,20 @@ Ask questions such as:
 
 ## Privacy, precisely
 
-**No corpus text is sent to a cloud model.** Reasoning and narration run
-locally against loopback model servers.
+Answers start locally against loopback model servers. Intaglio never attaches
+raw corpus rows, quotes or hidden retrieval context to a cloud request. After a
+local answer, you may choose ChatGPT or Claude, review and edit the complete
+outbound prompt, and explicitly send that text through the provider's installed
+client. The sent text can contain private facts from the local answer; what you
+see in the review box is the privacy boundary.
 
 That does not mean that nothing ever leaves your Mac: connected services,
 software distribution, and other network access have their own explicit paths.
 [`ops/EGRESS.json`](ops/EGRESS.json) is the source of truth for declared egress
-and is enforced by `connectors/test/egress.test.mjs`.
+and is enforced by `connectors/test/egress.test.mjs`. One of those paths, public
+lookup, searches the public web for a person using only identifiers already in
+your corpus; a claim it proposes is an unverified public assertion about a real
+person, stored locally, pending your own review.
 
 ## Run Intaglio
 
@@ -64,12 +71,20 @@ the setup intentionally uses a stable Node copy at `~/.hazlie/bin/node`.
 
 - **Hermes is the only writer and deleter.** Connectors use `POST /ingest`;
   deletion is requested through bearer-only `/admin/*` routes.
-- **Corpus text never rides a cloud request.**
+- **No automatic cloud context.** Raw rows, quotes and hidden snippets never
+  ride a cloud request. A frontier handoff sends only the text the user reviews
+  and explicitly approves.
 - **Logs never contain row content.** `connectors/lib/log.mjs` rejects
   content-shaped field names.
 - **Reconciliation cannot mass-delete.** A scan that observes nothing cannot
   delete anything; see `connectors/lib/reconcile.mjs`.
 - **Secrets are read at use time** from `0600` files inside a `0700` directory.
+- **Lint never calls a model and never fixes anything by itself.** A
+  scheduled pass (run after public lookup on the same timer) checks the local
+  database's own consistency — an accepted claim past its own expiry, a page
+  that can no longer be refreshed, and similar — and surfaces what it finds
+  for your own review; the only thing it ever changes automatically is
+  marking a finding resolved once its underlying condition is gone.
 
 `connectors/AGENTS.md` and `ui/AGENTS.md` contain behavior-critical guidance
 for work in those directories.

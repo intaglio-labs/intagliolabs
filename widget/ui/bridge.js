@@ -504,6 +504,122 @@ function hzApplyTimeOfDay(orbEl) {
 window.__hzMotion = (on) => {
   if (document.body) document.body.classList.toggle('motion-anyway', on === true);
 };
+// THE FEATURE REGISTRY, PAGE SIDE. ops/features.json, delivered on `prefs` —
+// which is a sharedAction, so every page may ask and no page's capability list
+// had to change to let it. See ops/FEATURES.md.
+//
+// Cached per page load, deliberately: the registry ships inside the bundle and
+// the owner override is read once per process on the native side, so a second
+// ask cannot return a different answer, and several callers on one page (the
+// widget bar, the connector shelf) should not each cost a bridge round trip.
+//
+// FAILS CLOSED. No bridge, no answer, nothing on. These pages only ever run
+// inside the app, where the bridge is present; if it is not, `status` and every
+// other verb on the page is dead too, and drawing a full shelf of tiles that
+// cannot be pressed would be the dishonest outcome, not the safe one.
+let hzFeaturesPromise = null;
+function hzFeatures() {
+  if (!hzFeaturesPromise) {
+    hzFeaturesPromise = hzPost('prefs')
+      .then((d) => ({
+        features: (d && d.features) || {},
+        connectors: (d && d.connectorFeatures) || {},
+      }))
+      .catch(() => ({ features: {}, connectors: {} }));
+  }
+  return hzFeaturesPromise;
+}
+/// An absent name reads as OFF, never as on.
+function hzFeatureOn(set, name) {
+  return !!(set && set.features && set.features[name] === true);
+}
+/// true | false | 'optional' — or `undefined` for a connector the registry does
+/// not mention AT ALL, which is not the same answer as false.
+///
+/// This used to map anything unrecognised to false, and the daemon's rule is the
+/// exact opposite by design: connectorsDisabledBy (connectors/lib/features.mjs)
+/// disables a module whose feature is `false` and LEAVES ALONE one with no entry
+/// — "silently switching off a source somebody added is worse than listing it".
+/// So a status row whose kind the registry has never heard of was scheduled,
+/// polled and ingested by the daemon while the shelf drew no tile for it, which
+/// is the one outcome CONNECTOR_ORDER promises cannot happen ("a new connector
+/// appears rather than disappearing"). Two loaders, one rule: unknown is
+/// undefined here and the caller treats it as "leave it alone".
+function hzConnectorFeature(set, name) {
+  const table = set && set.connectors;
+  // NO ANSWER AT ALL IS STILL "NOTHING ON". hzFeatures' catch above returns an
+  // EMPTY table when the bridge cannot be asked, and that must keep failing
+  // closed — undefined here would turn "the registry could not be reached" into
+  // "the registry does not mention this one", which draws a full shelf of tiles
+  // that cannot be pressed. An empty table is no answer; a populated one that
+  // omits a name is an answer about a connector the registry does not know.
+  if (!table || Object.keys(table).length === 0) return false;
+  const value = table[name];
+  return value === true || value === false || value === 'optional' ? value : undefined;
+}
+
+// WHY THE LIT CHIP IS NOT THE CARD IN HAND, in one sentence, for the two
+// surfaces that have to say it.
+//
+// founder and investor are decided from the LinkedIn export's job titles, so on
+// a Mac with no export there is nobody to BE either. hermes serves from `any`
+// instead and says so with `modeFallback: 'linkedin-pending'` — and both the
+// reconnect card and onboarding's first-load screen have to explain that, or the
+// picker reads as broken: the investor chip is lit, the card is somebody's
+// cousin, and the obvious conclusion is that the chips do nothing.
+//
+// IT LIVES HERE BECAUSE IT IS ONE FACT. Two pages spelling out one sentence is
+// two explanations that agree right up until somebody edits one of them, and
+// this sentence has now grown a clause and then a whole second form. bridge.js
+// is loaded by every page; neither page writes the words any more.
+//
+// THE SECOND CLAUSE (review finding 21). Under the hold, onboarding hides its
+// "show me anyone, just this once" button — correctly, because the server is
+// already serving from `any` and the button would be asking the owner to choose
+// what they are being given. That left a sentence stating a shortfall, with
+// nothing to press and no account of what was happening instead. What IS
+// happening is the interesting half: the card beside it is not empty.
+//
+// THE SECOND FORM. "cards start WHEN your linkedin export lands" is a promise
+// about an event, and for the owner who pressed `later` and never imports it is
+// false — the hold has no other end. After a week the sentence stops promising
+// and names the one surface that can still change it, because the widen button
+// is gone from screen 6 and the chips are in a panel this owner has never been
+// sent to.
+// WHEN LINKEDIN MAILED TO SAY THE ARCHIVE IS READY, or null for "it has not".
+//
+// THE SAME MISTAKE THREE TIMES, which is why it is one function now. Every
+// reader of this field wrote `Number.isFinite(Number(value))`, and every one of
+// them was wrong the same way: `Number(null)` and `Number('')` are 0, and 0 IS
+// finite. hermes sends null whenever there is no marker — which is every fresh
+// install, because the mail connector has not seen the mail — so the settings
+// row said "export ready" and the gear glowed on a Mac where nothing had
+// arrived, and hzModeHoldLine below read the same 0 as 1970 and told held
+// owners their export never came.
+//
+// A marker is a moment in time. Finite is not enough; it has to be a real one.
+function hzExportReadyAt(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const at = Number(value);
+  return Number.isFinite(at) && at > 0 ? at : null;
+}
+
+const HZ_HOLD_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000;
+
+function hzModeHoldLine(mode, heldSince, now = Date.now()) {
+  // A CLOCK THAT WAS NOT SENT IS NOT A CLOCK OF ZERO. hermes omits `heldSince`
+  // when it cannot read one — its own comment says absence of a claim is not a
+  // claim — and the same coercion that caught hzExportReadyAt above caught this
+  // too: 0 is finite, reads as 1970, and would tell every held owner their
+  // export never arrived. One reader for both, so there is one place to get it
+  // right and one test that runs it.
+  const since = hzExportReadyAt(heldSince);
+  if (since !== null && now - since > HZ_HOLD_EXPIRES_MS) {
+    return 'your linkedin export never arrived — showing anyone; add it in settings';
+  }
+  return `${mode} cards start when your linkedin export lands — showing anyone for now`;
+}
+
 function hzApplyPrefs() {
   hzPost('prefs')
     .then((d) => {
@@ -720,5 +836,8 @@ function hzGlyph(id) {
   // Both the "add a mailbox" row (bare `mail`) and every configured one
   // (`mail:<address>`) are the same Google account, so they wear the same mark.
   if (id === 'mail' || id.startsWith('mail:')) return HZ_GLYPHS.google;
+  // The export tile and the bridge tile are two rows for one platform; they are
+  // the same mark. (Only one of them is ever on screen — see isHiddenSource.)
+  if (id === 'linkedin-export') return HZ_GLYPHS.linkedin;
   return HZ_GLYPHS[id] || HZ_SVG('<circle cx="12" cy="12" r="7.5"/>');
 }

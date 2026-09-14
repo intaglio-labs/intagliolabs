@@ -8,7 +8,9 @@
 // rows say so, instead of rendering a red X the owner cannot act on.
 
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PLATFORMS, bridgeStatus } from './bridge.mjs';
@@ -19,6 +21,12 @@ import {
   accountsWithScopeIncludingStale,
 } from '../../connectors/lib/googleAccounts.mjs';
 import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
+import {
+  REGISTRY_STATES, connectorsDisabledBy, defaultOverridePath, readFeatureRegistry,
+} from '../../connectors/lib/features.mjs';
+import { daemonLockIsLive } from '../../connectors/lib/daemonLock.mjs';
+import { CONNECTOR_NAMES } from '../../connectors/lib/connectorNames.mjs';
+import { exportInstalled, exportReadyAt } from '../../connectors/lib/linkedinExport.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -29,6 +37,11 @@ const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 // Readable is not the same as running.
 function connectorForStatusRow(id) {
   if (id.startsWith('mail:')) return 'mail';
+  // The export row, whose poller is sources/linkedin.mjs — NOT the bridge that
+  // shares the platform name one line below. Ahead of the PLATFORMS test on
+  // purpose: `linkedin` is in that table, so without this the export tile would
+  // answer to the Matrix marker and ignore its own.
+  if (id === LINKEDIN_EXPORT_ID) return 'linkedin';
   // Seven status rows, one Matrix poller and therefore one disable marker.
   if (Object.hasOwn(PLATFORMS, id)) return 'matrix';
   return id;
@@ -388,6 +401,340 @@ export function discordImportState({ home = homedir() } = {}) {
 // same bus — mautrix-linkedin in bridges/docker-compose.yml, listed by
 // bridgeRows() below from the PLATFORMS table. Its rows keep the SAME
 // `linkedin` source name the export wrote, so nothing downstream changed.
+//
+// BACK AS A SECOND ROW, and the reason is the feature registry rather than a
+// reversal of that call. With `bridges` off, the bridge tile is correctly
+// hidden — the bridge is not provisioned — while `connectors.linkedin` stays
+// TRUE and connectors/sources/linkedin.mjs stays scheduled, waiting on a
+// Connections.csv nothing on screen asks for. The owner had no surface telling
+// them where to drop the file for a connector this install is actively running.
+// One row per flow: the bridge tile lives behind `bridges`, this one behind the
+// connector, and the shelf shows whichever applies (widget/ui/connections.js).
+export const LINKEDIN_EXPORT_ID = 'linkedin-export';
+
+function linkedinExportRow(home) {
+  // File-based on purpose — the export, never an API or a scrape. Connected
+  // means Connections.csv is in place; messages.csv is optional and not
+  // checked, because its absence is a choice rather than a fault. Existence
+  // only: no names, no counts of rows, nothing out of the file itself.
+  const ok = exportInstalled(home);
+  return {
+    id: LINKEDIN_EXPORT_ID,
+    label: 'LinkedIn',
+    connected: ok,
+    // THE ONE ROW WHERE "NOT CONNECTED" MAY NOT BE THE OWNER'S MOVE TO MAKE.
+    // Every other tile here is connected by signing in; this one waits on
+    // LinkedIn to build an archive and mail it. The mail connector recognises
+    // that mail and leaves a marker (connectors/lib/linkedinExport.mjs), so
+    // this row can say "your export is ready — open the email" instead of
+    // repeating "needs your LinkedIn data export" at somebody who already
+    // asked for it. A TIMESTAMP OR NULL, never the subject: the surfaces only
+    // need to know that it happened and when.
+    linkedinExportReady: exportReadyAt(home),
+    // OPTIONAL, like "add another Google account" and for the same reason. The
+    // archive is requested from LinkedIn, produced in its own time, mailed,
+    // downloaded and unzipped by hand — a standing invitation rather than
+    // outstanding work. Counted as work, the connect page's footer on a Mac
+    // that never drops the file could never reach "all set", and the row took
+    // the page's single filled accent away from something actionable.
+    optional: true,
+    detail: ok ? 'export imported' : 'needs your LinkedIn data export',
+    action: ok ? null : 'linkedin',
+    caveat: null,
+  };
+}
+
+/// WHICH ROWS THIS BUILD ACTUALLY OFFERS — the one place that rule is written.
+///
+/// readStatus() answers every source this install CAN connect; the feature
+/// registry says which of them this build runs. Until now only the widget shelf
+/// (widget/ui/connections.js) applied that, and connect/server.mjs rendered the
+/// raw list — so the loopback page drew bridge tiles for a bridge that is not
+/// provisioned and two rows both called "LinkedIn".
+///
+/// Two rules, and the second is the one that is easy to forget:
+///
+///   * a row whose CONNECTOR feature is false is hidden — by connector, not by
+///     id, because `mail:<address>` rows are the mail connector and the export
+///     row is the linkedin one;
+///   * every bridge tile goes with `bridges`, because the Matrix bus IS that
+///     feature. `isBridgeRow` is the discriminator rather than the id, which
+///     matters for LinkedIn precisely: `linkedin` is both a bridge platform and
+///     the connector that reads the data export.
+///
+/// A connector the registry does not mention at all is LEFT ALONE, matching
+/// connectorsDisabledBy: the daemon schedules such a module, and a shelf that
+/// hid it would disagree with what the machine is doing.
+///
+/// The widget cannot import this (the shelf is a classic <script> in a
+/// WKWebView), so connections.js carries the mirror; both are pinned against
+/// the same cases, here and in widget/test/connector-visibility.test.mjs.
+function isBridgeRow(row) {
+  return row.action === 'bridge' || Object.hasOwn(PLATFORMS, row.id);
+}
+
+export function visibleStatusRows(rows, features) {
+  const shown = rows.filter((row) => {
+    if (isBridgeRow(row)) return features?.bridges === true;
+    return features?.connectors?.[connectorForStatusRow(row.id)] !== false;
+  });
+  // BOTH LINKEDIN FLOWS CAN BE LIVE AT ONCE, and then each has to say which it
+  // is. With `bridges` on and `connectors.linkedin` true the bridge logs in and
+  // sources/linkedin.mjs still polls ~/.hazlie/imports/linkedin, so both are
+  // real work — but they share the label the platform gave them. Rename only
+  // when both survive: with bridges off there is one tile and "(export)" is
+  // noise on it.
+  const both = shown.some((row) => row.id === 'linkedin')
+    && shown.some((row) => row.id === LINKEDIN_EXPORT_ID);
+  if (!both) return shown;
+  return shown.map((row) => {
+    if (row.id === 'linkedin') return { ...row, label: `${row.label} (bridge)` };
+    if (row.id === LINKEDIN_EXPORT_ID) return { ...row, label: `${row.label} (export)` };
+    return row;
+  });
+}
+
+/// 'ok' | 'missing' | 'invalid' — why the feature registry answered what it
+/// answered. It rides the status payload because the shelf is the surface that
+/// goes blank when the answer is one of the last two: every connector off, the
+/// card's own included, drawn as the same empty list as "nothing connected".
+/// The page needs to be able to say "unreadable" instead of saying nothing.
+/// WITH `home`, because every other reader on this page has one. The override
+/// lives at ~/.hazlie/features.json, so a read with no argument answers about
+/// the DEVELOPER's machine on an alt-home install and in every temp-home test —
+/// the same class of bug HAZLIE_FEATURES_OVERRIDE closes one layer down.
+/// `overrideState` rides along because it is the part of this answer a home can
+/// change: a broken registry is a broken bundle, the same file for every home.
+export function featureRegistryStatus({ home = homedir() } = {}) {
+  const { registryState, overrideState } = readFeatureRegistry({
+    overridePath: defaultOverridePath(home),
+  });
+  return { registryState, overrideState };
+}
+
+export function featureRegistryState({ home = homedir() } = {}) {
+  return featureRegistryStatus({ home }).registryState;
+}
+
+/// WHERE THE DAEMON STANDS, which is not always where this page stands.
+///
+/// connectors/daemon.mjs resolves the registry ONCE, at module scope; this file
+/// re-reads it per request. Repair a broken ops/features.json under a running
+/// daemon and the shelf's red line clears and the tiles come back, while the
+/// daemon still holds ALL_OFF and schedules nothing until it is restarted — the
+/// notice asserting a recovery that has not happened.
+///
+/// The daemon writes its own answer into the activity file it already
+/// maintains, so this is one small local read and no new channel. `null` is
+/// "it has not said" — an older daemon, a file not written yet, or a claim
+/// nothing is standing behind any more — and must never paint an alarm:
+/// absence of a claim is not a claim.
+///
+/// AND A FILE OUTLIVES THE PROCESS THAT WROTE IT. activity.json carries no
+/// liveness stamp of its own, so a daemon that exited — a missing config is an
+/// exit 1, and so is a crash or a kill — leaves its last registryState behind.
+/// If that word was `missing` or `invalid`, the shelf then told the owner
+/// FOREVER that "the connector service is still running on the old feature
+/// registry — restart the app", about a process that is not running and that
+/// restarting the app does not silence. The whole value of this field is that
+/// it describes a RUNNING process, so it is only reported while there is one:
+///
+///   - the activity file's own mtime is recent — twice the SLOWEST configured
+///     poll interval, which is the slowest cadence at which a working daemon
+///     rewrites it; otherwise
+///   - ~~the daemon holds daemon.lock with a live pid in it.~~ A LIVE PID IS
+///     NOT A LIVE DAEMON. The lock outlives a hard kill (it is cleared only by
+///     the CLI owner-PID watch or the next acquireDaemonLock), so once macOS
+///     recycled that pid the check started asserting that a dead daemon was
+///     running and the shelf revived exactly the stale alarm this field was
+///     added to remove. daemonLockIsLive (connectors/lib/daemonLock.mjs) now
+///     also requires the pid to have STARTED no later than the lock says it
+///     did, and reads a foreign (EPERM) process as somebody else's: the daemon
+///     runs as the owner. An idle daemon with every connector switched off is
+///     still believed whatever the file's age, as long as it is the one that
+///     wrote the lock.
+///
+/// Neither holds: `null`, and the shelf says nothing about the daemon. It is
+/// deliberately not a fourth word — `connections.js` alarms on any
+/// daemonRegistryState that is not 'ok', so a new one would trade a stale
+/// alarm for a permanent one.
+export const DEFAULT_INTERVAL_S = 900;
+
+// THE CADENCE AT WHICH A WORKING DAEMON REWRITES THE FILE, WHICH THE OWNER
+// CONFIGURES.
+//
+// ~~A hardcoded 2 x 900 s.~~ `intervals.<connector>` is a config key with a
+// ceiling of 86,400 s (connectors/daemon.mjs validateConfig), so an owner who
+// slows a connector past fifteen minutes moved the real republish cadence past
+// this window and the daemon's registry state went quiet while the daemon was
+// healthy.
+//
+// ~~The MAXIMUM over the configured intervals.~~ That read the file as though
+// the slowest connector decided the cadence, and it is the fastest that does:
+// every source's reschedule calls publishWaiting, so the file is rewritten
+// whenever ANY source ticks (round-4 finding 13). `{"intervals":{"notion":
+// 86400}}` therefore bought a 48-hour window on an install still republishing
+// every fifteen minutes, and a daemon that died yesterday went on reporting its
+// registry state as authoritative -- the stale-alarm class this window was
+// widened to remove, arriving from the other side.
+//
+// So: the MINIMUM across the roster, with an unlisted connector counted at
+// DEFAULT_INTERVAL_S because that is what it will actually run at. Doubled for
+// the same reason the constant was -- one missed publish is not an outage --
+// and floored at the default, so an install with no `intervals` block, or one
+// that only ever speeds a connector up, behaves exactly as before.
+//
+// ~~The minimum across the WHOLE roster.~~ Thirteen names, of which a typical
+// install configures one or two, every other counted at 900 s: the minimum was
+// 900 on every realistic install and the config could not move this number at
+// all (round-5 finding 4). A derivation that cannot change its answer is a
+// constant wearing a config's clothes.
+//
+// WHICH CONNECTORS ACTUALLY REWRITE THE FILE is the question, and the answer is
+// narrower than the roster and wider than "the ones the owner set up":
+//
+//   the FEATURE REGISTRY decides it. daemon.mjs schedules
+//   `sources` minus DEFAULT_DISABLED_CONNECTORS, and that subtraction is
+//   connectorsDisabledBy(FEATURES, ...) -- the same call, on the same registry,
+//   made here.
+//
+//   A `.disabled` MARKER DOES NOT. `run.mjs <name> --disable` is checked inside
+//   runSource, which returns early -- and schedule() still calls reschedule()
+//   afterwards, which calls publishWaiting(). A marker-disabled source goes on
+//   keeping the file fresh at its own interval, so counting it out here would
+//   widen the window for a daemon that is republishing exactly as fast as
+//   before. Prerequisites are the same story: a source with no credentials
+//   ticks, finds nothing to do, and reschedules.
+//
+// ERRING WIDE IS THE EXPENSIVE DIRECTION, which the struck paragraph above had
+// backwards. A window that is too NARROW only sends the caller to
+// daemonLockIsLive, which is the stricter evidence anyway; a window that is too
+// WIDE makes a dead daemon's last activity.json authoritative for the length of
+// it, which is the stale alarm this whole field exists to avoid. So the
+// registry is read to narrow the roster, never to guess a longer cadence than
+// the install can be shown to run at, and an unreadable registry keeps the
+// default window rather than widening on a file it could not parse.
+// AND THE REGISTRY IS READ TWICE, BY TWO PROCESSES, AT DIFFERENT TIMES
+// (round-6 finding 13). connectors/daemon.mjs computes FEATURES and
+// DEFAULT_DISABLED_CONNECTORS at module scope and holds them for the life of
+// the process; this function reads the same file per request. An owner who
+// edits the override re-enables a connector HERE the instant they save it and
+// in the running daemon not at all, so the two derive "who is scheduled" from
+// different reads with nothing reconciling them.
+//
+// The daemon's own answer is already on disk: `queue` in activity.json is built
+// from nextRuns, so every name in it is a connector THIS daemon is scheduling
+// right now, and `registryState` is the word that daemon read. So both are used
+// and the live registry can only ever NARROW:
+//
+//   registryState not 'ok'   the daemon is running on ALL_OFF and schedules no
+//                            connector at all -- the default window, which is
+//                            the narrowest answer here.
+//   the published queue      union'd with the live-registry roster. A union can
+//                            only lower the minimum interval, which can only
+//                            narrow the window, which is the cheap direction; a
+//                            connector the override has since switched off but
+//                            the daemon is still ticking therefore keeps its
+//                            say.
+//
+// One gap stays, named rather than hidden: `queue` is filtered by notReady, so
+// a connector that the override has just switched off AND that is not ready is
+// absent from both halves while the daemon still ticks it. It costs a wider
+// window only on an install that has also slowed every connector that IS ready
+// past fifteen minutes. Closing it needs the daemon to publish its roster
+// rather than its queue.
+export function daemonActivityFreshMs({ home = homedir(), activity } = {}) {
+  const published = activity === undefined ? readActivityFile(home) : activity;
+  let intervals = null;
+  try {
+    intervals = JSON.parse(
+      readFileSync(join(home, '.hazlie', 'connectors', 'config.json'), 'utf8')
+    )?.intervals;
+  } catch {
+    intervals = null;
+  }
+  const configured = intervals !== null && typeof intervals === 'object' && !Array.isArray(intervals)
+    ? intervals
+    : {};
+  // The daemon said it is scheduling nothing, so nothing republishes at any
+  // connector's cadence and no cadence can be derived from the file.
+  if (REGISTRY_STATES.includes(published?.registryState) && published.registryState !== 'ok') {
+    return DAEMON_ACTIVITY_FRESH_MS;
+  }
+  let scheduled = new Set(CONNECTOR_NAMES);
+  try {
+    const { features } = readFeatureRegistry({ overridePath: defaultOverridePath(home) });
+    const off = new Set(connectorsDisabledBy(features, CONNECTOR_NAMES));
+    scheduled = new Set(CONNECTOR_NAMES.filter((name) => !off.has(name)));
+  } catch {
+    scheduled = new Set(CONNECTOR_NAMES);
+  }
+  for (const name of publishedQueueConnectors(published)) scheduled.add(name);
+  // Nothing is scheduled, so nothing rewrites the file and no cadence can be
+  // derived from it. The default window is the fail-closed answer: it is the
+  // narrowest this function ever returns.
+  if (scheduled.size === 0) return DAEMON_ACTIVITY_FRESH_MS;
+  const cadence = Math.min(...[...scheduled].map((name) => {
+    const seconds = configured[name];
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_INTERVAL_S;
+  }));
+  return 2 * Math.max(DEFAULT_INTERVAL_S, cadence) * 1000;
+}
+
+// The connector names in the daemon's published queue. `maintenance` rides the
+// same map (daemon.mjs nextRuns) and is not a connector, so the roster decides
+// what counts rather than the file.
+function publishedQueueConnectors(activity) {
+  const queue = activity?.queue;
+  if (!Array.isArray(queue)) return [];
+  return queue
+    .map((entry) => entry?.connector)
+    .filter((name) => CONNECTOR_NAMES.includes(name));
+}
+
+// The window an install with no interval overrides gets, which is what this
+// constant always meant.
+export const DAEMON_ACTIVITY_FRESH_MS = 2 * DEFAULT_INTERVAL_S * 1000;
+
+// The daemon's last published activity, parsed, or null. One place, because
+// two readers now want it: the registry state below and the freshness window
+// above, which reads the queue the same file carries.
+function readActivityFile(home) {
+  try {
+    return JSON.parse(
+      readFileSync(join(home, '.hazlie', 'connectors', 'activity.json'), 'utf8')
+    );
+  } catch {
+    return null; // no activity file is the normal case on a machine that never ran it
+  }
+}
+
+export function daemonRegistryState({ home = homedir(), now = Date.now() } = {}) {
+  const path = join(home, '.hazlie', 'connectors', 'activity.json');
+  const raw = readActivityFile(home);
+  if (!REGISTRY_STATES.includes(raw?.registryState)) return null;
+  const state = raw.registryState;
+  let writtenAt = 0;
+  try {
+    writtenAt = statSync(path).mtimeMs;
+  } catch {
+    return null; // it was there a moment ago and is not now: claim nothing
+  }
+  // Freshness first, because it is two file reads while the lock check now
+  // asks the OS when that pid started. The union is unchanged — either kind of
+  // evidence returns the state — so only the cost of the common case moves.
+  // The parsed file goes with it: the window is sized partly from the queue
+  // this very read is holding, and reading it twice is how the two could
+  // disagree.
+  if (now - writtenAt <= daemonActivityFreshMs({ home, activity: raw })) return state;
+  return daemonLockIsLive({ home }) ? state : null;
+}
+
+/// The set itself, for the surfaces that draw what this build OFFERS rather
+/// than only why it could not say.
+export function featureSetFor({ home = homedir() } = {}) {
+  return readFeatureRegistry({ overridePath: defaultOverridePath(home) }).features;
+}
 
 function fullStatus(home) {
   return [
@@ -414,6 +761,7 @@ function fullStatus(home) {
     ...cloudAccountRows(home),
     notionRow(home),
     whatsappRow(home),
+    linkedinExportRow(home),
     ...bridgeRows({ home }),
   ];
 }

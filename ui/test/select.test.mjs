@@ -78,6 +78,26 @@ test('no excluded source reaches the model, whatever the row looks like', () => 
   d.close();
 });
 
+// Public lookup (L5 step 6) writes source='web' context rows directly --
+// third-party page text, quoted verbatim, about a real person. It must reach
+// the owner ONLY through public lookup's own narrow, versioned prompt and
+// groundLookup's own grounding, never through the household distiller, which
+// has no receipt discipline for a web page and no business reading one.
+test('a web row never reaches the distiller', () => {
+  const d = db();
+  add(d, [
+    {
+      ts: NOW,
+      source: 'web',
+      entity_id: 'web:1',
+      text: 'Jane Doe was promoted to VP of Engineering at Acme in March.',
+      meta: { is_from_me: true, url: 'https://example.test/news', query_hash: 'abc123' },
+    },
+  ]);
+  assert.equal(selectRows(d, { now: NOW }).length, 0);
+  d.close();
+});
+
 test('hazlie_digest and seed produce zero distiller input', () => {
   // The self-corroboration test. Without this the system reads its own output
   // back as evidence and the loop closes on nothing at all.

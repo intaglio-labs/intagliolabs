@@ -15,27 +15,99 @@
 <body class="reconnect">
   <div class="win">
     <div class="rc-head">
-      <span class="rc-title">reconnect?</span>
+      <span class="rc-title" id="rcTitle">reconnect?</span>
       <button class="rc-close" id="rcClose" title="Close">✕</button>
     </div>
-    <div id="rcCard">
-      <div class="rc-name" id="rcName"></div>
-      <div class="rc-why" id="rcWhy"></div>
-      <blockquote class="rc-quote" id="rcQuote"></blockquote>
-      <dl class="rc-facts">
-        <div id="rcRoleRow"><dt>who they are</dt><dd id="rcRole"></dd></div>
-        <div id="rcLeftRow"><dt>how you left it</dt><dd id="rcLeft"></dd></div>
-        <div><dt>history</dt><dd id="rcHistory"></dd></div>
-      </dl>
-      <div class="rc-actions">
-        <button id="rcYes">will text them</button>
-        <button id="rcNo">not relevant</button>
-        <button id="rcMute">mute 30d</button>
-        <button id="rcNever">never this person</button>
-      </div>
-      <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
+    <!-- THE CHIP ROW IS GONE FROM THE PRODUCT, AND KEPT IN THE MARKUP.
+         Owner, 2026-09-13: "the any/founder/investor thing isn't necessary —
+         reconnect should be one person. user can dismiss and ask for another
+         one if they like." So reconnect serves from `any` and nothing on this
+         page asks for a group. It is `hidden` here rather than deleted because
+         the whole mechanism behind it -- the server's mode, the one-off
+         widening, the hold line -- is still in the code and still reachable
+         when the registry turns `timeline` on; reconnect.js reveals the row
+         only in that case, and selectMode refuses to post otherwise. -->
+    <div class="rc-modes" id="rcModes" role="group" aria-label="reconnect mode" hidden>
+      <button class="rc-mode" id="rcModeAny" data-mode="any">any</button>
+      <button class="rc-mode" id="rcModeFounder" data-mode="founder">founder</button>
+      <button class="rc-mode" id="rcModeInvestor" data-mode="investor">investor</button>
     </div>
-    <div class="rc-empty" id="rcEmpty" hidden>nothing to review — the orb will light up when there is.</div>
+    <!-- WHY THE CHIP ABOVE IS LIT AND THE CARD BELOW IS NOT FROM IT. founder and
+         investor are decided from the LinkedIn export's job titles, so with no
+         export there is nobody to be either — the server serves from `any`
+         instead and says so with modeFallback. Under the chips because it is
+         about the chips, and outside #rcCard because it is true of the empty
+         state too. See reconnect.js showModeFallback. -->
+    <p class="rc-fallback" id="rcFallback" hidden></p>
+    <div id="rcCard">
+      <div class="rc-body" id="rcBody">
+        <div class="rc-trigger" id="rcTrigger"></div>
+        <div class="rc-name" id="rcName"></div>
+        <div class="rc-who" id="rcWho"></div>
+        <!-- Served under a mode the owner did not pick (onboarding's "just this
+             once"). Hidden on every other card; see showOneOff. -->
+        <div class="rc-who" id="rcOneOff" hidden></div>
+        <div class="rc-why" id="rcWhy"></div>
+        <blockquote class="rc-quote" id="rcQuote"></blockquote>
+        <div class="rc-asks" id="rcAsksRow" hidden>
+          <div class="rc-asks-label">asked you for</div>
+          <ul class="rc-asks-list" id="rcAsksList"></ul>
+        </div>
+        <!-- ONE HOME PER FACT (review finding 17). The trigger line at the top
+             owns WHY NOW (the silence), "how you left it" owns who spoke last
+             and what was outstanding, and "history" owns the durable counts.
+             They used to print the same messages/quiet/meetings three times
+             over, once in the trigger, once in the tie sentence between them
+             and once here. -->
+        <dl class="rc-facts">
+          <div id="rcRoleRow"><dt>who they are</dt><dd id="rcRole"></dd></div>
+          <div id="rcLeftRow"><dt>how you left it</dt>
+            <dd><span id="rcLeft"></span><span class="rc-left-when" id="rcLeftWhen" hidden></span></dd></div>
+          <!-- The newest corroborated public-web change about this person.
+               hermes has been resolving it and putting it on the reply the
+               whole time; nothing rendered it. It is the line that makes a
+               card feel like it knows something. -->
+          <div id="rcChangedRow" hidden><dt>changed since</dt><dd id="rcChanged"></dd></div>
+          <div><dt>history</dt><dd id="rcHistory"></dd></div>
+        </dl>
+      </div>
+      <!-- Pinned footer (reconnect.css): rc-body above scrolls on its own, so
+           the verdict buttons stay reachable even when a page's who/tie/quote/
+           asks push the card past the panel's height. -->
+      <div class="rc-footer">
+        <div class="rc-drafts" id="rcDrafts">
+          <button id="rcDraft">draft a text</button>
+          <div class="rc-drafts-caption" id="rcDraftsCaption" hidden>drafted by your Claude · edit before sending</div>
+          <ul class="rc-drafts-list" id="rcDraftsList"></ul>
+          <div class="rc-drafts-error" id="rcDraftsError" hidden></div>
+        </div>
+        <div class="rc-actions">
+          <button id="rcYes">will text them</button>
+          <button id="rcNo">not relevant</button>
+          <button id="rcMute">mute 30d</button>
+          <button id="rcNever">never this person</button>
+          <button id="rcNotThisKind">not this kind</button>
+        </div>
+        <div class="rc-actions-error" id="rcActionsError" hidden></div>
+        <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+    <!-- ONE PERSON, AND A WAY TO SAY "NOT THAT ONE".
+         A verdict used to pull the next card straight away, which made a
+         dismissal cost an interruption the owner never asked for. The day's
+         one card is served without asking; every card after it is a PULL, and
+         there are three of those. So a rejection stops here, with the one
+         thing the owner might still want on screen, and nothing happens until
+         they press it. "will text them" does not come through here -- that
+         ends the day, as it always did. -->
+    <div class="rc-another" id="rcAnother" hidden>
+      <p class="rc-another-msg" id="rcAnotherMsg"></p>
+      <button class="rc-another-btn" id="rcAnotherBtn">show me another</button>
+    </div>
+    <div class="rc-empty" id="rcEmpty" hidden>
+      <p class="rc-empty-msg" id="rcEmptyMsg">nothing to review — the orb will light up when there is.</p>
+      <button class="rc-refresh" id="rcRefresh">refresh</button>
+    </div>
   </div>
   <script src="bridge.js"></script>
   <script src="reconnect.js"></script>

@@ -1,3 +1,20 @@
 /* One rule, kept out of the shared palette so it stays clearly this feature's:
    a little breathing room between the new people button and the settings gear,
    which sit adjacent at the right end of the gear row. */
+
+/* The reconnect button's own notification dot -- same shape and position as
+   the notify orb's .orb-badge (palette.css), scaled down for a 28px gear
+   button instead of the orb's 42px. Kept here rather than in palette.css: the
+   orb's badge is keyed off `.orb.notify`, a state this button doesn't have,
+   so this is a second, independent copy rather than a shared rule. */
+#reconnect { position: relative; }
+.gear-badge {
+  position: absolute; top: -3px; right: -2px;
+  z-index: 2;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: linear-gradient(180deg, #e5d6bb, #c5a56d);
+  color: #141412; font-size: 8px; font-weight: 700; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+}
+.gear-badge[hidden] { display: none; }

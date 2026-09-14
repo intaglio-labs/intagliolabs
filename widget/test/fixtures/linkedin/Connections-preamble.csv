@@ -1,0 +1,7 @@
+Notes:
+"When exporting your connection data, you may notice that some of the email addresses are missing. Fields such as First Name and Last Name are always present; the Email Address column is only populated for connections who have allowed it. You can learn more here https://www.linkedin.com/help/linkedin/answer/261"
+
+First Name,Last Name,URL,Email Address,Company,Position,Connected On
+Ada,Lovelace,https://www.linkedin.com/in/ada-lovelace,,Analytical Engines,Programmer,15 Aug 2021
+Grace,Hopper,https://www.linkedin.com/in/grace-hopper,,US Navy,Rear Admiral,02 Mar 2019
+Alan,Turing,https://www.linkedin.com/in/alan-turing,,NPL,Mathematician,11 Jan 1946

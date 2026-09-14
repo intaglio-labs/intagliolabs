@@ -17,7 +17,22 @@ import Contacts
 import EventKit
 
 enum Permissions {
-  enum Status: String { case granted, denied, undetermined }
+  /// FOUR STATES, AND THE FOURTH IS NOT A KIND OF GRANTED.
+  ///
+  /// `unavailable` means the thing the permission would unlock is not on this
+  /// Mac at all — today that is only Full Disk Access on a machine where
+  /// Messages has never been opened, so `~/Library/Messages/chat.db` does not
+  /// exist. That used to report `granted`, on the reasoning that a screen
+  /// demanding a permission which would buy nothing is just a wall. The
+  /// reasoning is still right; the WORD was wrong. "granted" travelled out to
+  /// the onboarding screen, painted a green row, started the reader, and then
+  /// screen 6 showed iMessage with zero rows and no explanation — the app
+  /// claiming it could read something it had never been able to read.
+  ///
+  /// So the two facts are separated: `granted` is a successful protected read,
+  /// `unavailable` is "there is nothing here", and every caller says which of
+  /// those it means rather than inferring one from the other.
+  enum Status: String { case granted, denied, undetermined, unavailable }
 
   // Held only while a request is in flight; see the comment at their use.
   private static var contactStore: CNContactStore?
@@ -72,9 +87,22 @@ enum Permissions {
   //
   // If PhotoKit ever grows a people API this comes back, and photos leaves the
   // disk grant at the same time -- see photos.mjs.
-  static func photos() -> Status {
-    fullDisk()
+  /// TAKES THE DISK ANSWER RATHER THAN ASKING FOR IT AGAIN. `all` already
+  /// evaluated fullDisk(), and fullDisk() is a real protected read — a
+  /// FileHandle open on chat.db and a one-byte read, which on a denied machine
+  /// is a tccd denial event. Asking twice per call doubled every one of those
+  /// for an answer that cannot have changed in between.
+  static func photos(disk: Status) -> Status {
+    // `unavailable` is a fact about chat.db, not about the photo library, and
+    // fullDisk() is only a PROXY here — the actual photos probe is the
+    // Photos.sqlite read in fullDiskAccessibleSources(). A Mac with no
+    // Messages history says nothing either way about Photos, so this reports
+    // exactly what it reported before the third state existed rather than
+    // passing an unrelated absence through to a photos row.
+    disk == .unavailable ? .granted : disk
   }
+
+  static func photos() -> Status { photos(disk: fullDisk()) }
 
   /// Bring this app forward before asking.
   ///
@@ -170,10 +198,11 @@ enum Permissions {
     let db = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Library/Messages/chat.db")
     guard FileManager.default.fileExists(atPath: db.path) else {
-      // No Messages history on this Mac: nothing to read, so nothing to grant.
-      // Reported as granted rather than denied — a screen that demands a
-      // permission which would buy nothing is just a wall.
-      return .granted
+      // No Messages history on this Mac: nothing to read, so nothing to grant
+      // AND nothing to claim. See Status.unavailable — this answered `granted`
+      // until 2026-09-12, which made a fresh Mac's onboarding paint a green
+      // "messages" row for a source that would stay empty forever.
+      return .unavailable
     }
     guard let handle = try? FileHandle(forReadingFrom: db) else { return .denied }
     defer { try? handle.close() }
@@ -221,6 +250,13 @@ enum Permissions {
   ///
   /// Protected-file sources still need an actual read probe; framework-backed
   /// sources use the same native authorization state their readers depend on.
+  /// NOTE ON `unavailable` HERE: this function never consults fullDisk()'s
+  /// enum at all — it probes each protected file itself and admits a source
+  /// only on a successful read. A Mac with no chat.db therefore drops
+  /// "imessage" from this set for the same reason it always did (the read
+  /// fails), with no third-state handling needed. Stated rather than left to
+  /// be re-derived, because the obvious edit when the enum grew a case was to
+  /// add a branch here, and the right answer was that there is nothing to add.
   static func accessibleLocalSources() -> Set<String> {
     var sources = fullDiskAccessibleSources()
     if contacts() == .granted { sources.insert("contacts") }
@@ -271,7 +307,10 @@ enum Permissions {
   /// kind. This records what each API actually returned, so the next person
   /// looking at "it just says open settings" has a fact to start from instead
   /// of a guess.
-  static func writeDiagnostic() {
+  /// `mapped` is passed in by a caller that has already built it, so the one
+  /// path that writes this file on a screen entry does not evaluate every
+  /// permission twice to do it.
+  static func writeDiagnostic(mapped: [String: String]? = nil) {
     let logs = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".hazlie/logs")
     try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true,
@@ -279,7 +318,7 @@ enum Permissions {
     let payload: [String: Any] = [
       "contacts_raw": CNContactStore.authorizationStatus(for: .contacts).rawValue,
       "calendar_raw": EKEventStore.authorizationStatus(for: .event).rawValue,
-      "mapped": all,
+      "mapped": mapped ?? all,
       "bundle": Bundle.main.bundleIdentifier ?? "?",
       "path": Bundle.main.bundleURL.path,
       "active": NSApp.isActive,
@@ -290,12 +329,81 @@ enum Permissions {
     try? data.write(to: logs.appendingPathComponent("permissions.json"))
   }
 
+  /// The `fda` row of an ALREADY-BUILT map. Never a second probe: every one of
+  /// those is a real protected read, and on a denied Mac a tccd denial event.
+  static func fullDiskStatus(mapped: [String: String]) -> Status {
+    Status(rawValue: mapped["fda"] ?? "") ?? .denied
+  }
+
+  /// WHICH APP THE SWITCH BELONGS TO — ASKED, NOT ANNOUNCED.
+  ///
+  /// The August rename left com.hazlie.widget allowed in Full Disk Access and
+  /// io.intaglio.widget denied, so the owner could be looking at a Settings row
+  /// labelled "Intaglio Labs" with its switch ON while this process read denied.
+  /// Naming the bundle identifier answered that — and put a bundle identifier
+  /// on the second screen of a consumer flow for every owner who has no such
+  /// problem, which is nearly all of them.
+  ///
+  /// So it is a probe now: the PREVIOUS identifier, when this process cannot
+  /// read AND this Mac carries any mark of an install from before the rename.
+  ///
+  /// NEITHER DIRECTION IS PROVABLE FROM HERE, and two rounds of review pushed
+  /// this the two opposite ways before that was said out loud:
+  ///   - a leftover defaults domain outlives the app that wrote it
+  ///     (DefaultsMigration copies and never deletes), so it is not proof the
+  ///     old grant is still listed;
+  ///   - a TCC row outlives the app that EARNED it — macOS keeps Full Disk
+  ///     Access entries until the owner removes them by hand — so a deleted
+  ///     Hazlie.app is not proof it is gone either.
+  /// Requiring the old install to still be present therefore said nothing on
+  /// the machine the probe was written for; requiring nothing at all promised a
+  /// row that may not be there. The fix is in the SENTENCE, not the evidence:
+  /// the screen now says "if you see a row for an older copy of me…", which is
+  /// true whichever way it fell, and every mark counts again.
+  ///
+  /// WHY NOT READ TCC.db: it is itself protected by Full Disk Access, so on the
+  /// one machine where the answer matters we are the process that cannot read
+  /// it.
+  ///
+  /// NOT ON THE POLL PATH: two directory reads and two stats, on the denied-FDA
+  /// machine where the permissions screen polls every few seconds. The caller
+  /// asks for it on entry and after a request, like the diagnostic beside it.
+  static func staleGrantBundle(disk: Status) -> String? {
+    guard disk != .granted else { return nil }
+    let previous = DefaultsMigration.previousBundleID
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+
+    // 1. The old defaults domain. UserDefaults is keyed on the bundle id, so
+    //    anything under the old one is an install that ran before the rename.
+    if let old = UserDefaults(suiteName: previous),
+       DefaultsMigration.carried.contains(where: { old.object(forKey: $0) != nil }) {
+      return previous
+    }
+    // 2. A pre-rename launch agent. Only the old install writes these.
+    let agents = home.appendingPathComponent("Library/LaunchAgents")
+    if let names = try? fm.contentsOfDirectory(atPath: agents.path),
+       names.contains(where: { $0.hasPrefix("com.hazlie.") && $0.hasSuffix(".plist") }) {
+      return previous
+    }
+    // 3. The pre-rename app itself, still installed under its old name.
+    for path in ["\(home.path)/Applications/Hazlie.app", "/Applications/Hazlie.app"]
+    where fm.fileExists(atPath: path) {
+      return previous
+    }
+    return nil
+  }
+
+  /// ONE DISK PROBE PER MAP. `photos()` is derived from the same answer the
+  /// `fda` row reports, so reading it twice was two protected reads for one
+  /// fact — and this map is what a live screen polls.
   static var all: [String: String] {
-    [
+    let disk = fullDisk()
+    return [
       "contacts": contacts().rawValue,
       "calendar": calendar().rawValue,
-      "photos": photos().rawValue,
-      "fda": fullDisk().rawValue,
+      "photos": photos(disk: disk).rawValue,
+      "fda": disk.rawValue,
     ]
   }
 }

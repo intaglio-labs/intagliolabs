@@ -1,0 +1,4 @@
+CONVERSATION ID,CONVERSATION TITLE,FROM,SENDER PROFILE URL,TO,RECIPIENT PROFILE URLS,DATE,SUBJECT,CONTENT
+conv-1,,Ada Lovelace,https://www.linkedin.com/in/ada-lovelace,Grace Hopper,,2023-06-01 18:02:33 UTC,,"hey — long time!
+would love to catch up"
+conv-1,,Grace Hopper,,Ada Lovelace,,2023-06-01 19:10:00 UTC,,for sure

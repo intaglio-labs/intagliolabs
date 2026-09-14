@@ -27,10 +27,21 @@ function runOnce() {
 
 test('a pass is gated on an explicit opt-in, not merely on config', () => {
   assert.match(src, /distillationEnabled/u, 'the gate must exist');
+  // ~~/distillationEnabled:\s*Bool\s*\{\s*fm\.fileExists/~~ — the marker is now
+  // ANDed with the `distiller` feature flag (ops/FEATURES.md, 2026-09-12), so
+  // the old regex pinned an implementation this deliberately changed. BOTH
+  // halves are asserted instead, because losing either one alone is a silent
+  // policy reversal: without the file check the owner loses their switch,
+  // without the flag the repackaging loses its.
   assert.match(
     src,
-    /distillationEnabled:\s*Bool\s*\{\s*fm\.fileExists/u,
-    'and be answered by a file on disk, so it can be turned on without a rebuild'
+    /distillationEnabled:\s*Bool\s*\{\s*Features\.shouldDistill\(/u,
+    'the feature flag must be consulted'
+  );
+  assert.match(
+    src,
+    /markerPresent:\s*fm\.fileExists\(atPath: enableMarker\.path\)/u,
+    'and the file on disk too, so it can still be turned on without a rebuild'
   );
   assert.match(runOnce(), /guard\s+self\.distillationEnabled\s+else/u, 'runOnce must check it');
 });

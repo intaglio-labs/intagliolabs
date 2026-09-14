@@ -79,13 +79,41 @@ enum ModelSetup {
   }
 
   /// The tier an automatic launch-time reconciliation should stage, if any.
-  /// A missing model is automatic only after onboarding has completed; the
-  /// first-run CTA owns the initial multi-gigabyte fetch.
+  ///
+  /// AN UPGRADE PATH, NEVER A FIRST INSTALL. This answers nil unless a model is
+  /// already on disk, so the only automatic fetch left in the app is "this Mac
+  /// or this app changed and the weights you already have are no longer the
+  /// right ones". A machine that has never had weights is never handed a
+  /// multi-gigabyte download it did not ask for.
+  ///
+  /// It used to read `allowFreshInstall ? recommended : nil`, with
+  /// `allowFreshInstall = !Bridge.needsOnboarding` at the only call site. That
+  /// is the same sentence as: any launch, sixty seconds in, on any machine that
+  /// had clicked past onboarding without a model, could begin a 2.5-4.7 GB
+  /// download nobody had asked for. Stage 2's checkpoint is "first launch
+  /// downloads nothing unless asked", and asked means the `modelDownload`
+  /// bridge verb — onboarding screen 5, the screen that states the disk and
+  /// battery cost before the fetch starts. `ModelSetup.recommended` still picks
+  /// the tier for that screen; what has gone is the caller that did not need a
+  /// person.
+  ///
+  /// `allowFreshInstall` survives as a parameter only because its one caller
+  /// lives in Bridge.swift, which belongs to a later stage of this repackaging.
+  /// It is deliberately ignored, and no value of it reopens the fresh-install
+  /// arm.
   static func automaticTarget(allowFreshInstall: Bool) -> String? {
     let defaults = UserDefaults.standard
     let fingerprint = automaticFingerprint
     guard let current = installed else {
-      return allowFreshInstall ? recommended : nil
+      _ = allowFreshInstall
+      // A DOWNLOAD THE APP DID NOT SURVIVE IS STILL A DOWNLOAD THE OWNER ASKED
+      // FOR. This is not the fresh-install arm coming back: it answers nil on
+      // every machine that has not been through onboarding's engine screen, and
+      // when it answers it names the tier THAT REQUEST was for rather than
+      // whatever `recommended` says today. Nothing is fetched that was not
+      // already asked for once, out loud, on the screen that states the disk
+      // and battery cost.
+      return unfinishedDownload?.id
     }
     guard let previous = defaults.string(forKey: automaticFingerprintKey) else {
       // Migration from the old manual picker: respect what is already active,
@@ -112,16 +140,48 @@ enum ModelSetup {
   /// Requested lazily, at the moment there is something worth saying, rather
   /// than at launch: an app that asks to send notifications before it has ever
   /// had news is asking on spec.
-  static func notify(title: String, body: String) {
+  /// ONE NOTIFIER FOR THE APP, not one per feature. `category` and `userInfo`
+  /// were added for the Downloads watcher (ExportWatch), which needs a
+  /// notification the owner can PRESS — "found your LinkedIn export, import
+  /// it?" is only worth sending if the answer can be given from the banner.
+  /// Every existing caller passes neither and behaves exactly as before.
+  ///
+  /// The category has to be registered with the centre before a notification
+  /// naming it is sent, and the delegate has to be in place before the press
+  /// can be delivered; both are ExportWatch's job, at launch.
+  static func notify(title: String, body: String,
+                     category: String? = nil,
+                     userInfo: [String: Any] = [:]) {
     let center = UNUserNotificationCenter.current()
-    center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-      guard granted else { return }
+    // ASKED FIRST, POSTED AFTER THE ANSWER. The add is inside this completion,
+    // so nothing reaches the centre before the owner has decided -- and on a Mac
+    // where the answer was given long ago this returns immediately with it, so
+    // the ordering costs a settled install nothing.
+    center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+      guard granted else {
+        // WHY THERE WAS NO BANNER, WRITTEN DOWN SOMEWHERE. A run went out with
+        // three offers recorded and nothing on screen, and there was no way to
+        // tell a refused grant from a failed post from a notification centre
+        // that simply swallowed it. Titles only, never the body: that carries a
+        // filename off the owner's disk.
+        NSLog("Intaglio Labs: notifications not granted "
+              + "(\(error.map { "\($0)" } ?? "declined")) -- \(title) was not shown")
+        return
+      }
       let content = UNMutableNotificationContent()
       content.title = title
       content.body = body
+      if let category { content.categoryIdentifier = category }
+      if !userInfo.isEmpty { content.userInfo = userInfo }
       let req = UNNotificationRequest(
         identifier: "hazlie.model.\(UUID().uuidString)", content: content, trigger: nil)
-      center.add(req, withCompletionHandler: nil)
+      // ~~`withCompletionHandler: nil`~~ swallowed every reason a notification
+      // did not appear, which is exactly the state the walked run was in. This
+      // does not make the banner arrive; it makes its absence explicable.
+      center.add(req) { addError in
+        guard let addError else { return }
+        NSLog("Intaglio Labs: notification refused by the centre -- \(title): \(addError)")
+      }
     }
   }
 
@@ -131,6 +191,17 @@ enum ModelSetup {
 
   /// The tier already installed, if any — decided by the symlink's target, so
   /// it agrees with whatever setup-llm.sh last pointed it at.
+  ///
+  /// A LINK IS NOT WEIGHTS. `destinationOfSymbolicLink` reads the link, not
+  /// what it points at, and succeeds perfectly well on a link whose target was
+  /// deleted — by hand, by a disk cleaner, by moving ~/.hazlie between Macs.
+  /// Answering "installed" there is not a cosmetic lie: `isInstalled` arms the
+  /// launch reconciliation and `automaticTarget` passes its `guard let current`,
+  /// so a machine with no weights at all could be handed a 2.5-4.7 GB download
+  /// nobody asked for — the exact case the fresh-install arm was removed to
+  /// close. The truncated-real-file case was already handled by the size
+  /// comparison in the branch below; this is the same standard applied to the
+  /// link, which is the shape the model is actually installed in.
   static var installed: ModelTier? {
     let link = modelDir.appendingPathComponent("model.gguf")
     guard let dest = try? fm.destinationOfSymbolicLink(atPath: link.path) else {
@@ -141,10 +212,80 @@ enum ModelSetup {
       else { return nil }
       return tiers.first { $0.bytes == size }
     }
-    return tiers.first { $0.file == (dest as NSString).lastPathComponent }
+    // link() writes a relative destination; setup-llm.sh may write an absolute
+    // one. Resolving against modelDir accepts both — an absolute path ignores
+    // the base.
+    // NOT a `relativeTo:` resolution against modelDir. That is a plain path
+    // URL with no trailing slash, and Foundation resolves a relative path
+    // against the DIRECTORY CONTAINING such a base -- so
+    // "Qwen3-8B-Q4_K_M.gguf" landed at ~/.hazlie/Qwen3-8B-Q4_K_M.gguf, a file
+    // that does not exist, and every install whose link was written by
+    // link() (relative, the normal case) read as "no weights installed". The
+    // first clean-machine run (2026-09-12) therefore provisioned hermes and
+    // connect but never the llama agent. An absolute destination is taken as
+    // it is; a relative one is a child of the models directory, which is what
+    // the symlink itself means.
+    let target = (dest.hasPrefix("/")
+      ? URL(fileURLWithPath: dest)
+      : modelDir.appendingPathComponent(dest)).standardizedFileURL
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: target.path, isDirectory: &isDir), !isDir.boolValue,
+          let size = (try? fm.attributesOfItem(atPath: target.path)[.size]) as? Int64,
+          let tier = tiers.first(where: {
+            $0.file == (dest as NSString).lastPathComponent && $0.bytes == size
+          })
+    else {
+      reportBrokenLink(dest)
+      return nil
+    }
+    return tier
+  }
+
+  /// Said once per app run, not once per read: `installed` is asked on every
+  /// settings render and every status payload, and a log line per read would
+  /// bury the one that matters.
+  private static var brokenLinkReported = false
+  private static func reportBrokenLink(_ dest: String) {
+    lock.lock(); defer { lock.unlock() }
+    guard !brokenLinkReported else { return }
+    brokenLinkReported = true
+    NSLog("Intaglio Labs: models/model.gguf points at \(dest), which is not a complete model "
+          + "file — treating this Mac as having no weights installed")
   }
 
   static var isInstalled: Bool { installed != nil }
+
+  /// A download that the app did not live long enough to finish.
+  ///
+  /// Written when `download()` starts and removed on every ending it reaches —
+  /// success, cancel, or a reported failure. So this file surviving means one
+  /// thing only: the process went away mid-fetch. Quitting the app thirty
+  /// seconds into onboarding's 4.7 GB download used to strand it completely —
+  /// `onboardingDone` is posted whether or not the weights landed, so nothing
+  /// was installed, nothing was armed, and the only recovery was replaying the
+  /// whole gear-menu flow.
+  ///
+  /// THE PARTIAL BYTES ARE NOT THE EVIDENCE, the request is. URLSession keeps
+  /// its in-flight file in the system temp directory, which is gone with the
+  /// process; the only thing that ever appears under ~/.hazlie/models is
+  /// `.<tier file>.part`, and that is written after all the bytes have landed
+  /// and removed again once the digest checks out — it marks the verify window,
+  /// not the fetch. Both are read here, because either one means the owner
+  /// asked for this tier and did not get it.
+  static var unfinishedDownload: ModelTier? {
+    if let id = try? String(contentsOf: pendingMarker, encoding: .utf8),
+       let tier = tiers.first(where: { $0.id == id.trimmingCharacters(in: .whitespacesAndNewlines) }) {
+      return tier
+    }
+    return tiers.first { fm.fileExists(atPath: partialPath(for: $0)) }
+  }
+
+  static var hasUnfinishedDownload: Bool { unfinishedDownload != nil }
+
+  private static var pendingMarker: URL { modelDir.appendingPathComponent(".pending-download") }
+  private static func partialPath(for tier: ModelTier) -> String {
+    modelDir.appendingPathComponent(".\(tier.file).part").path
+  }
 
   // MARK: download
 
@@ -223,9 +364,14 @@ enum ModelSetup {
       done("could not create the models folder")
       return
     }
+    // The request, on disk, before a byte moves. Every ending below clears it,
+    // so it outlives only a process that went away mid-fetch — see
+    // unfinishedDownload, which is what picks it back up on the next launch.
+    try? tier.id.write(to: pendingMarker, atomically: true, encoding: .utf8)
 
     let finish: (String?) -> Void = { reason in
       DispatchQueue.main.async {
+        try? fm.removeItem(at: pendingMarker)
         task = nil
         driver = nil
         busy = false

@@ -59,6 +59,33 @@ enum Provision {
     }
   }
 
+  /// Retire an io.intaglio.bridges agent a previous install left behind.
+  ///
+  /// Skipping the INSTALL is not enough on an upgrade, and that is the whole
+  /// reason this exists: launchd already holds the job from before the bridges
+  /// feature went dormant, the plist carries RunAtLoad + KeepAlive, and it
+  /// comes back every login supervising a stack nothing on the card reads.
+  ///
+  /// Shaped like retireConnectorsAgent — bootout, then remove the plist so it
+  /// cannot be re-bootstrapped at the next login. It deliberately deletes NO
+  /// DATA: ~/.hazlie/matrix, ~/.hazlie/bridges and the owner credentials inside
+  /// them stay where they are, so turning `bridges` back on is a flag flip and a
+  /// relaunch, not a re-download and seven re-logins. Stage 1 is dormancy, not
+  /// removal.
+  static func retireBridgesAgent() {
+    let label = "io.intaglio.bridges"
+    let plist = launchAgents.appendingPathComponent("\(label).plist")
+    guard fm.fileExists(atPath: plist.path) else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+    try? p.run()
+    p.waitUntilExit()
+    try? fm.removeItem(at: plist)
+    NSLog("Intaglio Labs: retired the \(label) launchd agent; the bridges feature is off "
+          + "(its data under ~/.hazlie/matrix and ~/.hazlie/bridges is untouched)")
+  }
+
   /// Retire the backend jobs installed before the bundle identifier moved
   /// from com.hazlie.* to io.intaglio.*. The new plists are installed first;
   /// only then are these working fallbacks removed, so a failed upgrade never
@@ -178,6 +205,66 @@ enum Provision {
     }
   }
 
+  /// Serialises the llama repair below. ensureBackend hops to a global queue,
+  /// so two calls in one launch run their bodies concurrently.
+  private static let llamaRepairLock = NSLock()
+  /// Set only by an install that SUCCEEDED — see repairLlamaAgent.
+  private static var llamaRepairAttempted = false
+  /// When a failed attempt may be made again, and how many have failed. Both
+  /// are read and written under llamaRepairLock.
+  private static var llamaRepairNotBefore = Date.distantPast
+  private static var llamaRepairFailures = 0
+  /// 30 s, doubling to a ten-minute ceiling. Long enough that a `launchctl
+  /// bootstrap` racing a previous bootout has finished, short enough that the
+  /// next ensureBackend() of an ordinary session gets another go.
+  private static let llamaRepairBackoffFloor: TimeInterval = 30
+  private static let llamaRepairBackoffCeiling: TimeInterval = 600
+
+  /// AND THE ONE AGENT PROVISIONING CAN LEGITIMATELY SKIP. provision() installs
+  /// the llama agent only when a model is present, and an install that once
+  /// read as "no weights" (the relative-link bug fixed in ModelSetup.installed
+  /// on 2026-09-12, or weights that arrived later by hand) keeps the connect
+  /// plist that ends ensureBackend's first branch early -- so a Mac with
+  /// weights and no llama agent would stay that way for ever.
+  ///
+  /// ONCE PER LAUNCH, UNDER A LOCK. installAgent boots the agent OUT and then
+  /// bootstraps it back in; two concurrent ensureBackend() calls would both
+  /// pass the "no plist" test and interleave those, so the second bootout can
+  /// land on the first bootstrap and leave the agent absent — the state this
+  /// repair exists to end. The lock is held across installAgent rather than
+  /// only around the flag, because it is the launchctl pair that must not
+  /// interleave, and the weights-and-no-plist guard comes first: weights that
+  /// arrive later in the same session still get their agent from a later call.
+  ///
+  /// ONCE IS ONCE PER SUCCESS, NOT ONCE PER TRY (round-5 finding 21). The flag
+  /// was set before installAgent ran, so a `launchctl bootstrap` that failed
+  /// transiently — most likely against an agent still booting out from the run
+  /// before — burnt the launch's only attempt, and ensureBackend calling again
+  /// five minutes later did nothing. A failure now leaves the flag clear and
+  /// puts a backoff in front of the next try, so the interleaving guarantee is
+  /// unchanged (the lock, not the flag, is what provides it) and the one-shot
+  /// loss is gone.
+  private static func repairLlamaAgent() {
+    llamaRepairLock.lock()
+    defer { llamaRepairLock.unlock() }
+    guard !llamaRepairAttempted, Date() >= llamaRepairNotBefore else { return }
+    let llamaPlist = launchAgents.appendingPathComponent("io.intaglio.llama-server.plist")
+    guard ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) else { return }
+    if installAgent("io.intaglio.llama-server") {
+      llamaRepairAttempted = true
+      llamaRepairFailures = 0
+      NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
+    } else {
+      llamaRepairFailures += 1
+      let delay = min(
+        llamaRepairBackoffCeiling,
+        llamaRepairBackoffFloor * pow(2, Double(llamaRepairFailures - 1))
+      )
+      llamaRepairNotBefore = Date().addingTimeInterval(delay)
+      NSLog("Intaglio Labs: llama agent install failed (\(llamaRepairFailures)); retrying in \(Int(delay))s")
+    }
+  }
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("io.intaglio.connect.plist")
@@ -189,6 +276,7 @@ enum Provision {
         // Existing files are never touched, so this is a no-op when healthy.
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+        repairLlamaAgent()
         if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         return
       }
@@ -212,6 +300,31 @@ enum Provision {
   /// a launch that gets interrupted is retried by the next one and, failing
   /// that, by setup itself.
   static func prefetchBridgeRuntime() {
+    // THE FEATURE REGISTRY DECIDES, and when it says no this is also the place
+    // an already-installed agent gets retired — this runs on every launch from
+    // main.swift, which is the only hook an upgraded machine reliably reaches.
+    guard Features.shouldPrefetchBridgeRuntime(Features.current) else {
+      NSLog("Intaglio Labs: bridges are off — skipping the bridge runtime prefetch")
+      // OFF THE MAIN THREAD, because retiring is not free.
+      //
+      // This call used to sit here bare, and prefetchBridgeRuntime() is invoked
+      // synchronously from applicationDidFinishLaunching. retireBridgesAgent
+      // does p.run() + p.waitUntilExit() on `launchctl bootout` of a KeepAlive
+      // supervisor that owns Synapse and seven mautrix children — so the first
+      // launch after upgrading a machine that HAD bridges installed beachballed
+      // for however long that teardown takes. The cost lands on exactly the
+      // install that stage 1 was meant to make lighter.
+      //
+      // main.swift does the same thing with retireConnectorsAgent() for the
+      // same reason; this follows that precedent rather than inventing a
+      // second shape. Still idempotent: the plist-existence guard inside
+      // retireBridgesAgent means a launch that raced or repeated it is a no-op,
+      // and nothing here waits on the result.
+      if Features.shouldRetireBridgesAgent(Features.current) {
+        DispatchQueue.global(qos: .utility).async { retireBridgesAgent() }
+      }
+      return
+    }
     let script = backend.appendingPathComponent("ops/prefetch-bridges.sh")
     guard fm.fileExists(atPath: script.path) else {
       NSLog("Intaglio Labs: bundled bridge prefetch script is missing")
@@ -270,6 +383,16 @@ enum Provision {
   /// and starts the requested bridge stack. Concurrent card presses join the
   /// same run rather than racing two installers against one data directory.
   static func ensureBridgeRuntime(_ completion: @escaping (Bool) -> Void) {
+    // Second gate, not a duplicate of prefetch's: this one is reachable from a
+    // Connect press on the connections page (Bridge.swift) as well as from the
+    // prefetch, and it is the call that actually runs setup-bridges-native.sh —
+    // which is what installs io.intaglio.bridges. Refusing HERE is what keeps
+    // the agent off the machine.
+    guard Features.shouldEnsureBridgeRuntime(Features.current) else {
+      NSLog("Intaglio Labs: bridges are off — refusing to provision the Matrix runtime")
+      DispatchQueue.main.async { completion(false) }
+      return
+    }
     bridgeSetupLock.lock()
     bridgeSetupWaiters.append(completion)
     if bridgeSetupRunning {
@@ -418,10 +541,20 @@ enum Provision {
     // fails CLOSED without these (no HuggingFace fallback at runtime), so a
     // fresh Mac has no voice unless they are present. Cloned as a whole tree
     // (cp -c -R) and left alone if the directory already exists.
+    //
+    // GATED ON `voice` (stage 1). The models still ship in the bundle — taking
+    // them out is stage 2 — but a fresh install no longer grows ~495 MB in
+    // ~/.hazlie for a feature whose tap is a tease. Turning `voice` back on and
+    // relaunching clones them, because provision() is not the only caller that
+    // can: this is idempotent and skip-if-present either way.
     let voiceSrc = backend.appendingPathComponent("voice-models")
     let voiceDst = hazlie.appendingPathComponent("models/voice")
-    if fm.fileExists(atPath: voiceSrc.path), !fm.fileExists(atPath: voiceDst.path) {
-      cloneTree(voiceSrc, voiceDst)
+    if Features.shouldCloneVoiceModels(Features.current) {
+      if fm.fileExists(atPath: voiceSrc.path), !fm.fileExists(atPath: voiceDst.path) {
+        cloneTree(voiceSrc, voiceDst)
+      }
+    } else {
+      NSLog("Intaglio Labs: voice is off — skipping the voice-model clone")
     }
 
     // BOTH owner-only secrets, 0600, each left alone if already there. The body

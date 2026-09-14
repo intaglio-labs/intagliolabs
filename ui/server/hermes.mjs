@@ -40,7 +40,7 @@
 // web framework showcase.
 
 import { createServer } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -48,9 +48,10 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { canonicalHash } from './contentHash.mjs';
 import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve.mjs';
 import { episodicContext } from './memory/episodic.mjs';
-import { selectRows } from './memory/select.mjs';
+import { countSelectable, selectRows } from './memory/select.mjs';
 import { answerPersonSearch, detectIntro, detectPersonSearch } from './people/search.mjs';
 import {
   planGeneralPeopleQuestion,
@@ -59,7 +60,12 @@ import {
   formatGeneralPeopleResult,
   generalPeopleAnswerCacheInput,
 } from './people/generalSearch.mjs';
-import { loadOwner, markOwnerPerson, markPersonRole } from './people/owner.mjs';
+import {
+  MAX_CAP_PER_DAY, RELATIONSHIP_ENGINES, RELATIONSHIP_MODES, RELATIONSHIP_PRODUCERS,
+  ensureRelationshipDefaults, installHomeFor, loadOwner, markOwnerPerson, markPersonRole,
+  markPersonSubRoles, ownerConfigPath, setRelationshipEngine, setRelationshipMode,
+} from './people/owner.mjs';
+import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
 import {
   buildAvatars,
@@ -73,6 +79,25 @@ import {
 import { openTallyStore } from './people/tallyStore.mjs';
 import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
+import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
+import { runSweepPass, applySweepDecision, sweepStatus } from './relationship/sweep.mjs';
+import {
+  runLookupPass, lookupGate, lookupTierFor, lookupStatus, lookupLogFor, lookupEvidenceFor,
+  newestWebChange, parseLookupSources,
+} from './relationship/lookup.mjs';
+import {
+  runLintPass, lintFindings, resolveLintFinding, lintStatus,
+} from './relationship/lint.mjs';
+import { createEngine, createLookupEngine } from './relationship/engines.mjs';
+import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
+import { personCardFacts, changedForCard } from './relationship/cardFacts.mjs';
+import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
+import { createDraft, existingDrafts } from './relationship/draft.mjs';
+import {
+  CARD_PRODUCERS, REFILL_RETRY_MS, LIVE_WINDOW_MS, produceDailyBatch, refillRetryMsFor,
+  isSnapshotConsumed, isSnapshotFresh,
+} from './relationship/daily.mjs';
+import { cardStats } from './relationship/controls.mjs';
 import {
   clearPeopleSearchCacheStorage,
   openPeopleSearchCache,
@@ -88,14 +113,33 @@ import {
   timeoutError,
   LLAMA_UNREACHABLE_STATUS,
 } from './llamaReady.mjs';
-import { loadSpine } from './people/graph.mjs';
+import { loadSpine, PERSON_SOURCE_POLICY } from './people/graph.mjs';
 import {
   clearPeopleProjection,
   ensurePeopleProjectionSchema,
   isProjectedPeopleSource,
   materializedPeopleGraph,
+  projectionState,
 } from './people/projection.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
+// ONE SHARED LOADER, in connectors/lib. hermes already reaches into that
+// directory for pinnedThread (memory/select.mjs, memory/episodic.mjs) and
+// connect/ does for googleClients, so this follows the precedent rather than
+// making a third copy of the same parse. See ops/FEATURES.md.
+import {
+  DEFAULT_REGISTRY_PATH, connectorsDisabledBy, defaultOverridePath, readFeatureRegistry, readFeatures,
+} from '../../connectors/lib/features.mjs';
+// AND THE SAME PRECEDENT FOR "HAS THE OWNER CONNECTED THIS YET". Both of these
+// are asked by the connector itself before every run — mail through
+// accountsWithScope, linkedin through its own needs() — so they are IMPORTED
+// rather than restated here. A third copy of "where does a Google token live"
+// is how the onboarding table and the reader come to disagree about whether a
+// source is connected, which is the exact failure below.
+import { GMAIL_SCOPE, accountsWithScopeIncludingStale } from '../../connectors/lib/googleAccounts.mjs';
+// The LinkedIn export's own module rather than the connector that polls it:
+// the import folder, whether Connections.csv is in it, and the marker the mail
+// connector leaves when LinkedIn mails to say the archive is downloadable.
+import { exportInstalled, exportReadyAt } from '../../connectors/lib/linkedinExport.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
 import {
@@ -520,6 +564,379 @@ CREATE TABLE IF NOT EXISTS claim_decision(
 );
 CREATE INDEX IF NOT EXISTS claim_decision_claim ON claim_decision(claim_id, id);
 
+/* Which SECTION of a built person page a claim came from (L5 step 4,
+   relationship/pages.mjs). The claim itself carries no section -- it is a
+   claim like any other, subject='person', reviewed through the same
+   claim_decision machinery -- this table exists only so a page can be
+   reconstructed grouped the way it was built (who / asks / objection /
+   how_left / notable) without guessing from claim.text. One row per kept
+   item; deleting the claim (ON DELETE CASCADE) deletes this row with it. */
+CREATE TABLE IF NOT EXISTS person_page_item(
+  claim_id  INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+  section   TEXT NOT NULL CHECK (section IN ('who','ask','objection','how_left','notable')),
+  built_at  INTEGER NOT NULL
+);
+
+/* Discovery sweep (L5 step 5, relationship/sweep.mjs): reads only the NEW
+   messages from one person since the last sweep of them, one small model
+   call per person, proposing sub-role tags / a firm / page lines -- same
+   trust lifecycle as every other claim here, PENDING until the owner
+   decides. Three tables:
+
+   person_sweep_cursor -- per-person watermark. DELIBERATELY NO FOREIGN KEY
+   to people: clearPeopleProjection deletes every row of people on every
+   identity rebuild, and a cascade from a people FK would erase every cursor
+   along with it, forcing a full re-sweep (at model cost) on every rebuild.
+   A stale key after an identity merge is a dead row, not a bug -- it simply
+   never matches a live person_key again and sits inert.
+
+   person_sweep_run -- one row per PASS (not per person), including a pass
+   that skipped or did nothing: a skip is a measurement, same reasoning as
+   rm_candidate_batch above. distill_run_id is nullable because a skipped
+   pass (power/thermal/quota/busy/no-scope/no-new-rows) never spends a model
+   call and so never creates a distill_run row at all.
+
+   person_sweep_proposal -- which KIND of proposal a stored claim is.
+   sub_role and firm are NOT person_page_item rows: person_page_item.section
+   is a closed five-value CHECK that cannot be ALTERed, so a sub-role or firm
+   proposal cannot live there. A page_line proposal is both: a claim here
+   AND, separately, a person_page_item row in one of the five existing
+   sections, so it renders through the same page machinery pages.mjs already
+   built. value is NULL for page_line (the section column on
+   person_page_item already carries what a reader needs); applied_at is
+   stamped only when accepting actually did something beyond writing
+   claim_decision (a sub-role union, a firm mark) -- see
+   relationship/sweep.mjs's applySweepDecision. */
+CREATE TABLE IF NOT EXISTS person_sweep_cursor(
+  person_key               TEXT PRIMARY KEY,
+  swept_through_context_id INTEGER NOT NULL,
+  last_swept_at            INTEGER NOT NULL,
+  last_status              TEXT NOT NULL CHECK (last_status IN ('proposed','empty','ungrounded','engine-error','parse-error')),
+  proposals                INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS person_sweep_run(
+  id INTEGER PRIMARY KEY, distill_run_id INTEGER REFERENCES distill_run(id),
+  started_at INTEGER NOT NULL, ended_at INTEGER,
+  power_mode TEXT NOT NULL CHECK (power_mode IN ('full','trickle')),
+  engine TEXT NOT NULL, budget INTEGER NOT NULL, scope_size INTEGER NOT NULL,
+  candidates INTEGER NOT NULL DEFAULT 0, swept INTEGER NOT NULL DEFAULT 0, model_calls INTEGER NOT NULL DEFAULT 0,
+  proposed INTEGER NOT NULL DEFAULT 0, dropped INTEGER NOT NULL DEFAULT 0, tokens_est INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT CHECK (skip_reason IS NULL OR skip_reason IN ('disabled','battery','thermal','quota','busy-model','no-new-rows','no-scope')),
+  status TEXT NOT NULL CHECK (status IN ('running','complete','skipped','failed'))
+);
+CREATE INDEX IF NOT EXISTS person_sweep_run_started ON person_sweep_run(started_at);
+CREATE TABLE IF NOT EXISTS person_sweep_proposal(
+  claim_id INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+  run_id INTEGER NOT NULL REFERENCES person_sweep_run(id),
+  kind TEXT NOT NULL CHECK (kind IN ('sub_role','firm','page_line')),
+  value TEXT, applied_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(run_id);
+
+/* Public lookup (L5 step 6, relationship/lookup.mjs): a small, capped, web
+   search over public identifiers the owner's corpus already holds for ONE
+   person at a time (name, firm, a public handle, a public LinkedIn profile
+   URL), proposing PENDING person claims the same way sweep.mjs and pages.mjs
+   do. Four tables:
+
+   person_lookup_state -- per-person watermark and tier, mirroring
+   person_sweep_cursor. NO FK to people, for the identical reason
+   person_sweep_cursor has none: clearPeopleProjection deletes every row of
+   people on every identity rebuild, and a cascade from a people FK would
+   erase every lookup watermark along with it, forcing every person to be
+   looked up again (at model AND search cost) on the next rebuild. A stale
+   key after an identity merge simply never matches a live person_key again.
+   anchors_hash is the hash of the anchors buildLookupQuery last saw for this
+   person -- a change (a new firm, a LinkedIn URL that finally resolved)
+   makes them due again even before next_due_at, the same "something changed"
+   reasoning next_due_at alone cannot capture.
+
+   person_lookup_run -- one row per PASS (not per person), including a pass
+   that skipped or did nothing -- a skip is a measurement, same reasoning as
+   person_sweep_run and rm_candidate_batch. distill_run_id is nullable
+   because a skipped pass never spends a model call and so never creates a
+   distill_run row.
+
+   lookup_log -- THE RECEIPT FOR WHAT WAS SENT, per person per lookup. query
+   is the assembled string buildLookupQuery produced (public identifiers
+   only, by construction -- a log the owner cannot read is not a receipt);
+   fields_used names WHICH allowlisted fields contributed, never their
+   values redundantly. Rendered on the desk's own person page so the owner
+   can see exactly what left the house and why the pass reached the verdict
+   it did (status).
+
+   lookup_evidence -- WHAT CAME BACK, per lookup, written once and never
+   updated. lookup_log above is the receipt for what was SENT; until this
+   table existed the other half was never stored at all, only counted
+   (searches, urls_seen), and lookup_log 4520's false positive could not be
+   audited after the fact -- the claim's quote WAS verbatim in the search
+   results and the URL WAS one the search returned, and neither statement
+   could be checked, because the results were gone. urls is the canonical
+   JSON array of the {title, url} entries the provider's own Links: list
+   carried (a title matters on its own -- see person_lookup_change.
+   evidence_kind below); result_text is the tool_result article verbatim.
+
+   CONTENT: public search-result text about a public person, kept on this
+   box. Nothing private can reach it by construction -- a lookup's only tool
+   is WebSearch, and buildLookupQuery's input gate decides what it may ask --
+   and nothing here leaves the box; it exists so the desk can show "what came
+   back" beside "what was sent". A separate table rather than two more
+   columns on lookup_log, deliberately: result_text is kilobytes per lookup
+   while lookup_log is scanned by lookupStatus's aggregates and rendered on
+   every desk person page; most lookup_log rows (no-anchors, engine-error)
+   have no evidence at all, so columns there would have to be nullable; and
+   this text has its own retention story -- a future purge may want to drop
+   third-party page text while keeping the record of what the house sent out.
+   ON DELETE CASCADE from lookup_log so a purged log row cannot leave its
+   evidence orphaned.
+
+   person_lookup_change -- which KIND of change a stored claim is, and the
+   url/date it cites. Mirrors person_sweep_proposal's role (a claim carries
+   no section/kind of its own -- this table is what lets a lookup-derived
+   claim be reconstructed and grouped later) but is its own table because a
+   lookup change's shape (url NOT NULL, change_date, no value column) does
+   not match a sweep proposal's. claim_id is the primary key and references
+   claim(id) ON DELETE CASCADE, same append-then-cascade discipline as
+   person_page_item.
+
+   evidence_kind and contradicts_anchor are the two columns lookup_log 4520
+   taught us to keep; relationship/lookup.mjs's own evidence-strength section
+   carries the whole incident. Short version: a quote that only matches a
+   search-result TITLE ('title') is weaker evidence than one taken from the
+   provider's synthesized prose ('snippet') -- a title is a search index's
+   snapshot of a page's <title>, routinely stale or showing a past position,
+   and 4520 turned one ("Nikzad Khani - Software Engineer - Verily") into a
+   present-tense "now at Verily, not Klaviyo". contradicts_anchor=1 means the
+   change names a company that is NOT the firm anchor the lookup itself sent
+   (that firm came off the owner's own LinkedIn export, so it is evidence
+   too): such a row is stored so the owner can judge the disagreement, filed
+   as kind 'company' whatever the model called it, and refused to the card by
+   newestWebChange for as long as it stays pending. A NULL evidence_kind is a
+   row written before these columns existed, or stored without the stream in
+   hand. */
+CREATE TABLE IF NOT EXISTS person_lookup_state(
+  person_key     TEXT PRIMARY KEY,
+  tier           TEXT NOT NULL CHECK (tier IN ('eligible','tagged','other')),
+  anchors_hash   TEXT NOT NULL,
+  last_looked_at INTEGER,
+  next_due_at    INTEGER NOT NULL,
+  last_status    TEXT,
+  lookups        INTEGER NOT NULL DEFAULT 0,
+  proposals      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS person_lookup_state_due ON person_lookup_state(next_due_at);
+CREATE TABLE IF NOT EXISTS person_lookup_run(
+  id              INTEGER PRIMARY KEY,
+  distill_run_id  INTEGER REFERENCES distill_run(id),
+  started_at      INTEGER NOT NULL, ended_at INTEGER,
+  power_mode      TEXT NOT NULL CHECK (power_mode IN ('full','trickle')),
+  engine          TEXT NOT NULL, budget INTEGER NOT NULL, scope_size INTEGER NOT NULL,
+  candidates      INTEGER NOT NULL DEFAULT 0, looked_up INTEGER NOT NULL DEFAULT 0,
+  model_calls     INTEGER NOT NULL DEFAULT 0, searches INTEGER NOT NULL DEFAULT 0,
+  proposed        INTEGER NOT NULL DEFAULT 0, dropped INTEGER NOT NULL DEFAULT 0,
+  cost_usd        REAL NOT NULL DEFAULT 0,
+  skip_reason     TEXT CHECK (skip_reason IS NULL OR skip_reason IN
+                    ('disabled','battery','thermal','quota','busy-model','no-scope','no-due','no-engine')),
+  status          TEXT NOT NULL CHECK (status IN ('running','complete','skipped','failed'))
+);
+CREATE INDEX IF NOT EXISTS person_lookup_run_started ON person_lookup_run(started_at);
+CREATE TABLE IF NOT EXISTS lookup_log(
+  id                  INTEGER PRIMARY KEY,
+  person_key          TEXT NOT NULL,
+  run_id              INTEGER REFERENCES person_lookup_run(id),
+  at                  INTEGER NOT NULL,
+  engine              TEXT NOT NULL,
+  query               TEXT NOT NULL,
+  query_hash          TEXT NOT NULL,
+  fields_used         TEXT NOT NULL,
+  searches            INTEGER NOT NULL DEFAULT 0,
+  urls_seen           INTEGER NOT NULL DEFAULT 0,
+  identity_confidence TEXT CHECK (identity_confidence IS NULL OR identity_confidence IN ('match','ambiguous','no_match')),
+  changes_proposed    INTEGER NOT NULL DEFAULT 0,
+  changes_dropped     INTEGER NOT NULL DEFAULT 0,
+  cost_usd            REAL,
+  /* NO 'over-budget' literal here, deliberately, though lookupPerson now
+     enforces LOOKUP_MAX_SEARCHES: a CHECK cannot be ALTERed in SQLite, so a
+     new literal would need lookup_log -- the one table that records what left
+     the box, with person_lookup_change and lookup_evidence referencing its
+     ids -- rebuilt, and every already-deployed install would REJECT the
+     insert until it was. An over-budget lookup is logged 'ungrounded' (its
+     changes really were all thrown away) with the real search count in
+     searches, which is where the fact lives and is queryable:
+     searches > LOOKUP_MAX_SEARCHES.
+
+     SO IS A FAILED STORE, for the same reason and with the same honesty
+     problem: nothing was stored, so 'ungrounded' is true as far as it goes,
+     but the WHY is not in this table. Both cases write the honest word to
+     person_lookup_state.last_status instead ('over-budget', 'store-error'),
+     which is free text with no CHECK to rebuild, and both HOLD next_due_at
+     rather than advancing it -- the scheduling decision is made in code
+     (lookupPerson's own hold flag), never inferred from this literal: a
+     lookup that was thrown away taught us nothing about the person and
+     advancing them a full refresh tier loses them for a month.
+
+     status AND changes_proposed ARE WRITTEN FROM WHAT WAS STORED, not from
+     what grounding kept: they are UPDATEd inside the same transaction that
+     writes the claims (see lookupPerson). Before that, a batch whose every
+     change deduped against a claim already on file logged 'proposed' with a
+     positive changes_proposed and no claim to show for it. changes_dropped
+     counts grounding drops plus store-time skips; a duplicate is in neither
+     column, because the change was real and is already on file. */
+  status              TEXT NOT NULL CHECK (status IN
+                        ('proposed','empty','ambiguous','ungrounded','engine-error','parse-error','no-anchors'))
+);
+CREATE INDEX IF NOT EXISTS lookup_log_person ON lookup_log(person_key, at DESC);
+CREATE TABLE IF NOT EXISTS lookup_evidence(
+  log_id      INTEGER PRIMARY KEY REFERENCES lookup_log(id) ON DELETE CASCADE,
+  urls        TEXT NOT NULL, /* canonical JSON array of {title, url} */
+  /* VERBATIM UP TO A CAP -- relationship/lookup.mjs's
+     LOOKUP_RESULT_TEXT_CAP, 200k characters. The word "verbatim" alone was
+     a promise nothing kept: the only bound was the engine's 5MB stdout
+     buffer, which truncates mid-line, so one pathological result set could
+     put megabytes of a stranger's web page in this column and the evidence
+     route would then serve all of it in one response. Past the cap the text
+     is cut and truncated is 1, so a clipped article is distinguishable from
+     a complete one instead of being asserted verbatim. */
+  result_text TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  truncated          INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  /* A "Links:" block WAS present in the stream and could not be read as an
+     array (parseLookupStream's own linksParseFailed). Without this the
+     provider's format drifting out from under the reader was
+     indistinguishable from a search that returned no links: every change
+     failed grounding, the lookup logged 'ungrounded', and nothing said why
+     -- the whole title/present-tense/downgrade machinery reverting in
+     silence. */
+  links_parse_failed INTEGER NOT NULL DEFAULT 0 CHECK (links_parse_failed IN (0,1))
+);
+CREATE TABLE IF NOT EXISTS person_lookup_change(
+  claim_id    INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+  log_id      INTEGER NOT NULL REFERENCES lookup_log(id),
+  kind        TEXT NOT NULL CHECK (kind IN ('role','company','raise','launch','move','other')),
+  url         TEXT NOT NULL,
+  change_date TEXT,
+  applied_at  INTEGER,
+  evidence_kind      TEXT CHECK (evidence_kind IS NULL OR evidence_kind IN ('title','snippet')),
+  contradicts_anchor INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor IN (0,1)),
+  /* THE FLAG WAS NEVER COMPUTED FOR THIS ROW. contradicts_anchor's own
+     ALTER (below, healLookupChangeColumns) can only default an existing row
+     to 0, and 0 means "checked, and it does not contradict the anchor" --
+     which is a claim nobody made about a row stored before the column
+     existed, from exactly the era of the lookup_log 4520 false positive.
+     Rows the migration finds already present with no evidence_kind are
+     marked 1 here, and newestWebChange withholds them from the card until
+     the owner decides, the same way it withholds a real contradiction.
+     Every row written since is 0, because storeLookup computes the flag. */
+  contradicts_anchor_unknown INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor_unknown IN (0,1)),
+  /* EVERY SOURCE THIS CHANGE RESTS ON, not just the primary one the url and
+     the claim_source receipt hold: a canonical JSON array of
+     {url, quote, evidenceKind}, 1 to 4 entries, each grounded exactly as the
+     single citation always was (the quote verbatim in what came back, the
+     url among the URLs the search returned). relationship/lookup.mjs's
+     corroboration section carries the whole design and the owner's own
+     reason for it ("seems fragile if we rely on one source"). The url and
+     change_date columns above STAY PRIMARY -- they are the first surviving
+     source, and every existing reader and every already-stored row uses
+     them; this is additive beside them.
+
+     corroboration is how many DISTINCT REGISTRABLE DOMAINS (eTLD+1) among
+     those sources actually COUNT, where a source counts when its quote came
+     from the provider's prose ('snippet') or its url is the anchored
+     LinkedIn profile URL the lookup itself sent. Two links on one domain are
+     one domain -- lookup_log 4520's own evidence was two LinkedIn links --
+     and a title-kind quote from a domain we did not anchor counts for
+     nothing, which is 4520's shape exactly.
+
+     BOTH ARE NULLABLE, and NULL is not 0. NULL means nobody computed it: a
+     row from before these columns, or one stored without the stream in hand.
+     newestWebChange refuses to serve either on a card while it is pending --
+     the same posture contradicts_anchor_unknown takes, for the same reason
+     (nothing may claim a check that never ran) -- while the desk still shows
+     it and an owner accept still serves it. */
+  sources       TEXT,
+  corroboration INTEGER
+);
+CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id);
+
+/* Lint (step 5½, relationship/lint.mjs): a scheduled pass over states no
+   other pass names -- an accepted claim past its own valid_to, a sweep-
+   accepted sub-role tag that now disagrees with the LinkedIn export that
+   produced it, a person who could be looked up but has no page (or the
+   reverse), a card snapshot whose cited quote row is gone with nobody having
+   judged the card. NO MODEL CALL: every check is SQL or SQL plus a pure JS
+   recomputation, so there is no distill_run row and no cost to gate on.
+   NEVER AUTO-FIXED -- 'gone' (the condition itself disappeared) is the only
+   resolution a pass ever writes; every other resolution is the owner's own
+   click, through resolveLintFinding. No version bump: IF NOT EXISTS on new
+   tables needs none, same as rm_suppression and energy_rating above.
+
+   lint_run -- one row per PASS (not per finding), including a pass that
+   skipped: a skip is a measurement, same reasoning as person_sweep_run and
+   person_lookup_run. checks_run is the JSON array of check names this pass
+   actually ran; counts is a JSON object keyed by check name (found/new/
+   closed/truncated per check) -- the per-check detail /stats.lint's own
+   'truncated' list is read back out of. skip_reason is closed to the ONE
+   reason lint ever skips (another model-spending pass already running) --
+   see lintGate's own comment for why there is no battery/thermal/quota
+   reason here the way sweep/lookup have.
+
+   lint_finding -- one row per DISTINCT finding_key, upserted (never
+   appended): a finding is a derived index over the corpus, not evidence
+   about it, and append-only would write tens of thousands of rows for a
+   condition a pass re-observes every run. THE KEY MUST IDENTIFY THE
+   CONDITION, not just the row the condition is about -- an owner resolution
+   is sticky, so anything the key does not distinguish inherits the
+   resolution of whatever shared its key. role_conflict was keyed on the
+   accepted claim alone ('role_conflict:<claimId>'), so a later, DIFFERENT
+   conflicting LinkedIn export overwrote detail under the old key and, if
+   the owner had dismissed the earlier conflict, arrived pre-dismissed and
+   was never shown; it now carries the tag and the export-derived set too
+   ('role_conflict:<claimId>:<tag>:<exportRoles joined by +>'), so a changed
+   export mints a new open finding while the old one closes itself 'gone'. claim_id carries NO foreign key
+   deliberately (see the column comment below) -- a claim can be deleted out
+   from under an open finding, and the finding must survive that as a dead
+   pointer rather than vanish or corrupt the delete. detail is canonical
+   JSON: ids, counts, and (role_conflict only) a person's public LinkedIn
+   title/company -- NEVER a quote or context line, the same rule
+   claim_source/person_page_item already enforce for what a page or a card
+   may surface. resolution is CHECK'd to five values but 'gone' is written
+   ONLY by a pass (see lint.mjs's runLintPass); resolveLintFinding refuses to
+   write it -- an owner may dismiss a finding or, for role_conflict only,
+   choose keep-export/keep-derived/both, but may never manually declare a
+   condition gone that a pass has not itself failed to find. The paired CHECK
+   (resolved_at IS NULL) = (resolution IS NULL) mirrors claim_decision's own
+   discipline: a resolution without a timestamp, or a timestamp without a
+   reason, is not a state this table can hold. */
+CREATE TABLE IF NOT EXISTS lint_run(
+  id              INTEGER PRIMARY KEY,
+  started_at      INTEGER NOT NULL, ended_at INTEGER,
+  checks_run      TEXT NOT NULL,
+  counts          TEXT NOT NULL,
+  findings_open   INTEGER NOT NULL DEFAULT 0,
+  findings_new    INTEGER NOT NULL DEFAULT 0,
+  findings_closed INTEGER NOT NULL DEFAULT 0,
+  skip_reason     TEXT CHECK (skip_reason IS NULL OR skip_reason IN ('disabled', 'busy-model')),
+  status          TEXT NOT NULL CHECK (status IN ('running', 'complete', 'skipped', 'failed'))
+);
+CREATE INDEX IF NOT EXISTS lint_run_started ON lint_run(started_at);
+CREATE TABLE IF NOT EXISTS lint_finding(
+  finding_key   TEXT PRIMARY KEY,
+  check_name    TEXT NOT NULL,
+  person_key    TEXT,
+  claim_id      INTEGER /* NO FK: ON DELETE CASCADE would erase the owner's own dismissal the moment
+                           the cited claim is deleted (a retract, a purge); ON DELETE NO ACTION would
+                           break deleteClaimsByIds's own bulk delete. A dead claim_id after a delete is
+                           inert, same posture as person_sweep_cursor/person_lookup_state's own
+                           deliberately-FK-less person_key. */,
+  detail        TEXT NOT NULL /* canonical JSON: ids, counts, public title/company only -- NEVER a quote or context text */,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL,
+  resolved_at   INTEGER,
+  resolution    TEXT CHECK (resolution IS NULL OR resolution IN ('gone', 'dismiss', 'keep-export', 'keep-derived', 'both')),
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL))
+);
+CREATE INDEX IF NOT EXISTS lint_finding_open ON lint_finding(check_name, resolved_at, last_seen_at);
+
 /* The porter stemmer, because this index is queried with the owner's own
    English: it unifies morning/mornings, allergy/allergies, take/takes.
    MEASURED LIMIT, so nobody assumes more of it than it does: porter does NOT
@@ -737,7 +1154,9 @@ END;
    The plan's logging contract -- product events without SOURCE text: the
    only text columns are the closed dismissal-reason enum and the owner's own
    free-text note, never a row's content. 'shown' rows are what the
-   global frequency cap counts, and they are recorded by the SERVER when a
+   global frequency cap counts -- ~~all of them~~ the ones whose 'pulled' is 0,
+   since 2026-09-13: the cap counts interruptions, and a card the owner asked
+   for after rejecting one is not one. They are recorded by the SERVER when a
    card is first handed out -- client-side recording double-counted
    relaunches into the cap; a dismissal's structured reason rides the same
    event rather than a parallel table, so one query answers "what happened to
@@ -766,7 +1185,17 @@ CREATE TABLE IF NOT EXISTS rm_card_event(
   note         TEXT,
   rule_version TEXT NOT NULL,
   time_band    TEXT NOT NULL CHECK (time_band IN ('morning','afternoon','evening','night')),
-  created_at   INTEGER NOT NULL
+  created_at   INTEGER NOT NULL,
+  /* WAS THIS CARD AN INTERRUPTION, OR DID THE OWNER ASK FOR IT? Only a
+     'shown' row can be pulled: 1 means the owner rejected a card and asked
+     for another, so this serve was their own doing and the frequency cap
+     does not count it (see controls.mjs underGlobalCap / PULLS_PER_DAY).
+     LAST, not beside snapshot_id, because healCardEventColumns ALTERs it onto
+     existing databases and an ALTER appends -- a fresh database and a healed
+     one must not carry the same table in two different column orders.
+     DEFAULT 0 is the honest back-fill: every row that predates the column was
+     an interruption, which is exactly what the cap counted it as. */
+  pulled       INTEGER NOT NULL DEFAULT 0 CHECK (pulled IN (0,1))
 );
 CREATE INDEX IF NOT EXISTS rm_card_event_shown ON rm_card_event(event, created_at);
 /* The card route's acted/shown checks key on snapshot_id against a table
@@ -831,6 +1260,53 @@ CREATE TRIGGER IF NOT EXISTS rm_candidate_snapshot_no_delete
 BEFORE DELETE ON rm_candidate_snapshot BEGIN
   SELECT RAISE(ABORT, 'a snapshot that can be deleted afterwards is not a snapshot');
 END;
+
+/* DRAFTED MESSAGES (L5 mode-picker follow-on, part 2) -- model-suggested
+   opening lines for one candidate snapshot, cached rather than regenerated:
+   POST /admin/relationship/draft returns existing rows newer than 24h
+   without another engine call. No version bump: IF NOT EXISTS on a new
+   table, same as rm_suppression/rm_mute/rm_card_event before it. Append-only,
+   same reasoning as rm_card_event -- a drafted suggestion the owner saw is a
+   fact about what the system offered, not a value to overwrite in place. */
+CREATE TABLE IF NOT EXISTS rm_card_draft(
+  id          INTEGER PRIMARY KEY,
+  snapshot_id INTEGER NOT NULL REFERENCES rm_candidate_snapshot(id),
+  engine      TEXT NOT NULL,
+  model       TEXT,
+  text        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rm_card_draft_snapshot ON rm_card_draft(snapshot_id);
+CREATE TRIGGER IF NOT EXISTS rm_card_draft_no_update
+BEFORE UPDATE ON rm_card_draft BEGIN
+  SELECT RAISE(ABORT, 'a drafted suggestion is append-only: what the model offered is not editable afterwards');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_card_draft_no_delete
+BEFORE DELETE ON rm_card_draft BEGIN
+  SELECT RAISE(ABORT, 'a drafted suggestion is append-only: deleting it is how the 24h cache would lie');
+END;
+
+/* SINCE WHEN HAS THE OWNER'S PICK BEEN HELD for a LinkedIn export that has not
+   arrived (see linkedinPendingFallback). ONE ROW, and it is a clock rather
+   than a flag: the state itself is derived per request from the projection, so
+   what cannot be derived is how long it has been true.
+
+   WHY IT IS DURABLE. The surfaces promise "investor cards start WHEN your
+   linkedin export lands", and for an owner who pressed 'later' and never
+   imports, "when" is a word that never comes due. A page can only say
+   something else after a while if something counted the while -- and a counter
+   in the process is reset by every restart, which is precisely the install
+   where this matters. Not the owner's config: that file is a record of
+   DECISIONS, and this is an observation.
+
+   NOT KEYED BY MODE, deliberately. Switching investor -> founder is not a new
+   wait; the thing being waited on is the export, and the clock belongs to it.
+   Deleted the moment the hold does not apply, so it can only ever describe an
+   unbroken stretch. */
+CREATE TABLE IF NOT EXISTS rm_mode_hold(
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  since INTEGER NOT NULL
+);
 `;
 
 // Bumped only when a migration must run at open. Version history:
@@ -872,7 +1348,46 @@ END;
 //      on the DDL rather than on this number (see rebuildClaimTableForV10).
 //      Two branches bumping the same version is exactly how a stamp comes to
 //      lie; the DDL check is why it no longer matters when one does.
-const SCHEMA_VERSION = 11;
+//  12  person_sweep_cursor, person_sweep_run, person_sweep_proposal (L5 step
+//      5, the discovery sweep). All three are brand-new tables created by
+//      SCHEMA's own IF NOT EXISTS, so nothing here ALTERs anything; the
+//      version < 12 branch below only (re-)asserts their indexes, same
+//      belt-and-suspenders posture as the ALTER-guarded branches above.
+//  13  person_lookup_state, person_lookup_run, lookup_log, person_lookup_change
+//      (L5 step 6, public lookup). All four are brand-new tables created by
+//      SCHEMA's own IF NOT EXISTS, so nothing here ALTERs anything; the
+//      version < 13 branch below only (re-)asserts their indexes.
+//  14  lookup_evidence (new table, so IF NOT EXISTS covers it), plus TWO NEW
+//      COLUMNS on person_lookup_change -- evidence_kind and
+//      contradicts_anchor -- which a v13 install really does lack, so this
+//      is the first lookup branch that ALTERs anything. Both are added under
+//      the same pragma_table_info guard every other ALTER here uses; both
+//      carry a CHECK, which ALTER TABLE ADD COLUMN accepts because each
+//      column's default (NULL / 0) satisfies its own CHECK. See
+//      person_lookup_change's schema comment for what the two columns mean
+//      and which false positive (lookup_log 4520) put them there.
+//
+//      The lookup review then added three more ALTERed columns under the
+//      same version, and moved all five OUT of the version branch into
+//      healLookupColumns, which runs on every open: person_lookup_change.
+//      contradicts_anchor_unknown (with a one-time back-fill of the rows
+//      that predate the anchor columns) and lookup_evidence.truncated /
+//      .links_parse_failed. The stamp stays 14 deliberately -- the columns
+//      are added by presence check, not by version arithmetic, which is the
+//      doctrine rebuildClaimTableForV10's incident note already argues for,
+//      and every one of them is additive with a default that satisfies its
+//      own CHECK.
+//
+//      CORROBORATION then added two more the same way, and the stamp still
+//      stays 14: person_lookup_change.sources (canonical JSON, every source
+//      a change rests on rather than only the primary) and
+//      .corroboration (how many distinct registrable domains among them
+//      actually count). Both NULLABLE WITH NO DEFAULT and no back-fill, so
+//      an existing row reads NULL rather than being asserted uncorroborated
+//      or corroborated -- see the table's own comment, and
+//      relationship/lookup.mjs's corroboration section for why one search
+//      result stopped being enough.
+const SCHEMA_VERSION = 14;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -923,6 +1438,17 @@ function migrate(db) {
   // sqlite_master read, and heals a mis-stamped database no matter what the
   // version says.
   rebuildClaimTableForV10(db);
+  // Same doctrine, applied to the lookup tables' ALTERed columns: guarded by
+  // what table_info reports, run on every open, so a database stamped at or
+  // past the version that introduced them still gets them if it somehow
+  // lacks them. This is the one migration step whose absence surfaces as
+  // storeLookup throwing mid-pass, which is exactly the failure the lookup
+  // review found leaving distill_run and person_lookup_run 'running'.
+  healLookupColumns(db);
+  // Same doctrine again, for rm_card_event.pulled: the card has been serving
+  // on the reference install since before that column existed, so its table
+  // is the one shape CREATE TABLE IF NOT EXISTS can never fix.
+  healCardEventColumns(db);
   if (version >= SCHEMA_VERSION) return;
   if (version < 1) {
     // Rewrites every page under secure_delete. Cheap on a small database and
@@ -1111,8 +1637,195 @@ function migrate(db) {
     // records the version. See rebuildClaimTableForV10.
     version = 11;
   }
+  if (version < 12) {
+    // person_sweep_cursor/_run/_proposal were already created above by SCHEMA
+    // (CREATE TABLE IF NOT EXISTS, no pre-existing column to guard) -- this
+    // branch exists only to (re-)assert their indexes, which is harmless
+    // under IF NOT EXISTS, and to record the version.
+    db.exec('CREATE INDEX IF NOT EXISTS person_sweep_run_started ON person_sweep_run(started_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(run_id)');
+    version = 12;
+  }
+  if (version < 13) {
+    // person_lookup_state/_run, lookup_log, person_lookup_change were already
+    // created above by SCHEMA (CREATE TABLE IF NOT EXISTS, no pre-existing
+    // column to guard) -- this branch exists only to (re-)assert their
+    // indexes, which is harmless under IF NOT EXISTS, and to record the
+    // version.
+    db.exec('CREATE INDEX IF NOT EXISTS person_lookup_state_due ON person_lookup_state(next_due_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS person_lookup_run_started ON person_lookup_run(started_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS lookup_log_person ON lookup_log(person_key, at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id)');
+    version = 13;
+  }
+  if (version < 14) {
+    // lookup_evidence itself came from SCHEMA above (new table, IF NOT
+    // EXISTS). Its columns, and person_lookup_change's three lookup
+    // columns, did NOT: person_lookup_change already exists on every v13
+    // install, and CREATE TABLE IF NOT EXISTS is a no-op there, so without
+    // ALTERs storeLookup's INSERT would fail on the reference box while
+    // passing in tests.
+    //
+    // The ALTERs themselves have MOVED OUT of this branch, to
+    // healLookupColumns, which runs on every open (see the call in
+    // migrate() and the incident note there). They were unreachable on a
+    // database stamped 14 or higher that did not actually have the
+    // columns -- and a mis-stamped database is not hypothetical here: this
+    // file's own rebuildClaimTableForV10 exists because one happened. The
+    // branch stays to record the version.
+    version = 14;
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
+
+// The lookup tables' ADDED columns, healed on EVERY open rather than inside
+// a version branch. Two reasons, both from the public-lookup review:
+//
+//   1. A database stamped at or beyond the version that added a column, but
+//      without the column (a development open of a mid-flight branch, the
+//      way the reference install came to be stamped 10 with a v9 claim
+//      table), never ran the branch again -- and the symptom is not a
+//      startup error but storeLookup throwing MID-PASS, which used to leave
+//      distill_run and person_lookup_run 'running' forever.
+//   2. person_lookup_change.contradicts_anchor_unknown needs a BACK-FILL at
+//      the moment it is added, and the back-fill has to see the rows that
+//      predate it. See that column's comment in SCHEMA: an ALTER can only
+//      default an existing row to 0, and 0 asserts a check that was never
+//      run. Rows already present with no evidence_kind are marked unknown,
+//      which newestWebChange treats like a contradiction -- visible to the
+//      owner as a review item, refused to the card until he judges it.
+//
+// Idempotent, one sqlite_master read plus one pragma per table.
+function healLookupColumns(db) {
+  const hasTable = (name) => db
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(name) !== undefined;
+  const columnsOf = (name) => new Set(
+    db.prepare('SELECT name FROM pragma_table_info(?)').all(name).map((c) => c.name)
+  );
+
+  if (hasTable('person_lookup_change')) {
+    const cols = columnsOf('person_lookup_change');
+    if (!cols.has('evidence_kind')) {
+      db.exec(
+        'ALTER TABLE person_lookup_change ADD COLUMN evidence_kind TEXT ' +
+        "CHECK (evidence_kind IS NULL OR evidence_kind IN ('title','snippet'))"
+      );
+    }
+    if (!cols.has('contradicts_anchor')) {
+      db.exec(
+        'ALTER TABLE person_lookup_change ADD COLUMN contradicts_anchor INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (contradicts_anchor IN (0,1))'
+      );
+    }
+    if (!cols.has('contradicts_anchor_unknown')) {
+      db.exec(
+        'ALTER TABLE person_lookup_change ADD COLUMN contradicts_anchor_unknown INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (contradicts_anchor_unknown IN (0,1))'
+      );
+      // THE BACK-FILL, and it runs exactly once -- on the open that adds the
+      // column. A row with no evidence_kind was stored without the stream in
+      // hand or before the columns existed at all; either way nothing
+      // computed its anchor verdict, so "unknown" is the only honest value.
+      // A fresh database reaches this with zero rows.
+      db.exec('UPDATE person_lookup_change SET contradicts_anchor_unknown = 1 WHERE evidence_kind IS NULL');
+    }
+    // NO BACK-FILL for these two, and that is the point: both are NULLABLE
+    // with NO DEFAULT, so every existing row reads NULL -- "nobody counted
+    // the sources for this row" -- which newestWebChange refuses to serve on
+    // a card while pending. A DEFAULT 0 would say "counted, and it was
+    // zero", which is a claim nobody made; a DEFAULT 1 would say a row from
+    // the 4520 era was corroborated, which is the opposite of true. See
+    // person_lookup_change's schema comment above.
+    if (!cols.has('sources')) {
+      db.exec('ALTER TABLE person_lookup_change ADD COLUMN sources TEXT');
+    }
+    if (!cols.has('corroboration')) {
+      db.exec('ALTER TABLE person_lookup_change ADD COLUMN corroboration INTEGER');
+    }
+  }
+
+  if (hasTable('lookup_evidence')) {
+    const cols = columnsOf('lookup_evidence');
+    if (!cols.has('truncated')) {
+      db.exec(
+        'ALTER TABLE lookup_evidence ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (truncated IN (0,1))'
+      );
+    }
+    if (!cols.has('links_parse_failed')) {
+      db.exec(
+        'ALTER TABLE lookup_evidence ADD COLUMN links_parse_failed INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (links_parse_failed IN (0,1))'
+      );
+    }
+  }
+}
+
+// rm_card_event.pulled, healed on EVERY open for the same reason the lookup
+// columns are: the stamp is a cache and the DDL is the truth. No
+// SCHEMA_VERSION bump goes with it -- a version branch would only record what
+// this function already guarantees, and a database stamped past the bump but
+// missing the column (the failure mode that moved the lookup ALTERs out here
+// in the first place) would never run the branch again.
+//
+// The consequence of NOT healing is not a startup error: it is the card
+// route's INSERT throwing at the moment a card is handed over, which is the
+// one moment the owner is watching.
+function healCardEventColumns(db) {
+  const hasTable = db
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'rm_card_event'")
+    .get() !== undefined;
+  if (!hasTable) return;
+  const cols = new Set(
+    db.prepare("SELECT name FROM pragma_table_info('rm_card_event')").all().map((c) => c.name)
+  );
+  if (!cols.has('pulled')) {
+    // NO BACK-FILL, and none is needed: DEFAULT 0 says "this was an
+    // interruption", which is what every pre-existing row was -- there was no
+    // way to ask for another card before this column existed. Contrast
+    // person_lookup_change.contradicts_anchor_unknown, whose default WOULD
+    // have asserted a check nobody ran.
+    //
+    // A LOCKED DATABASE IS NOT A REASON TO FAIL THE OPEN -- but this ALTER is
+    // NOT where such an open fails, and the difference was measured rather than
+    // reasoned (contrarian review finding 12, corrected).
+    //
+    // MEASURED 2026-09-13, a second connection holding BEGIN EXCLUSIVE: openDb
+    // throws 'database is locked' after the 5s busy_timeout at `PRAGMA
+    // journal_mode = DELETE`, before SCHEMA and long before migrate() -- on a
+    // database that already HAS this column, so the failure predates the column
+    // and is not this branch's. Even `PRAGMA user_version` throws there. An
+    // open landing inside /admin/maintain's VACUUM therefore fails whatever
+    // this function does, and claiming the guard below prevents that would be
+    // asserting something the measurement refuses.
+    //
+    // What the guard does cover is the narrow real window: a writer taking the
+    // lock between the statements above and this one. Two attempts, each
+    // waiting out the busy timeout on its own, then the reason is LOGGED (type
+    // only -- no path, no rows) and the open continues WITHOUT the column,
+    // because a dead server is worse than a missing one: the next open heals
+    // it, and until then the only thing that fails is serving a card. Anything
+    // that is not contention is re-thrown -- a refused ALTER that is not a lock
+    // is a broken database, and swallowing it would hide it.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        db.exec(
+          'ALTER TABLE rm_card_event ADD COLUMN pulled INTEGER NOT NULL DEFAULT 0 ' +
+          'CHECK (pulled IN (0,1))'
+        );
+        break;
+      } catch (error) {
+        if (!/\b(?:busy|locked)\b/iu.test(String(error?.message ?? ''))) throw error;
+        if (attempt >= 2) {
+          console.warn('rm_card_event.pulled not added (database busy); retried on the next open');
+          break;
+        }
+      }
+    }
+  }
+}
+
 
 // claim.subject widens from the single literal 'owner' (L5 step 2). A CHECK
 // constraint cannot be ALTERed in SQLite, so the table is rebuilt and rows
@@ -1287,48 +2000,12 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
 
 // --- canonical content hash --------------------------------------------------
 //
-// Computed HERE and only here. The hash decides whether an upsert is a real
-// change, so a second implementation in a client is a fork waiting to disagree
-// on serialization — at which point every redelivery becomes a spurious UPDATE
-// (plus FTS churn), or worse, a real edit hashes equal and is dropped.
-// Connectors send plain rows; Hermes hashes them.
-//
-// Canonical form of {ts, speaker, text, meta}: object keys sorted recursively;
-// null-valued and missing keys normalized to the same absence (omitted), so
-// {"speaker":null} and {} describe the same row; meta is canonicalized as the
-// parsed JSON value it arrives as, never as whatever string a client happened
-// to serialize. Arrays keep their order and their nulls — order and arity are
-// data in an array, and a generic canonicalizer cannot know which arrays are
-// really sets. CONNECTORS MUST THEREFORE PRE-SORT semantically-unordered
-// arrays (attendees, recipients) before ingest, or a reordered attendee list
-// reads as an edit; the rule is written down in ops/INGESTION.md.
-function canonicalize(value) {
-  if (value === null || value === undefined) return undefined;
-  if (Array.isArray(value)) {
-    return value.map((item) => {
-      const c = canonicalize(item);
-      return c === undefined ? null : c;
-    });
-  }
-  if (typeof value === 'object') {
-    const out = {};
-    for (const key of Object.keys(value).sort()) {
-      const c = canonicalize(value[key]);
-      if (c !== undefined) out[key] = c;
-    }
-    return out;
-  }
-  return value;
-}
-
-// Hashes the NORMALIZED row — ts after truncation/default, speaker collapsed
-// to absence when null — so the hash describes what would be stored, not what
-// the wire happened to carry. Exported for tests; clients must not grow one.
-export function canonicalHash({ ts, speaker, text, meta }) {
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalize({ ts, speaker, text, meta })))
-    .digest('hex');
-}
+// Extracted to ./contentHash.mjs and re-exported here (L5 step 6, public
+// lookup): ui/server/relationship/lookup.mjs writes its own source='web'
+// context rows and needs the SAME hash this file computes for every other
+// row, rather than forking a second implementation that could disagree on
+// serialization. See contentHash.mjs for the full canonicalization contract.
+export { canonicalHash };
 
 // Validates everything before writing anything, so a bad row midway through a
 // batch rejects the whole batch instead of leaving half of it behind — the
@@ -1714,6 +2391,13 @@ export const KNOWN_SOURCES = Object.freeze([
   'slack',
   'hazlie_digest',
   'seed',
+  // Public lookup (L5 step 6, relationship/lookup.mjs): a search result's
+  // quoted text, stored so a PENDING person claim built from it has the same
+  // source-receipt/deletion story as every other row. NOT a participant
+  // source -- see PERSON_SOURCE_POLICY (people/graph.mjs) and
+  // EXCLUDED_SOURCES (memory/select.mjs), which both admit it deliberately
+  // narrowly in the same commit this source name lands in.
+  'web',
 ]);
 
 // `files` and `notion` were once missing while both already had corpus rows --
@@ -1804,6 +2488,70 @@ const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_clai
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
+const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth', 'includeAnonymous']);
+const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
+const CONFIG_ENGINE_FIELDS = Object.freeze(['engine']);
+const CONFIG_CARD_FIELDS = Object.freeze(['capPerDay', 'producer']);
+const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
+const RELATIONSHIP_DRAFT_FIELDS = Object.freeze(['snapshot_id']);
+// The card's own outcome post. Closed like every other admin body (review
+// finding 18): this route reaches suppression and mute, and an unrecognized
+// field here used to pass silently -- a typo'd "reason" landed a dismissal
+// with no reason at all and no complaint.
+const RELATIONSHIP_EVENT_FIELDS = Object.freeze([
+  'snapshot_id', 'person_key', 'event', 'reason', 'note', 'mute_days',
+]);
+const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
+// 'budget' and 'limit' are accepted as synonyms: sweep-once.mjs's own CLI
+// flag is --limit (matching build-person-pages.mjs's naming), but the route
+// itself thinks of the same number as the pass's budget (SWEEP_BUDGET).
+const RELATIONSHIP_SWEEP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'engine', 'limit']);
+const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'critical']);
+// Same field set and validation as the sweep route above (power/budget/
+// battery/onAc/thermal/limit); public lookup has no per-request engine
+// override -- llama is never a valid lookup engine (see engines.mjs
+// createLookupEngine), so there is nothing safe for that field to select.
+const RELATIONSHIP_LOOKUP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'limit']);
+// The desk's "look this person up now" button carries the SAME power fields
+// the scheduled pass route does. It used to carry only personKey, which made
+// its own comment ("still gated ... through the SAME lookupGate check")
+// false in the one way that matters: lookupGate treats an ABSENT power field
+// as unknown rather than as a skip, so a desk click could spend a web search
+// on a thermally-throttled machine at 8% battery. The button is
+// owner-initiated, but the battery and thermal gates exist to protect the
+// hardware, not to second-guess the owner's intent, and the desk is the one
+// caller that knows the machine's real state.
+const RELATIONSHIP_LOOKUP_PERSON_FIELDS = Object.freeze(['personKey', 'battery', 'onAc', 'thermal']);
+const RELATIONSHIP_LOOKUPS_PARAMS = Object.freeze(['personKey']);
+// personKey is REQUIRED alongside logId, and both are matched (see
+// lookupEvidenceFor): the read used to key on the integer alone, so any
+// logId returned any person's observed article.
+const RELATIONSHIP_LOOKUP_EVIDENCE_PARAMS = Object.freeze(['logId', 'personKey']);
+
+// Lint (step 5½): no power/battery/thermal/budget fields at all -- there is
+// no model call, so none of the sweep/lookup routes' power-mode plumbing
+// applies here. `checks`, when given, narrows which of LINT_CHECKS run this
+// pass; omitted, every check runs.
+const RELATIONSHIP_LINT_FIELDS = Object.freeze(['checks']);
+const RELATIONSHIP_LINT_FINDINGS_PARAMS = Object.freeze(['check', 'open', 'limit']);
+const RELATIONSHIP_LINT_RESOLVE_FIELDS = Object.freeze(['findingKey', 'resolution']);
+// The four an owner may write. 'gone' is deliberately absent -- only a pass
+// itself may declare a condition gone (see lint.mjs's own comment on
+// resolveLintFinding) -- so it 400s here exactly like any other unrecognized
+// value, never reaching resolveLintFinding to be silently no-op'd.
+const LINT_RESOLUTIONS = Object.freeze(['dismiss', 'keep-export', 'keep-derived', 'both']);
+
+// lint_run.checks_run/counts are stored as canonical JSON text (see the
+// SCHEMA comment); the route decodes both before sending so a caller gets
+// real arrays/objects rather than an embedded JSON string.
+function lintRunForResponse(row) {
+  if (!row) return row;
+  let checksRun = [];
+  try { checksRun = JSON.parse(row.checks_run); } catch { checksRun = []; }
+  let counts = {};
+  try { counts = JSON.parse(row.counts); } catch { counts = {}; }
+  return { ...row, checks_run: checksRun, counts };
+}
 const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
@@ -2356,6 +3104,160 @@ export function applyMemoryBatch(db, body) {
   return { run_id: runId, applied, rejected };
 }
 
+// Reconstruct the card queue from whatever the last refresh already committed
+// to rm_candidate_batch/rm_candidate_snapshot. Without this, every hermes
+// restart answered {card:null} out of an empty in-memory cache even though
+// the DB held already-computed, unactioned snapshots -- a process restart is
+// not evidence that the owner acted on them. Mirrors exactly the shape the
+// refresh route stores and the card route/widget expect: see the INSERT INTO
+// rm_candidate_snapshot call below for the encoding this decodes.
+//
+// Current producer_version for each CARD_PRODUCERS kind. A producer version
+// is a promise about how a card was chosen; when the promise changes (a new
+// OWE_PRODUCER_VERSION/PRODUCER_VERSION constant), the unjudged queue the OLD
+// version produced is void -- hydrateCards below and daily.mjs's
+// hasUnjudgedOfKind both check a snapshot's producer_version against this
+// map and treat a mismatch as not-in-queue. This does NOT touch the judged
+// gate (rm_card_event by person_key/kind, in owe.mjs's owePool and
+// producer.mjs's poolSql): a person judged under an old version stays
+// excluded from the pool exactly as before.
+const CURRENT_PRODUCER_VERSION = { owe: OWE_PRODUCER_VERSION, reconnect: PRODUCER_VERSION };
+
+// The rel.refill key reconnect's own (kind, mode) queue keeps its throttle
+// state under -- see daily.mjs's produceDailyBatch `refillKey` contract.
+// Owe has no modes, so it keeps the plain 'owe' key untouched.
+function reconnectRefillKey(mode) {
+  return `reconnect:${mode}`;
+}
+
+// BOTH-KIND, restored independently per CARD_PRODUCERS entry: the latest
+// batch that actually wrote a snapshot of that kind (MAX(batch_id) FROM
+// rm_candidate_snapshot WHERE kind = ?), not merely the latest
+// rm_candidate_batch row -- a kind's own refill throttle can leave an empty
+// batch as ITS newest row when that kind's pool is exhausted, and an empty
+// batch never inserts a snapshot, so it can never be this MAX by
+// construction (no separate candidate_count>0 check needed here, unlike the
+// single-producer version this replaces). rel.mode is recovered from the
+// latest RECONNECT batch only -- Owe cards always carry evidence.mode: null,
+// so asking Owe's batch for a mode would only ever erase the owner's last
+// picker choice.
+function hydrateCards(db, policy) {
+  const empty = () => ({ cards: [], batch: { owe: null, reconnect: null }, mode: null });
+  try {
+    let nameStmt = null;
+    try { nameStmt = db.prepare('SELECT display_name FROM people WHERE person_key = ?'); } catch {}
+
+    // Version-staleness filtering applies unconditionally to Owe -- 'owe' is
+    // written by exactly one producer, produceOweBatch -- but only to
+    // 'reconnect' when the eligibility producer is the one configured. The
+    // older matcher path (relationshipProducerConfig(...).producer ===
+    // 'matcher', still the default) stamps its own snapshots'
+    // producer_version as `${model}@${promptSha}` (see the /refresh route's
+    // matcher branch), a versioning scheme PRODUCER_VERSION knows nothing
+    // about -- treating those as "stale" against a constant they were never
+    // measured against would wrongly void a perfectly current matcher queue.
+    const eligibilityReconnect = relationshipProducerConfig(policy ?? {}).producer === 'eligibility';
+
+    const cards = [];
+    const batch = { owe: null, reconnect: null };
+    let mode = null;
+    let modeBatchId = null; // tracks which mode's batch is the most recent, for `mode` recovery below
+
+    // Loads ONE kind's snapshot rows from ONE batch into `cards`/`batch`,
+    // applying the same version-staleness gate every batch already went
+    // through. `modeFilter`, when given, additionally drops any row whose
+    // evidence.mode does not match -- used below to load reconnect's THREE
+    // per-mode batches independently rather than only ever the single
+    // overall-latest one, which used to silently drop an unjudged OTHER-mode
+    // batch's cards on every restart.
+    function loadBatch(kind, batchId, modeFilter) {
+      if (batchId === null) return;
+      const rows = db.prepare(
+        'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
+        'WHERE batch_id = ? ORDER BY id'
+      ).all(batchId);
+      const versionGated = kind === 'owe' || eligibilityReconnect;
+      const kindRow = rows.find((row) => row.kind === kind);
+      if (versionGated && kindRow && kindRow.producer_version !== CURRENT_PRODUCER_VERSION[kind]) return;
+      if (batch[kind] === null || batchId > batch[kind]) batch[kind] = batchId;
+      for (const row of rows) {
+        if (row.kind !== kind) continue;
+        const evidence = JSON.parse(row.evidence);
+        if (modeFilter !== undefined && evidence.mode !== modeFilter) continue;
+        const { quote_context_id, role, focus, label, left, leftTone, ...cardEvidence } = evidence;
+        let name = row.person_key;
+        try {
+          const person = nameStmt?.get(row.person_key);
+          if (person?.display_name) name = person.display_name;
+        } catch {}
+        cards.push({
+          personKey: row.person_key, name, kind: row.kind, sentence: row.summary,
+          quoteContextId: quote_context_id ?? null, role: role ?? null, focus: focus ?? null,
+          label: label ?? null, left: left ?? null, leftTone: leftTone ?? null,
+          evidence: cardEvidence, producer_version: row.producer_version,
+          snapshot_id: Number(row.id),
+        });
+      }
+      if (kind === 'reconnect' && rows.length > 0 && (modeBatchId === null || batchId > modeBatchId)) {
+        // The mode the MOST RECENT reconnect batch (across all three modes)
+        // was produced in is the owner's last pick from the widget's mode
+        // picker -- recovered here so a restart does not silently fall back
+        // to the config default the next time the card route refills.
+        modeBatchId = batchId;
+        const lastMode = JSON.parse(rows[0].evidence)?.mode;
+        mode = RELATIONSHIP_MODES.includes(lastMode) ? lastMode : mode;
+      }
+    }
+
+    // THE AGE BOUND, AND WHY ONLY HERE (review F finding 4, and daily.mjs's
+    // LIVE model). A restored batch older than LIVE_WINDOW_MS is not a queue
+    // any more: the cross-kind exclusion had already let its people go, so
+    // restoring it made the turn check hold a card nobody could be offered
+    // while the other producer was free to offer them. It is applied to
+    // exactly the kinds the version-staleness gate covers, for the same
+    // reason: the matcher path's queue can only be refilled by an explicit
+    // /refresh, so dropping an old matcher batch would put the orb out with
+    // nothing able to relight it. The eligibility-family producers refill
+    // synchronously on the next request, so for them dropping IS the refill.
+    const freshSince = Date.now() - LIVE_WINDOW_MS;
+    const oweLatest = db.prepare(
+      "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'owe' AND created_at > ?"
+    ).get(freshSince);
+    loadBatch('owe', oweLatest?.batchId != null ? Number(oweLatest.batchId) : null);
+
+    if (eligibilityReconnect) {
+      // Reconnect: modes are queues (L5 mode-picker follow-on) -- restore the
+      // latest non-empty, current-version batch PER MODE, independently, so
+      // an unjudged batch in a mode the owner is not currently on survives a
+      // restart instead of being dropped in favor of whichever mode's batch
+      // happened to be produced most recently.
+      for (const m of RELATIONSHIP_MODES) {
+        const latest = db.prepare(
+          "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot " +
+          "WHERE kind = 'reconnect' AND created_at > ? AND json_extract(evidence, '$.mode') = ?"
+        ).get(freshSince, m);
+        loadBatch('reconnect', latest?.batchId != null ? Number(latest.batchId) : null, m);
+      }
+    } else {
+      // The matcher path predates modes entirely -- its snapshots carry no
+      // evidence.mode at all, so the per-mode split above would never match
+      // any of them. Keep its original behavior: the single overall-latest
+      // reconnect batch, unfiltered.
+      const latest = db.prepare(
+        "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'reconnect'"
+      ).get();
+      loadBatch('reconnect', latest?.batchId != null ? Number(latest.batchId) : null);
+    }
+
+    return { cards, batch, mode };
+  } catch {
+    // A missing rm_candidate_batch/snapshot table (fresh DB, or a schema this
+    // process has not migrated yet) means "no history to hydrate", not a
+    // startup failure.
+    return empty();
+  }
+}
+
 // One relationship service per process, lazily built and cached on policy:
 // hermes' own db handle (sole writer holds the rm_* tables), the connectors'
 // state.db read-only for the spine, the resolutions db for aliases. A missing
@@ -2370,7 +3272,7 @@ function relationshipState(db, policy) {
       if (existsSync(statePath)) stateDb = new DatabaseSync(statePath, { readOnly: true });
     } catch {}
     try { resDb = openResolutionsDb(); } catch {}
-    try { owner = loadOwner(); } catch {}
+    try { owner = loadOwner(ownerLoadOptions(policy)); } catch {}
     const service = createRelationshipMemory({ contextDb: db, stateDb, resolutionsDb: resDb,
       ...(owner ? { owner } : {}) });
     const llamaCall = async (messages, max_tokens = 120, temperature = 0.2) => {
@@ -2392,9 +3294,199 @@ function relationshipState(db, policy) {
       const body = await upstream.json();
       return body?.choices?.[0]?.message?.content?.trim() ?? null;
     };
-    holder.__relationship = { service, llamaCall, cards: [], batchId: null, refreshing: false, lastError: null };
+    const hydrated = hydrateCards(db, policy);
+    holder.__relationship = { service, llamaCall, cards: hydrated.cards, batch: hydrated.batch,
+      mode: hydrated.mode, refreshing: false, lastError: null,
+      // Per-kind refill throttle (see daily.mjs's REFILL_RETRY_MS):
+      // refill.owe/refill.reconnect each describe the most recent
+      // synchronous refill the card route ran FOR THAT KIND, not any refill
+      // ever -- an explicit /refresh does not touch these, and one kind's
+      // throttle never blocks the other's.
+      refill: { owe: { at: null, empty: false }, reconnect: { at: null, empty: false } } };
   }
   return holder.__relationship;
+}
+
+// Where the three config-writing routes below write. Undefined -- production
+// -- means owner.mjs picks ~/.hazlie/connectors/config.json itself; a test
+// passes a path in its own tmpdir. Spread rather than passed as a key, because
+// `{ configPath: undefined }` would override owner.mjs's default with nothing.
+function ownerConfigTarget(policy) {
+  return policy.ownerConfigPath === undefined ? {} : { configPath: policy.ownerConfigPath };
+}
+
+// AND WHERE THE READERS READ, which is the same file or the seam is a lie
+// (round-4 finding 6). The three writing routes above went through
+// ownerConfigTarget while relationshipCap and relationshipProducerConfig below
+// still opened ~/.hazlie/connectors/config.json by hand, so a route test could
+// post a cap or a mode into its own tmpdir and then assert the effect against
+// the developer's real config -- passing or failing on what that machine
+// happened to hold rather than on what the route did.
+function ownerConfigFile(policy) {
+  return policy.ownerConfigPath ?? ownerConfigPath();
+}
+
+// WHICH INSTALL'S ~/.hazlie THE FILESYSTEM READERS READ (round-6 finding 12).
+//
+// ownerConfigFile and ownerLoadOptions put the config and the owner behind the
+// `ownerConfigPath` seam. The readers that go to the filesystem for something
+// OTHER than the config -- Google grants, the LinkedIn export, the daemon's
+// activity file -- each took `home = homedir()` and were called with no
+// argument, so an install named through that seam had screen 6 reporting its
+// own rows beside the running user's "is Google connected" and the running
+// user's sprint sentence: one screen describing two machines.
+//
+// installHomeFor is owner.mjs' own derivation, shared rather than repeated, and
+// its null -- a config path that belongs to no install -- is passed straight
+// through. The readers answer nothing for it, which is the same answer
+// grantsHomeFor already gives such a caller, and the same reason: a path that
+// names no install is not a reason to describe this Mac.
+//
+// AND `null` IS "NOBODY SAID", THE SAME AS `undefined` (round-7 finding 20).
+// ownerConfigFile coalesces a null ownerConfigPath to the running user's
+// config; this treated it as a path belonging to no install and answered
+// nothing, so one policy object described two installs -- the very shape this
+// function exists to close, four lines further in.
+function installHome(policy) {
+  const named = policy?.ownerConfigPath;
+  if (named === undefined || named === null) return homedir();
+  return installHomeFor(named);
+}
+
+// loadOwner() through the same seam, for the call sites that have `policy`.
+//
+// NOT EVERY CALL SITE DOES, and that is stated rather than hidden: the people
+// search and projection helpers (tryPersonSearch, tryGeneralPeopleSearch,
+// rebuildPeopleCore, schedulePeopleProjectionRefresh) take no policy argument,
+// so their loadOwner() still resolves the real homedir. Threading policy
+// through them is a separate change; what matters here is that the routes that
+// READ the owner beside a route that WRITES the owner's config agree about
+// which file that is.
+//
+// A configPath outside the canonical <home>/.hazlie/connectors/config.json
+// shape carries no install with it, and owner.mjs answers such a caller with
+// NO Google grants rather than the running machine's -- which is exactly what
+// a tmpdir config in a test should get.
+function ownerLoadOptions(policy) {
+  return policy?.ownerConfigPath === undefined ? {} : { configPath: policy.ownerConfigPath };
+}
+
+// THE OWNER'S CONFIG, PARSED ONCE PER VERSION OF THE FILE (round-5 finding 18).
+//
+// relationshipCap and relationshipProducerConfig each opened, read and parsed
+// config.json on every call, and between them they are called from five
+// branches of GET /admin/relationship/card -- a route the panel polls. That is
+// several synchronous reads of the same file per request, on the one thread
+// that also serves everything else.
+//
+// Memoised on the file's identity rather than for a duration, because the
+// value has to change the instant it changes: POST /admin/relationship/mode
+// writes this file and the very next card request must serve the new mode
+// (round-4 finding 1). stat is one syscall against read + parse, and the stamp
+// is mtime in NANOseconds plus size, inode and device -- mtimeMs alone is
+// millisecond-grained, and a write landing in the same millisecond as the read
+// that cached it is exactly the mode route's shape.
+//
+// Keyed by path because the tests point `policy.ownerConfigPath` at their own
+// tmpdir; the map is cleared rather than grown when a run accumulates paths.
+const ownerConfigCache = new Map();
+const OWNER_CONFIG_CACHE_MAX = 32;
+
+function readOwnerConfig(policy) {
+  const path = ownerConfigFile(policy);
+  let stamp;
+  try {
+    const st = statSync(path, { bigint: true });
+    stamp = `${st.mtimeNs}:${st.size}:${st.ino}:${st.dev}`;
+  } catch {
+    ownerConfigCache.delete(path);
+    return null; // no file is the same answer it has always been: no config
+  }
+  const hit = ownerConfigCache.get(path);
+  if (hit !== undefined && hit.stamp === stamp) return hit.cfg;
+  let cfg = null;
+  try {
+    cfg = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    cfg = null; // an unparseable config reads as no config, as it did before
+  }
+  if (ownerConfigCache.size >= OWNER_CONFIG_CACHE_MAX) ownerConfigCache.clear();
+  ownerConfigCache.set(path, { stamp, cfg });
+  return cfg;
+}
+
+// MODES ARE RETIRED FROM THE PRODUCT SURFACE, AND KEPT IN THE CODE
+// (2026-09-13, owner decision: "the any/founder/investor thing isn't necessary
+// -- reconnect should be one person").
+//
+// The picker is gone from the widget; the queues, the sub-role gate in
+// producer.mjs, the per-mode hydration and the LinkedIn hold all stay exactly
+// as they are, behind this one question. Nothing is deleted, because the
+// reasoning that built them is sound and the decision that retired them is a
+// product decision that can be taken back -- which is what a flag is for.
+//
+// `timeline` IS THE FLAG, AND IT IS NOT A NEW ONE. It is the same registry key
+// the People door reads, and the registry refuses a key it does not know
+// (mergeFeatures throws, the whole file reads as invalid, everything goes off),
+// so inventing `relationshipModes` here would have turned a shipped
+// ops/features.json into a dead install. Sub-role modes ARE the people-shaped
+// half of this app -- investor/founder come from `people.sub_roles`, which the
+// LinkedIn export fills -- so they belong to the same door.
+//
+// WHAT "OFF" MEANS, in one place so no branch invents its own answer: the
+// effective serving mode is 'any', `?mode=` is not a request anybody made,
+// linkedinPendingFallback holds nobody, and 'pool-exhausted-mode' is never the
+// reason. POST /admin/relationship/mode still accepts and still persists -- the
+// key stays valid in the owner's config, and refusing it would break a widget
+// that has not shipped its update yet -- it simply decides nothing.
+//
+// READ PER REQUEST, MEMOISED ON THE FILES' OWN IDENTITY, exactly as
+// readOwnerConfig is and for the same reason: this sits on a polled route, and
+// a TTL would mean an owner override that takes effect "in a while". Two stats
+// against a read and a parse.
+const featureRegistryCache = new Map();
+const FEATURE_REGISTRY_CACHE_MAX = 8;
+
+function fileStamp(path) {
+  try {
+    const st = statSync(path, { bigint: true });
+    return `${st.mtimeNs}:${st.size}:${st.ino}:${st.dev}`;
+  } catch {
+    return 'absent';
+  }
+}
+
+// NOT THROUGH ownerConfigPath, AND THAT IS DELIBERATE (cf. round-6 finding 12,
+// which put the OTHER filesystem readers behind that seam). features.mjs owns
+// where the registry and its override live -- the daemon, the app and /stats
+// all reach it the same way -- and a second resolution rule invented here would
+// be a fourth opinion about the file whose whole purpose is that three
+// processes agree on it. Its own seam is HAZLIE_FEATURES_OVERRIDE, which is
+// what the tests set; a policy that names a tmpdir install does not imply a
+// features file, and nothing writes one.
+function currentFeatures() {
+  // The override path comes from the environment on every call
+  // (HAZLIE_FEATURES_OVERRIDE, features.mjs' one test knob), so it is part of
+  // the key rather than of the stamp: two paths are two answers, not one
+  // answer that changed.
+  const overridePath = defaultOverridePath();
+  const key = `${DEFAULT_REGISTRY_PATH}|${overridePath ?? 'none'}`;
+  const stamp = `${fileStamp(DEFAULT_REGISTRY_PATH)}|${overridePath === null ? 'none' : fileStamp(overridePath)}`;
+  const hit = featureRegistryCache.get(key);
+  if (hit !== undefined && hit.stamp === stamp) return hit.features;
+  // readFeatureRegistry answers ALL_OFF rather than throwing on anything it
+  // cannot read, which is the fail-closed direction this wants: an unreadable
+  // registry retires the modes, it does not resurrect them.
+  const { features } = readFeatureRegistry();
+  if (featureRegistryCache.size >= FEATURE_REGISTRY_CACHE_MAX) featureRegistryCache.clear();
+  featureRegistryCache.set(key, { stamp, features });
+  return features;
+}
+
+// Whether the mode picker is part of the product on this install. Every branch
+// that reads a mode goes through this one question.
+function relationshipModesLive() {
+  return currentFeatures().timeline === true;
 }
 
 // The global cap comes from the owner's config (relationshipMemory.capPerDay)
@@ -2406,11 +3498,427 @@ function relationshipCap(policy) {
   // EXPLICIT no-cap -- the fail-closed scenario -- and tests pass it to stay
   // isolated from whatever config the machine they run on happens to carry.
   if (policy.relationshipCap !== undefined) return policy.relationshipCap;
+  const n = readOwnerConfig(policy)?.relationshipMemory?.capPerDay;
+  if (Number.isInteger(n) && n > 0) return { max: n, windowMs: 86_400_000 };
+  return null;
+}
+
+// Which candidate producer /admin/relationship/refresh runs, from the same
+// config file relationshipCap reads (relationshipMemory.producer /
+// relationshipMemory.mode) -- or a start() override for tests, same seam
+// discipline as relationshipCap/relationshipMatcher above. Anything other
+// than the literal 'eligibility' keeps the existing matcher path; that is
+// the safe default for an owner who has never touched this key.
+function relationshipProducerConfig(policy) {
+  if (policy.relationshipProducerConfig !== undefined) return policy.relationshipProducerConfig;
+  const cfg = readOwnerConfig(policy);
+  const producer = cfg?.relationshipMemory?.producer;
+  const mode = cfg?.relationshipMemory?.mode;
+  return {
+    producer: producer === 'eligibility' ? 'eligibility' : 'matcher',
+    mode: RELATIONSHIP_MODES.includes(mode) ? mode : 'any',
+  };
+}
+
+// IS IT THE HOUSE THAT IS EMPTY, OR THE PICKER?
+//
+// "nothing to review, come back in fifteen minutes" is one sentence for two
+// situations, and only one of them is the owner's to do anything about. On run
+// 3 (fresh Mac) the investor pool held nobody while six people were waiting
+// under 'anyone', and the screen said what it would have said on an empty
+// machine.
+//
+// Returns `{ mode: M, any: N }` whenever there is anybody in the house at all
+// and the owner is on a sub-role mode, or null. `mode` is that mode's own
+// count, not a constant: it used to be returned only on the path that had
+// already established it was zero (round-7 finding 22), so the only value ever
+// on the wire was 0 and the number said nothing. A throttled poll with people
+// waiting IN the mode is a different sentence again -- "one moment" rather than
+// "nobody yet" -- and the caller can now tell those apart. Null stays for the
+// two cases with nothing to say: 'any', which has nothing to widen to, and an
+// empty house, where the count is the reason.
+//
+// COUNTS, NEVER NAMES. This reply is a reason, not a queue: who is offered is
+// decided at produce time, by the producer, under its gates.
+//
+// COUNTED ONCE PER REFILL, NOT ONCE PER POLL (round-7 finding 15). Two full
+// pool scans per request looked cheap because they only run off 'any' -- true
+// of the mode, not of the frequency. A founder or investor owner on a fresh Mac
+// is throttled on nearly every poll, the setup screen polls every ~15 s, and the
+// first-load retry window holds that state for the whole half hour: two scans
+// every fifteen seconds for thirty minutes, on the machine already running the
+// sprint. The counts are memoised against the refill attempt that produced this
+// answer (`rel.refill[key].at`), so they are recomputed exactly when a refill
+// actually ran and reused for every poll it throttles. The staleness that buys
+// is bounded by the retry window itself -- a minute on the first load, which is
+// the only load where the pool moves fast enough to matter.
+// Exported for its MEMO CONTRACT, which is the half of this that a route test
+// cannot reach: making eligiblePool throw from outside takes the producer down
+// with it, and the route then answers a different branch entirely.
+export function modeEmptyCounts(db, rel, mode, refillKey, now) {
+  if (mode !== 'founder' && mode !== 'investor') return null;
+  const at = rel.refill?.[refillKey]?.at ?? null;
+  const cached = rel.modeCounts;
+  if (cached !== undefined && cached !== null && cached.key === refillKey && cached.at === at) {
+    return cached.counts;
+  }
+  let counts = null;
   try {
-    const cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
-    const n = cfg?.relationshipMemory?.capPerDay;
-    if (Number.isInteger(n) && n > 0) return { max: n, windowMs: 86_400_000 };
+    const forAny = eligiblePool(db, { mode: 'any', now }).length;
+    // The house first, because an empty one is the common fresh-install state
+    // and needs no second scan to answer.
+    if (forAny > 0) counts = { mode: eligiblePool(db, { mode, now }).length, any: forAny };
+  } catch {
+    // A POOL WE COULD NOT COUNT IS NOT A COUNT OF ZERO, AND IS NOT MEMOISED AS
+    // ONE (round-8 finding 10). The write below used to happen on this path
+    // too, pinning "the house is empty" until the next refill stamps a new
+    // `at` -- a whole retry window, on the screen whose only job is to say how
+    // it is going, bought by one transient failure. Answering null for this
+    // request costs the sentence once; recording it costs the window.
+    return null;
+  }
+  rel.modeCounts = { key: refillKey, at, counts };
+  return counts;
+}
+
+// THE MODE THE OWNER IS ON, for every route that REPORTS one (round-4
+// finding 1).
+//
+// `rel.mode` is this PROCESS's running pick. It is written by the mode route
+// and recovered by hydrateCards off the latest reconnect batch -- and on a
+// fresh install neither has happened yet: the owner picks "founders" on
+// onboarding's first screen, the config is written, hermes restarts before any
+// batch exists, and rel.mode is still undefined. Answering null there is what
+// let onboarding's enterWelcome skip paintMode and redraw "anyone" selected,
+// one tap away from writing `any` back over the founder the owner chose.
+//
+// The persisted config is the fallback, which is the same `?? producerConfig
+// .mode` the card route's own production paths already apply before they
+// produce or serve. There is no third answer: RELATIONSHIP_MODES-checked
+// config, else 'any'.
+function relationshipMode(rel, policy) {
+  return rel.mode ?? relationshipProducerConfig(policy).mode;
+}
+
+// PREPARED ONCE PER DATABASE, NOT PER REQUEST (review finding 19).
+//
+// The statements below sit on two POLLED routes -- the card route the panel
+// polls and the progress route screen 6 polls -- and node:sqlite compiles the
+// SQL on every prepare(). Keyed weakly by the handle, so a closed database's
+// statements go with it; a prepare that THROWS is not cached, so a table
+// created later (or dropped by a test) is re-prepared on the next call rather
+// than being remembered as broken.
+const statementCache = new WeakMap();
+function cachedStatement(db, sql) {
+  let byDb = statementCache.get(db);
+  if (byDb === undefined) {
+    byDb = new Map();
+    statementCache.set(db, byDb);
+  }
+  const hit = byDb.get(sql);
+  if (hit !== undefined) return hit;
+  const stmt = db.prepare(sql);
+  byDb.set(sql, stmt);
+  return stmt;
+}
+
+// HAS LINKEDIN PUT ANYBODY IN THE HOUSE YET?
+//
+// The sub-role modes are a LinkedIn question. `people.sub_roles` -- what
+// producer.mjs filters an investor or founder pool on -- is derived from what
+// somebody's profile says they do, and on a household Mac the export is the
+// only thing that says it. So between the owner picking "investors" on
+// onboarding's first screen and their archive arriving days later, the
+// investor pool is empty for a structural reason: not "nobody has gone quiet",
+// but "nothing here knows who is an investor yet".
+//
+// THE CHEAP, CORRECT SIGNAL IS A LINK, NOT A COUNT. The onboarding progress
+// route counts DISTINCT person_key over person_event_links where source =
+// 'linkedin' and role = 'profile', because it draws that number. Nothing here
+// draws a number -- the question is has-any -- so this is an existence check
+// against the same rows, on the (source, role, ...) indexes, stopping at the
+// first one.
+//
+// PROFILE ROWS, NOT ANY LINKEDIN ROW (review finding 15). ~~`role` is
+// deliberately not in the predicate.~~ The thing the sub-role modes actually
+// filter on is `people.sub_roles`, and Connections.csv -- role 'profile' -- is
+// what carries it; messages.csv contributes ordinary counterparty links that
+// say nothing about who anybody is. Releasing the hold on one of those would
+// flip the screen from "investor cards start when your export lands" straight
+// back to "nobody qualifies yet", which is the sentence the hold exists to
+// stop. replaceProjection writes insertPeople (sub_roles) and insertEventLinks
+// inside ONE transaction, so there is no window where the links are visible and
+// the sub-roles are not; that ordering is load-bearing here and is stated so a
+// future split has something to break.
+//
+// A TABLE THAT DOES NOT EXIST YET IS NOT A LINKEDIN ROW. The projection builds
+// person_event_links lazily, so a fresh install throws `no such table` here --
+// and the honest answer to "has LinkedIn contributed anybody" on a machine with
+// no projection is no. The same catch swallows a transient read error, which
+// costs one request its pick and nothing durable; see the fallback below for
+// why that direction is the safe one.
+function linkedinHasPeople(db) {
+  try {
+    return cachedStatement(
+      db, "SELECT 1 FROM person_event_links WHERE source = 'linkedin' AND role = 'profile' LIMIT 1"
+    ).get() !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+// THE CLOCK ON THE HOLD (review finding 14). Returns when this stretch of
+// holding began, or null when it cannot be said.
+//
+// ONE WRITER, AND IT IS THE CARD ROUTE (closing review's open question). Two
+// routes both starting and stopping one row is one row with two opinions: the
+// card route reads the owner's pick off the running relationship state, the
+// progress route off whatever has been built plus the persisted config, and
+// those agree -- until a mode POST fails to persist, after which the card route
+// holds while the progress route deletes the clock on its next poll and the
+// seven-day sentence can never come due. The route that DECIDES the hold owns
+// the record of it; every other caller reads (`record: false`) and takes null
+// for an answer.
+//
+// `start` false is the ordinary case -- most installs are not held -- so the
+// read comes first and the DELETE only runs when there is something to delete.
+// A held request reads one row and writes nothing after the first.
+//
+// A clock that cannot be read is not a clock of zero: null means the reply
+// simply carries no heldSince, and the surfaces say the sentence they said
+// before it existed. Absence of a claim is not a claim.
+function modeHoldSince(db, { start, now, record }) {
+  try {
+    const row = cachedStatement(db, 'SELECT since FROM rm_mode_hold WHERE id = 1').get();
+    if (!record) return start && row !== undefined ? Number(row.since) : null;
+    if (!start) {
+      if (row !== undefined) db.prepare('DELETE FROM rm_mode_hold WHERE id = 1').run();
+      return null;
+    }
+    if (row !== undefined) return Number(row.since);
+    db.prepare('INSERT OR IGNORE INTO rm_mode_hold(id, since) VALUES (1, ?)').run(now);
+    return now;
+  } catch {
+    return null;
+  }
+}
+
+// "REQUEST NOW, IMPORT LATER" -- WHAT THE CARD ROUTE SERVES IN BETWEEN.
+//
+// The owner picks investors or founders, asks LinkedIn for their data, and
+// waits. Serving their pick honestly for those days means serving nothing at
+// all, which is the screen saying "nobody qualifies yet" about a house full of
+// people it simply cannot sort. So the pick is HELD and the cards come from
+// 'any' until LinkedIn has contributed somebody -- and the reply says so
+// (`modeFallback: 'linkedin-pending'`), because a picker that reads "investors"
+// beside a card that is not one has to be able to explain itself.
+//
+// PER REQUEST, NEVER CACHED. The moment the export lands and the projection
+// picks it up, the very next card is the owner's own pick -- no restart, no
+// TTL to wait out. That is one indexed existence check per request; see
+// linkedinHasPeople.
+//
+// 'any' IS NEVER FLAGGED: it has nothing to fall back from. Neither is the
+// MATCHER path: it does not produce per mode and its cards carry no
+// evidence.mode, so nothing there is being held from anybody -- a flag on that
+// path would announce a hold that is not happening.
+//
+// ONE FUNCTION, TWO CALLERS. The card route decides this and the onboarding
+// progress route relays it; two screens deriving it separately is two screens
+// that can disagree about whether the owner's pick is being served, so every
+// clause of the rule lives here rather than at the call sites. It is also the
+// one place that starts and stops the clock, for the same reason.
+//
+// `{ reason, since }` while the pick is held, else null. `since` may itself be
+// null -- see modeHoldSince, which also says why `record` is the card route's
+// alone.
+// AND NOT AT ALL WHILE THE MODES ARE RETIRED. With the picker gone there is no
+// pick to hold: every card comes from 'any' because that is the only mode, not
+// because an export is late, and saying 'linkedin-pending' would explain a
+// substitution nobody made. The check sits INSIDE rather than at the two call
+// sites so the clock is stopped as well as the sentence -- modeHoldSince below
+// still runs with start=false, which deletes a row left behind by an install
+// that was held when the flag flipped.
+function linkedinPendingFallback(db, policy, pick, { now = Date.now(), record = false } = {}) {
+  const held = relationshipModesLive()
+    && (pick === 'investor' || pick === 'founder')
+    && relationshipProducerConfig(policy).producer === 'eligibility'
+    && !linkedinHasPeople(db);
+  const since = modeHoldSince(db, { start: held, now, record });
+  return held ? { reason: 'linkedin-pending', since } : null;
+}
+
+// The engine person-page building uses, same seam discipline as
+// relationshipCap/relationshipProducerConfig: a start()-time override
+// (`policy.relationshipMemoryEngine`, a pre-built `{name, complete}`) wins
+// outright for tests, else createEngine() reads the owner's config file and
+// picks claude-cli when the binary is resolvable, else llama.
+function relationshipMemoryEngine(policy, engineOverride) {
+  if (policy.relationshipMemoryEngine !== undefined) return policy.relationshipMemoryEngine;
+  let cfg = {};
+  try {
+    cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
   } catch {}
+  const relationshipMemory = { ...cfg.relationshipMemory, ...(engineOverride ? { engine: engineOverride } : {}) };
+  return createEngine({ ...cfg, relationshipMemory, llama: policy.llama });
+}
+
+// The engine public lookup uses -- same seam discipline as
+// relationshipMemoryEngine, its own test-seam override
+// (policy.relationshipLookupEngine, a pre-built engine object OR null)
+// winning outright, else createLookupEngine() reads the owner's config and
+// picks claude-cli when the binary resolves, else null (no llama fallback --
+// see engines.mjs createLookupEngine). No per-request engine override: there
+// is only one valid non-null choice, so nothing to select.
+function relationshipLookupEngine(policy) {
+  if (policy.relationshipLookupEngine !== undefined) return policy.relationshipLookupEngine;
+  let cfg = {};
+  try {
+    cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+  } catch {}
+  return createLookupEngine({ ...cfg, relationshipMemory: cfg.relationshipMemory });
+}
+
+// Page-first card queue (L5 step 10 follow-on): a batch the eligibility
+// producer just wrote is, for most of its candidates, a person with no built
+// page yet -- and a card with a page (a real how_left/ask in the person's own
+// words) beats the template tie sentence every time. So a refill kicks off a
+// background page-building pass over the new batch, and the card route learns
+// to prefer whichever unjudged candidate already has one.
+//
+// A LITERAL SECOND PER PERSON, SEQUENTIAL, NEVER AWAITED BY THE REQUEST.
+// Each buildPersonPage call spends the owner's own model subscription (or the
+// loopback llama), so five candidates run one at a time with a pause between
+// them rather than five at once -- the same "do not hammer the one local
+// model" discipline the rest of this file already applies to llama calls.
+// Progress lives on `rel` (the same per-process holder /card and /refresh
+// already share) so a request that lands mid-build can report it without
+// blocking on it.
+const PAGE_BUILD_PAUSE_MS = 1000;
+const PAGE_RECENT_BUILD_MS = 7 * 86_400_000;
+
+// The per-kind refill throttle (REFILL_RETRY_MS, and its owe/reconnect
+// isolation) now lives in daily.mjs, imported above: without it, every poll
+// of an exhausted queue wrote a fresh empty batch (44 batches, 28 empty,
+// observed on the live machine since 09:12). A refill that DOES produce
+// candidates resets the throttle immediately (see the card route below); an
+// explicit POST /admin/relationship/refresh is never throttled -- the owner
+// asked for it directly.
+
+function sleep(ms) {
+  return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+}
+
+// "Has a page" for the card route's serving preference: any section readPersonPage
+// still returns (it already omits rejected items, so what is left is accepted
+// or pending) -- freshness does not matter here, only whether one exists.
+function hasBuiltPage(page) {
+  return page.sections.who !== null || page.sections.objection !== null ||
+    page.sections.how_left !== null || page.sections.asks.length > 0 || page.sections.notable.length > 0;
+}
+
+// "Lacks a page built in the last 7 days" for the BUILD decision: a page that
+// exists but is stale is still worth refreshing; one built this week is not
+// worth spending another model call on.
+function pageBuiltRecently(db, personKey, now) {
+  const page = readPersonPage(db, personKey);
+  return page.builtAt !== null && page.builtAt > now - PAGE_RECENT_BUILD_MS;
+}
+
+async function runPageBuilds(db, engine, rel, batchId, personKeys) {
+  const now = Date.now();
+  const toBuild = personKeys.filter((personKey) => !pageBuiltRecently(db, personKey, now));
+  rel.pagesBuilding = { batchId, done: 0, total: toBuild.length, lastError: null };
+  for (let i = 0; i < toBuild.length; i++) {
+    try {
+      await buildPersonPage(db, engine, toBuild[i], { now: Date.now() });
+    } catch (e) {
+      // Never throw into the request: this loop runs unawaited, well after
+      // the refill/refresh response already went out. Record the failure and
+      // keep going -- one person's engine error must not stall the rest of
+      // the batch.
+      rel.pagesBuilding.lastError = String(e?.message ?? e);
+    }
+    rel.pagesBuilding.done += 1;
+    if (i < toBuild.length - 1) await sleep(PAGE_BUILD_PAUSE_MS);
+  }
+}
+
+// Kicks off the background pass for a freshly produced batch, called after
+// produceBatch in both the eligibility /refresh branch and the card route's
+// synchronous refill. Guarded on `rel.pagesBuildingActive` so two refills in
+// quick succession (a real one racing the desk's, or the same batch getting
+// re-offered before the first pass finishes) never run two builders at once.
+//
+// QUEUED, NOT DROPPED (review finding 12). The guard used to `return` when a
+// pass was already running, which silently threw the new batch's page builds
+// away: the second refill's names never got pages at all, and since the card
+// route PREFERS a candidate that has a page, they sorted last forever. One
+// pending slot, latest-wins (an older batch's names are the ones already
+// offered), and `rel.pagesBuilding` is CLEARED when the queue drains -- it
+// used to stay on the state forever, so every later response carried a stale
+// {batchId, done:N, total:N} and the desk showed a build in progress that had
+// finished hours before, including for total:0 passes that build nothing.
+function startPageBuilds(db, policy, rel, batchId, cards) {
+  const personKeys = cards.map((c) => c.personKey);
+  if (rel.pagesBuildingActive) {
+    rel.pagesPending = { batchId, personKeys };
+    return;
+  }
+  rel.pagesBuildingActive = true;
+  const engine = relationshipMemoryEngine(policy);
+  const drain = (id, keys) => runPageBuilds(db, engine, rel, id, keys)
+    .catch((e) => { rel.pagesBuilding = { ...(rel.pagesBuilding ?? {}), lastError: String(e?.message ?? e) }; })
+    .then(() => {
+      const next = rel.pagesPending ?? null;
+      rel.pagesPending = null;
+      if (next) return drain(next.batchId, next.personKeys);
+      rel.pagesBuildingActive = false;
+      // Nothing is building any more, so nothing should say it is. A
+      // recorded lastError survives as the last pass's outcome.
+      rel.pagesBuilding = rel.pagesBuilding?.lastError
+        ? { ...rel.pagesBuilding, building: false }
+        : null;
+      return undefined;
+    });
+  drain(batchId, personKeys);
+}
+
+// WHY A QUEUED CARD CANNOT BE SERVED RIGHT NOW, or null when it can be --
+// the `servable` half of daily.mjs's CONSUMED model (see the block comment
+// there). Derived on every request and never stored: nothing here is
+// something the owner did, and a block that lifts (a mute expiring, a
+// rejected claim re-accepted) must make the card servable again.
+//
+// The global cap is deliberately NOT checked here: the cap refuses a
+// REQUEST, it does not take a card out of the queue, and folding it in would
+// make a capped-out day look like an exhausted pool to the producers.
+function cardBlockReason(db, rel, card) {
+  const gate = rel.service.controls.allowCard({
+    personKey: card.personKey, kind: card.kind,
+    // Cap deliberately wide open here -- see above.
+    cap: { max: Number.MAX_SAFE_INTEGER, windowMs: 1 },
+  });
+  if (!gate.allowed) return gate.reason; // 'suppressed' | 'muted'
+  // The quote is a REFERENCE resolved against the live row: row gone means
+  // the receipt is gone, so the card is gone (the deletion cascade honored
+  // at serve time rather than violated at store time).
+  if (Number.isInteger(card.quoteContextId)) {
+    if (db.prepare('SELECT 1 FROM context WHERE id = ?').get(card.quoteContextId) === undefined) {
+      return 'quote-gone';
+    }
+  }
+  // owe:expired-commitment carries a live claim reference, same discipline:
+  // a claim whose source was deleted, or which was rejected between produce
+  // and serve, drops the card rather than showing retracted evidence.
+  const commitmentClaimId = card.evidence?.commitment_claim_id;
+  if (Number.isInteger(commitmentClaimId)) {
+    if (!db.prepare('SELECT 1 FROM claim WHERE id = ?').get(commitmentClaimId)) return 'claim-gone';
+    const decision = db.prepare(
+      'SELECT action FROM claim_decision WHERE claim_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+    ).get(commitmentClaimId);
+    if (decision?.action === 'reject') return 'claim-rejected';
+  }
   return null;
 }
 
@@ -2454,12 +3962,314 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       const { aliases } = resolutionState(resDb);
       // The year barrier explicitly asks for fresh profiles, so it pays the
       // blocking graph rebuild instead of accepting stale-while-refresh data.
-      yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+      yearCore(db, state, { now: Date.now(), owner: loadOwner(ownerLoadOptions(policy)), aliases, blocking: true });
       return buildYear(db, state, {
-        year, owner: loadOwner(), aliases, cap: Infinity,
+        year, owner: loadOwner(ownerLoadOptions(policy)), aliases, cap: Infinity,
       }).people.length;
     });
     send(res, 200, { year, profiles, complete: true, state: 'complete' }, cors);
+    return;
+  }
+
+  // The eligibility producer's own inspection surface: the full ranked pool
+  // for a mode, no snapshot written, no card taken off anyone's queue --
+  // this is what the dev desk reads to see what the gates currently allow,
+  // separate from the one-card refresh/serve cycle below.
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/pool') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_POOL_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const rawMode = url.searchParams.get('mode') ?? 'any';
+    if (!RELATIONSHIP_MODES.includes(rawMode)) {
+      throw badRequest(`"mode" must be one of: ${RELATIONSHIP_MODES.join(', ')}`);
+    }
+    // The desk's Pool tab reviews the gate set itself, offered or not -- the
+    // one place the "recently offered" exclusion (below, and in produceBatch)
+    // is optional rather than automatic.
+    const includeOffered = url.searchParams.get('includeOffered') === '1';
+    // Desk override only, same reasoning as includeOffered: the ordinary
+    // batch-producing path (produceBatch) never widens past the anonymity
+    // gate, but the desk's Pool tab can ask to see bare-address people too.
+    const includeAnonymous = url.searchParams.get('includeAnonymous') === '1';
+    // Desk override only: absent, eligiblePool applies its own default
+    // (MIN_DEPTH_MESSAGES). The ordinary batch-producing path (produceBatch,
+    // called without this param) never widens the floor.
+    const rawMinDepth = url.searchParams.get('minDepth');
+    let minDepth;
+    if (rawMinDepth !== null) {
+      minDepth = Number(rawMinDepth);
+      if (!Number.isInteger(minDepth) || minDepth < 0) {
+        throw badRequest('"minDepth" must be a non-negative integer');
+      }
+    }
+    const rows = eligiblePool(db, {
+      mode: rawMode, now: Date.now(), includeOffered, includeAnonymous,
+      ...(minDepth !== undefined ? { minDepth } : {}),
+    });
+    send(res, 200, { mode: rawMode, count: rows.length, rows }, cors);
+    return;
+  }
+
+  // Modes are queues, not refreshes (L5 mode-picker follow-on): switching the
+  // widget's mode picker used to POST /refresh, which unconditionally minted
+  // a NEW batch (and recorded a 'shown' on a fresh person) on every click --
+  // burning the 7-day cooldown on people never actually looked at, and the
+  // card only visibly changed on the SECOND click because the first click's
+  // response landed after the GET /card that followed it. This route only
+  // ever sets rel.mode; it produces nothing and records no event. The next
+  // GET /card serves whatever unjudged reconnect card already exists in that
+  // mode (see the card route's mode filter below) or refills exactly once,
+  // through the same synchronous eligibility-producer path any other refill
+  // uses.
+  //
+  // AND IT STILL ACCEPTS ONE WITH THE MODES RETIRED (2026-09-13), which is
+  // deliberate rather than an oversight. The route writes rel.mode and the
+  // owner's config key; serving reads neither while the flag is off (see
+  // relationshipModesLive), so the write decides nothing -- and refusing it
+  // instead would 400 at a widget that has not shipped its update yet, over a
+  // key the config has always accepted and the file already carries. When the
+  // flag goes back on, the pick the owner made is the pick they get.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/mode') {
+    const rel = relationshipState(db, policy);
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_MODE_FIELDS);
+    if (!RELATIONSHIP_MODES.includes(body?.mode)) {
+      throw badRequest(`"mode" must be one of: ${RELATIONSHIP_MODES.join(', ')}`);
+    }
+    rel.mode = body.mode;
+    // AND KEPT, because the screen that offers this row promises it is: "your
+    // choice is kept by the reader". Before this line the choice lived only in
+    // rel.mode, so the next hermes restart reverted an owner who picked
+    // founders back to the producer config's default and nothing on screen
+    // ever said so. owner.mjs owns the only atomic read-modify-write of the
+    // config file in this repo; the running mode above is what THIS process
+    // serves, the file is what the next one reads.
+    //
+    // A failed write does not fail the request: the mode the owner just picked
+    // is already in effect for this process, and answering 4xx would make the
+    // picker look broken when what actually broke is durability. It is
+    // reported instead, and logged as a type -- no path, no mode text, the
+    // same counts-and-reasons discipline every other log line here keeps.
+    let persisted = true;
+    try {
+      setRelationshipMode({ mode: body.mode, ...ownerConfigTarget(policy) });
+    } catch (error) {
+      persisted = false;
+      console.warn(`relationship mode not persisted (${error?.name ?? 'Error'})`);
+    }
+    send(res, 200, { mode: rel.mode, persisted }, cors);
+    return;
+  }
+
+  // THE ONE SWITCH THAT DECIDES WHETHER EXCERPTS LEAVE THIS MAC.
+  //
+  // Onboarding's setup screen offers the owner's own Claude subscription for
+  // reading and drafting. Turning it on writes relationshipMemory.engine;
+  // turning it off deletes the key, because engines.mjs treats an ABSENT key
+  // as "loopback llama, nothing leaves the Mac" and writing a string for the
+  // off state would invent a fourth value nothing reads.
+  //
+  // Here rather than in the connect service, and not in the page at all. This
+  // process re-reads the config file per call (relationshipMemoryEngine), so
+  // the change takes effect with no restart; owner.mjs already owns the only
+  // atomic read-modify-write of that file in the repo; and a page that could
+  // write the privacy switch directly is a page that could write it without
+  // the owner. Bearer-only, like every route under handleAdmin.
+  if (req.method === 'POST' && url.pathname === '/admin/config/engine') {
+    if (!hasJsonMediaType(req)) {
+      send(res, 415, { error: 'content-type must be application/json' }, cors);
+      return;
+    }
+    const body = await readJson(req);
+    assertClosedFields(body, CONFIG_ENGINE_FIELDS);
+    if (!RELATIONSHIP_ENGINES.includes(body?.engine)) {
+      throw badRequest(`"engine" must be one of: ${RELATIONSHIP_ENGINES.join(', ')}`);
+    }
+    const result = setRelationshipEngine({ engine: body.engine, ...ownerConfigTarget(policy) });
+    send(res, 200, { state: 'ok', ...result }, cors);
+    return;
+  }
+
+  // WHAT LETS A CARD EXIST AT ALL, RECORDED FROM ONBOARDING.
+  //
+  // Two keys a fresh install has neither of, and hermes reads both as "no owner
+  // has chosen", which is the right reading and the wrong outcome on a machine
+  // where no owner has yet had the chance.
+  //
+  // relationshipCap (above) fails closed: no relationshipMemory.capPerDay, no
+  // cards, ever, because thresholds are the owner's to set and never a default
+  // invented by this server. That rule is right and it stays. What was missing
+  // is anything that lets the OWNER set it: a fresh install's config file is
+  // `{}` and the peek route answered 'no-cap-configured' forever.
+  //
+  // relationshipProducerConfig reads an absent producer as the legacy matcher
+  // path, "the safe default for an owner who has never touched this key". A
+  // fresh install has no such owner -- every card judgment in the backup was
+  // made against the eligibility producer and the shipped card IS that
+  // producer -- so absent means the new install runs the path nobody is on.
+  //
+  // So the write is an onboarding action, not a server default. Screen 1 says
+  // "one person a day" and "one card a day" above the button that starts the
+  // reader; Bridge posts here when that button is pressed, and this records
+  // what the owner was shown. ensureRelationshipDefaults writes each key ONLY
+  // when it is absent, so an owner who has since chosen a different number -- a
+  // 0 that means no cards, a producer deliberately left on matcher -- is never
+  // overwritten by a later run of the flow.
+  //
+  // Bearer-only and closed-field, like /admin/config/engine beside it: the
+  // page asks hermes, and never touches the config file itself. Both fields are
+  // required rather than defaulted here, because a default supplied by this
+  // route is exactly the thing the step-4 rule says the server does not get to
+  // choose; the caller states what the owner was shown.
+  if (req.method === 'POST' && url.pathname === '/admin/config/card') {
+    if (!hasJsonMediaType(req)) {
+      send(res, 415, { error: 'content-type must be application/json' }, cors);
+      return;
+    }
+    const body = await readJson(req);
+    assertClosedFields(body, CONFIG_CARD_FIELDS);
+    if (!Number.isInteger(body?.capPerDay) || body.capPerDay < 1 || body.capPerDay > MAX_CAP_PER_DAY) {
+      throw badRequest(`"capPerDay" must be an integer from 1 through ${MAX_CAP_PER_DAY}`);
+    }
+    if (!RELATIONSHIP_PRODUCERS.includes(body?.producer)) {
+      throw badRequest(`"producer" must be one of: ${RELATIONSHIP_PRODUCERS.join(', ')}`);
+    }
+    const result = ensureRelationshipDefaults({
+      capPerDay: body.capPerDay, producer: body.producer, ...ownerConfigTarget(policy),
+    });
+    send(res, 200, { state: 'ok', ...result }, cors);
+    return;
+  }
+
+  // AND THE READ SIDE OF THE SAME FOUR KEYS. Settings has no way to show the
+  // owner what the card is actually configured to do -- the mode picker lives
+  // on the card, the cap has no control at all, and the engine switch (the one
+  // that decides whether excerpts leave this Mac) exists only inside the
+  // onboarding flow, so once that flow is done nobody can see it again.
+  //
+  // WHAT IS ON DISK, NOT WHAT THIS PROCESS IS RUNNING. Every value here comes
+  // from readOwnerConfig through the ownerConfigPath seam, so a start()-time
+  // override (policy.relationshipCap, policy.relationshipProducerConfig,
+  // policy.relationshipMemoryEngine -- the test seams) is deliberately NOT
+  // reflected: this route answers "what did the owner choose", and a test
+  // harness's override is not the owner. A settings page that showed an
+  // override back to the owner as their own setting would be lying about a
+  // file they can hold us to.
+  //
+  // ABSENT IS null, NOT A DEFAULT. relationshipProducerConfig reads an absent
+  // producer as 'matcher' and an absent mode as 'any' because it must answer
+  // SOMETHING to run a batch; a settings row must not turn that fallback into
+  // a claim that the owner picked it. Same for the cap, whose absence is the
+  // whole of finding 8's dead end ("the daily card is switched off in your
+  // config"): null means nobody has chosen, which is a different row from a
+  // chosen 0.
+  //
+  // A read, and only a read: no producer run, no refill, no cap bookkeeping,
+  // nothing recorded. Bearer-only like every route under handleAdmin, and no
+  // media type asked of a GET that carries no body.
+  if (req.method === 'GET' && url.pathname === '/admin/config/card') {
+    const chosen = readOwnerConfig(policy)?.relationshipMemory;
+    const named = (value) => (typeof value === 'string' && value.length > 0 ? value : null);
+    send(res, 200, {
+      mode: named(chosen?.mode),
+      capPerDay: Number.isInteger(chosen?.capPerDay) ? chosen.capPerDay : null,
+      producer: named(chosen?.producer),
+      engine: named(chosen?.engine),
+    }, cors);
+    return;
+  }
+
+  // ONBOARDING'S FIRST-LOAD TABLE. Counts, and the state of the thing that
+  // turns counts into people. No row text, no names, no identifiers.
+  //
+  // The screen this feeds says one of four things per source, and it says them
+  // without a wall-clock timer, because "we have waited N minutes" is not a
+  // fact about whether anything was read. The arithmetic lives here rather
+  // than in the page for the same reason the colours are named rather than
+  // computed twice: three of the four verdicts are easy to get wrong, and one
+  // of them was already wrong in the brief this route was built from.
+  //
+  //   reading   the projection has not caught up with the rows ingested, so
+  //             nobody has looked at them yet. Grey. It OUTRANKS green: a
+  //             people count drawn from a projection built before a purge can
+  //             exceed anything real, so a stale projection is never green.
+  //   ok        people > 0, with the projection demonstrably current.
+  //   empty     rows arrived, the projection read every one of them, and
+  //             found nobody. This is the honest amber, and it fires the
+  //             instant that is true rather than after a timeout — it is what
+  //             would have caught the Gmail empty-sender bug on the first pass.
+  //   failing   two or more consecutive failed runs for that connector. This
+  //             outranks everything, including reading: a source that cannot
+  //             be read is not waiting on the projection.
+  //
+  // WHICH SOURCES GET A ROW AT ALL is the other thing the first version got
+  // wrong: it listed every source with rows. Two gates now, both in
+  // listedOnboardingSource -- the source must be able to mint people
+  // (PERSON_SOURCE_POLICY 'participant') and its connector must not be
+  // switched off in the feature registry. Everything else with rows collapses
+  // into `dormant: {sources, rows}`, one grey line on the page, because a
+  // photo library and a switched-off bridge are neither a failure nor
+  // something the owner can act on.
+  //
+  // THREE SOURCES ARE COUNTED DIFFERENTLY AND SAY SO, because the obvious
+  // uniform count is wrong for all three:
+  //
+  //   calendar  every calendar link is an ATTENDEE (or the organizer), and
+  //             graph.mjs marks all of them authored=0 -- an invitation has no
+  //             author. Under the authored count calendar is permanently 0
+  //             against however many rows it has: on the owner's machine, 0
+  //             out of 21,630, amber, about a calendar that was working
+  //             perfectly. Counted on attendee/organizer links and labelled
+  //             peopleKind:'met' so the cell heads "people you met".
+  //   linkedin  a Connections.csv export is entirely role='profile',
+  //             authored=0. Under an authored=1 count it is permanently 0
+  //             people against thousands of rows — permanent amber, on the
+  //             most common input this connector has. Counted on profiles and
+  //             labelled peopleKind:'listed' so the page's header for that
+  //             cell reads "people in your export" rather than claiming they
+  //             wrote to you.
+  //   contacts  writes no `context` rows AT ALL (connectors/sources/
+  //             contacts.mjs upserts into state.db and never ingests), and it
+  //             is absent from PERSON_SOURCE_POLICY. A row fed from `context`
+  //             shows 0/0 forever. Counted from state.db's contact_ids and
+  //             labelled peopleKind:'names'.
+  //
+  // AND TWO FACTS ABOUT LINKEDIN THAT RIDE ALONG BUT ARE NOT CACHED WITH THE
+  // REST, because the body below is held for five seconds and these two are
+  // the screen's answer to "what is happening right now":
+  //
+  //   linkedinExportReady  when LinkedIn mailed to say the archive is
+  //                        downloadable (the mail connector's marker, see
+  //                        connectors/lib/linkedinExport.mjs), so the shelf can
+  //                        badge the tile and say "open the email" instead of
+  //                        repeating "needs your data export". A timestamp or
+  //                        null, never the subject.
+  //   modeFallback         the same answer the card route gives, RELAYED
+  //                        rather than re-derived -- two screens deciding
+  //                        separately whether the owner's pick is being held is
+  //                        two screens that can disagree about it. Absent when
+  //                        the pick is being served normally.
+  if (req.method === 'GET' && url.pathname === '/admin/onboarding/progress') {
+    // THE PICK WITHOUT BUILDING THE SERVICE (review finding 19). This route is
+    // polled for as long as screen 6 is open, and relationshipState() opens the
+    // connectors' state.db, the resolutions database and the whole relationship
+    // service on first call. The card route is what legitimately builds that;
+    // here the running pick is READ if it has been built and the persisted
+    // config answers otherwise -- which is exactly what relationshipMode does
+    // with a holder in hand, and exactly what it falls back to without one.
+    const built = (policy.relationshipHolder ?? policy).__relationship ?? {};
+    // READ ONLY. The card route is the single writer of the hold clock; this
+    // one reports what it finds and says nothing when it finds nothing.
+    const held = linkedinPendingFallback(db, policy, relationshipMode(built, policy));
+    send(res, 200, {
+      ...cachedOnboardingProgress(db, policy),
+      linkedinExportReady: exportReadyAt(installHome(policy)),
+      ...(held === null
+        ? {}
+        : { modeFallback: held.reason, ...(held.since === null ? {} : { heldSince: held.since }) }),
+    }, cors);
     return;
   }
 
@@ -2471,10 +4281,52 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const rel = relationshipState(db, policy);
     if (rel.refreshing) { send(res, 200, { started: false, already: true }, cors); return; }
     rel.refreshing = true;
+    rel.lastError = null;
+
+    // The eligibility producer (no model, deterministic) short-circuits the
+    // matcher path entirely: it writes its own batch/snapshot rows (same
+    // shape hydrateCards reads) and returns. Selected by config so an owner
+    // who has not opted in keeps the existing matcher behavior untouched.
+    const producerConfig = relationshipProducerConfig(policy);
+    if (producerConfig.producer === 'eligibility') {
+      const body = await readJson(req).catch(() => null);
+      // WITH THE MODES RETIRED THIS PRODUCES UNDER 'any', whatever the body or
+      // the config says. A batch produced under a mode the serve loop filters
+      // out is a batch nobody can ever be shown, and the refill that would
+      // have replaced it is throttled per (kind, mode) -- so honouring a mode
+      // here while ignoring it there is how the queue goes quiet.
+      const mode = !relationshipModesLive()
+        ? 'any'
+        : (RELATIONSHIP_MODES.includes(body?.mode) ? body.mode : (rel.mode ?? producerConfig.mode));
+      try {
+        const now = Date.now();
+        const { batchId, cards } = produceBatch(db, { mode, now });
+        rel.mode = mode;
+        rel.batch.reconnect = batchId;
+        // Replace only reconnect cards of THIS SAME MODE -- modes are queues
+        // (L5 mode-picker follow-on): an unjudged batch in a DIFFERENT mode
+        // must survive an explicit refresh of this one, same as it survives
+        // the card route's own mode-switch refill. Owe is untouched either
+        // way (it was never in the 'reconnect' filter to begin with).
+        rel.cards = [...rel.cards.filter((c) => !(c.kind === 'reconnect' && c.evidence?.mode === mode)), ...cards];
+        rel.refreshing = false;
+        // An explicit refresh is a refill too (just never throttled -- the
+        // owner asked for it directly): keep the card route's own
+        // per-(kind,mode) throttle bookkeeping current so a poll right after
+        // this doesn't act on a stale throttle from before the owner's ask.
+        rel.refill[reconnectRefillKey(mode)] = { at: now, empty: cards.length === 0 };
+        if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
+      } catch (e) {
+        rel.refreshing = false;
+        rel.lastError = String(e?.message ?? e);
+      }
+      send(res, 200, { started: true }, cors);
+      return;
+    }
+
     // Deliberately not awaited: the route answers now, the batch lands when
     // the local model is done, and GET /card serves the previous batch (or
     // nothing) in the meantime. Errors are recorded on the state, not lost.
-    rel.lastError = null;
     (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
       llamaCall: rel.llamaCall, now: Date.now(),
     }).then((result) => {
@@ -2496,8 +4348,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
             ...card.evidence }),
           card.producer_version, 'combined-v13', now).lastInsertRowid);
       }
-      rel.batchId = batchId;
-      rel.cards = result.cards;
+      // The matcher path has always dealt only in reconnect-kind cards; it
+      // predates Owe. Same "replace only this kind's slice" merge as the
+      // eligibility branch above, generalized over whatever kind(s) this
+      // batch actually carries rather than hardcoding 'reconnect'.
+      rel.batch.reconnect = batchId;
+      const kinds = new Set(result.cards.map((c) => c.kind));
+      rel.cards = [...rel.cards.filter((c) => !kinds.has(c.kind)), ...result.cards];
       rel.refreshing = false;
     }).catch((e) => { rel.refreshing = false; rel.lastError = String(e?.message ?? e); });
     send(res, 200, { started: true }, cors);
@@ -2505,17 +4362,450 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   }
 
   if (req.method === 'GET' && url.pathname === '/admin/relationship/card') {
+    // ?mode=<any|founder|investor> -- ONE REQUEST'S MODE, AND NOTHING ELSE'S.
+    //
+    // ~~"accepted-and-ignored for v1"~~ (the paragraph below, kept because it
+    // explains why it was ignored and what changed). That was written when this
+    // route only served whatever the last refresh had produced. It refills
+    // synchronously now, per mode, behind a per-mode throttle -- so a mode named
+    // here is one this request can actually produce and serve under, which is
+    // what the panel's "show me anyone, just this once" needs.
+    //
+    // JUST THIS ONCE IS THE POINT. It does not write rel.mode and it does not
+    // touch the owner's config: POST /admin/relationship/mode is the only thing
+    // that changes what the owner is ON, because that is a decision and this is
+    // a look. The reply still reports `mode` as the owner's own pick, reports
+    // `servedMode` as the mode the card in hand was produced under (this one),
+    // and carries `oneOff: true` so the panel need not infer from those two
+    // disagreeing that its picker should stay put.
+    //
+    // It DOES produce a batch under the named mode, which is durable: the same
+    // batch a refresh in that mode would write, recorded with its own
+    // evidence.mode. That is the price of serving a real card rather than a
+    // preview, and it makes no claim about what the owner prefers.
+    //
+    // ~~AND IT IS ONE THE PRODUCT STILL HAS.~~ With the modes retired (see
+    // relationshipModesLive) there is no wider pool to ask for and no picker to
+    // leave standing, so `?mode=` names nothing: it is ignored exactly as an
+    // unrecognised value always was, and the reply carries no `oneOff`. The
+    // paragraphs above are kept whole because they are the contract this route
+    // goes back to the moment the flag is on again.
+    const modesLive = relationshipModesLive();
+    const askedMode = modesLive && RELATIONSHIP_MODES.includes(url.searchParams.get('mode'))
+      ? url.searchParams.get('mode')
+      : null;
+    // ~~A `mode` query param is accepted-and-ignored here for v1: this route
+    // only ever serves whatever the last refresh's batch produced (any mode
+    // it ran with), and re-filtering by a mode the caller now prefers is a
+    // ranking decision, not a serve-time one. Re-refresh with the mode you
+    // want instead.
+    //
+    // ?peek=1 -- A PEEK, NOT A SERVE (review finding 4, and daily.mjs's
+    // model comment). The widget's 10-minute background poll asks "is there
+    // a card, and what would it tease"; it must not record 'shown', must not
+    // spend a cap slot, must not start this person's 7-day pool cooldown,
+    // and must not flip the producers' turn (pickProducer reads 'shown').
+    // Before the split the poll did all four for cards no human ever saw.
+    // A peek still refills and still applies the cap and the servability
+    // gate, so the orb never lights for a card that cannot be shown, and it
+    // answers a TEASE (name/kind/counters) rather than the whole card --
+    // the panel's own pull is what serves the receipt.
+    const peek = url.searchParams.get('peek') === '1';
+    // ?expect=<snapshot_id> -- WHAT A PEEK PROMISED (review F finding 13, and
+    // daily.mjs's LIVE model). A peek answers with the snapshot_id it would
+    // serve; the panel's own pull hands it back here, and if that snapshot is
+    // still live and servable it is the one served, whatever has happened to
+    // the ordering since. It is not a capability: it can only name a card
+    // already in this process's queue that this request would already be
+    // allowed to serve, and it does not bypass the cap, the mode filter or
+    // the servability gate. A stale or unknown value is IGNORED (not an
+    // error): the card it named was judged, muted or expired between the two
+    // requests, which is the ordinary case and not something to fail on.
+    const expectRaw = url.searchParams.get('expect');
+    const expect = expectRaw !== null && /^\d+$/u.test(expectRaw) ? Number(expectRaw) : null;
+    // ?pull=1 -- THE OWNER ASKED FOR ANOTHER ONE (2026-09-13, owner decision).
+    //
+    // The cap counts interruptions, and a card the owner rejected interrupted
+    // them for nothing. So a rejection buys a PULL: a serve that the day's
+    // spent interruption does not refuse, up to PULLS_PER_DAY, recorded as
+    // `pulled` on its own 'shown' row so it is not counted as an interruption
+    // either -- by this cap today or by any reading of the log afterwards.
+    //
+    // IT CHANGES THE GATE, NOT THE RECORDING, which is what keeps it
+    // orthogonal to ?peek=1: a peek with pull=1 asks "would another one be
+    // served", spends nothing and records nothing.
+    //
+    // NOTHING SENDS THAT COMBINATION TODAY (contrarian review finding 10, said
+    // here rather than implied). Bridge's relCardPeek builds ?peek=1 and an
+    // optional mode; the pull flag rides the serve alone. It is kept because it
+    // is the peek answering the same question the serve does -- a gate that
+    // ignored `pull` would have the orb's poll and the panel's button disagree
+    // about whether anything is left -- and because an empty state that wants
+    // to draw the button without spending a pull has exactly one honest way to
+    // ask. One clause, and a peek that lies is what the peek/serve split exists
+    // to prevent.
+    //
+    // NOT A CAPABILITY, the same way `expect` is not one: it cannot reach a
+    // card this request would not otherwise be allowed to serve (the mute, the
+    // suppression, the servability gate and the producer's turn are all
+    // upstream of it), and its only power is over the owner's own attention
+    // budget, which is the thing the owner is asking to spend.
+    const pull = url.searchParams.get('pull') === '1';
     const rel = relationshipState(db, policy);
+    // THE OWNER'S STANDING PICK, ONCE, and whether this install can serve it
+    // yet. Every branch below reports `mode` as this value -- it is what the
+    // owner is ON -- and `modeFallback` beside it when the pick is being held
+    // for a LinkedIn export that has not arrived (see linkedinPendingFallback).
+    //
+    // NOT WHILE A MODE IS NAMED IN THE QUERY. `?mode=` is the owner asking for
+    // one specific look, and answering a request that named 'founder' with
+    // 'any' would defeat the one-off entirely -- including the panel's own
+    // widen button, which is a one-off ask for 'any'. A named mode is the
+    // request's decision, and `oneOff` is how the reply says so.
+    const producerConfig = relationshipProducerConfig(policy);
+    // 'any' IS THE ONLY ANSWER WHILE THE MODES ARE RETIRED, and it is reported
+    // rather than omitted: `mode` is on every branch of this route because a
+    // reply without one repainted the picker (round-4 finding 1), and a widget
+    // that still reads the field must read something true.
+    const pick = modesLive ? relationshipMode(rel, policy) : 'any';
+    const held = askedMode === null
+      ? linkedinPendingFallback(db, policy, pick, { record: true })
+      : null;
+    const modeFallback = held?.reason ?? null;
+    // WHAT EVERY BRANCH BELOW CARRIES BESIDE `mode`. `heldSince` is how long
+    // this stretch of holding has run (review finding 14): the surfaces say
+    // "investor cards start WHEN your linkedin export lands", and an owner who
+    // never imports needs that sentence to be able to become a different one.
+    // Omitted rather than nulled when the clock could not be read -- a page
+    // that sees no heldSince says what it said before there was one.
+    const heldFields = held === null
+      ? {}
+      : { modeFallback: held.reason, ...(held.since === null ? {} : { heldSince: held.since }) };
     const cap = relationshipCap(policy);
-    if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
-    for (const card of rel.cards) {
-      // A card leaves the queue when the owner has acted on it (accepted or
-      // dismissed), and suppression/mute/cap are re-checked at serve time --
-      // the plan's "immediately before display" call site.
-      const acted = db.prepare(
-        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
-      ).get(card.snapshot_id);
-      if (acted) continue;
+    // WITH THE MODE, like every other answer this route gives. A fresh
+    // install has no cap until onboarding's card-config POST lands, so this
+    // is the FIRST branch a replayed onboarding hits -- and a reply with no
+    // mode in it is what repainted "anyone" over the owner's pick.
+    if (!cap) {
+      send(res, 200, { card: null, reason: 'no-cap-configured', mode: pick, ...heldFields }, cors);
+      return;
+    }
+
+    // Refill on empty: with a batch depth of 5 (produceBatch's/produceOweBatch's
+    // default), the owner judging every card in a batch used to leave the
+    // queue permanently empty until something called /refresh -- the
+    // widget's orb never lit again. Both eligibility-family producers are one
+    // SQL statement plus a handful of inserts (no model call), so this can
+    // run synchronously in the GET itself. Gated on rel.refreshing so a
+    // refill can never race an in-flight /refresh; gated on the eligibility
+    // producer because the matcher path has no cheap synchronous equivalent
+    // -- an owner who has not opted into the eligibility producer keeps
+    // today's behavior (refill only via an explicit /refresh call, serving
+    // from the whole queue with no per-kind split).
+    //
+    // `servingKind` names which producer's kind this request is serving from
+    // (daily.mjs's alternation decision) -- null means "serve from the whole
+    // queue, unfiltered", the matcher path's only mode. producerConfig is read
+    // at the top of this route, beside the pick it also decides.
+    let refillThrottled = false;
+    let retryAfterMs = 0;
+    // Set only when the MODE is what is empty -- see modeEmptyCounts.
+    let modeEmpty = null;
+    let servingKind = null;
+    if (producerConfig.producer === 'eligibility' && !rel.refreshing) {
+      const now = Date.now();
+      // The owner's own addresses, for owe.mjs's mail participant guard
+      // (review F finding 12): a message the owner is on twice under two of
+      // their own addresses has one counterparty, not two. Read once per
+      // process from the same local config people/graph.mjs takes its
+      // identity from -- owe.mjs holds none of its own, deliberately.
+      if (rel.ownerAddresses === undefined) {
+        // THROUGH THE SEAM (round-4 finding 11). This comment used to say
+        // hermes had no ownerConfigPath seam at all; it acquired one with the
+        // three config-writing routes above, and a card route that reads the
+        // owner from the real homedir while the mode route beside it writes a
+        // test's tmpdir is the half-applied seam that finding names. Every
+        // loadOwner() in this file that has `policy` in hand now goes through
+        // ownerLoadOptions; the four that sit in policy-less people helpers
+        // are listed there.
+        try {
+          rel.ownerAddresses = loadOwner(ownerLoadOptions(policy)).addresses ?? null;
+        } catch { rel.ownerAddresses = null; }
+      }
+      // The request's own mode wins for THIS request only (see askedMode
+      // above); absent one, the process pick, then the persisted config.
+      // WHICH MODE THIS REQUEST PRODUCES AND SERVES UNDER. The held pick
+      // resolves to 'any' here and nowhere else: rel.mode and the owner's
+      // config are untouched, so the moment LinkedIn lands the next request
+      // produces under the pick again with nothing to undo.
+      // WHAT THIS REQUEST PRODUCES UNDER. 'any' whenever the modes are
+      // retired -- not rel.mode, and not the persisted config either: an
+      // owner who picked investors before the flag flipped still has that key
+      // on disk, and producing an investor batch that the serve filter below
+      // then drops would wedge the queue behind its own refill throttle.
+      const reconnectMode = !modesLive || modeFallback !== null
+        ? 'any'
+        : (askedMode ?? rel.mode ?? producerConfig.mode);
+      const refillRetryMs = refillRetryMsFor(db);
+      // The cross-kind exclusion, narrowed to the queue THIS route would
+      // serve from -- daily.mjs's one LIVE definition, same five clauses as
+      // the turn check and the serve loop below (review F findings 4 and 8).
+      // Without the mode an off-mode reconnect card held its person out of
+      // Owe for a week while never being servable; without `servable` a card
+      // whose quote row was deleted did the same.
+      const reconnectLiveFilter = {
+        mode: reconnectMode,
+        ...(producerConfig.producer === 'eligibility' ? { producerVersion: PRODUCER_VERSION } : {}),
+        servable: (card) => cardBlockReason(db, rel, card) === null,
+      };
+      const dailyPolicy = {
+        producers: {
+          owe: (dailyDb, { now: at }) => produceOweBatch(dailyDb, {
+            now: at, liveFilter: reconnectLiveFilter, ownerAddresses: rel.ownerAddresses,
+          }),
+          // The owner's last pick from the mode picker wins over the config
+          // default: a refill on an empty queue must keep serving the mode
+          // they asked for, not quietly widen back to 'any'.
+          reconnect: (dailyDb, { now: at }) => produceBatch(dailyDb, { mode: reconnectMode, now: at }),
+        },
+        // A card carried in rel.cards under a producer_version this producer
+        // no longer runs (see CURRENT_PRODUCER_VERSION / hydrateCards above)
+        // must not count as "already unjudged" here either -- otherwise a
+        // rules change that tightened a producer's gates would still starve
+        // its refill behind a queue chosen under the rules just rejected.
+        currentVersions: CURRENT_PRODUCER_VERSION,
+        // Shortened while this install has never shown a reconnect card: the
+        // pool is filling under the daemon's first-load sprint and the owner
+        // is watching it happen. See daily.mjs refillRetryMsFor.
+        refillRetryMs,
+        // A queued card that cannot be served does not hold its kind's turn
+        // (review findings 1 and 2): the muted/suppressed person, the card
+        // whose quote row was deleted, the commitment claim that was
+        // rejected between produce and serve. Without this the producer sat
+        // on a card the serve loop below skips and the route answered
+        // {card:null} on every poll -- for the full 30 days of a mute.
+        servable: (card) => cardBlockReason(db, rel, card) === null,
+        // Modes are queues (L5 mode-picker follow-on): reconnect's
+        // unjudged-check and refill throttle are scoped to the owner's
+        // current mode pick, so a mode with its own unjudged card serves it
+        // without producing, and a mode's own empty-refill throttle never
+        // blocks a DIFFERENT mode the owner switches to next. Owe has no
+        // modes -- modeFor/refillKey return undefined/'owe' for it, the same
+        // plain per-kind behavior as before this follow-on.
+        modeFor: (kind) => (kind === 'reconnect' ? reconnectMode : undefined),
+        refillKey: (kind) => (kind === 'reconnect' ? reconnectRefillKey(reconnectMode) : kind),
+        onBatchProduced: (kind, batchId, cards) => {
+          if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
+        },
+      };
+      try {
+        const decision = produceDailyBatch(db, dailyPolicy, rel, { now });
+        if (decision.servingKind === null) {
+          refillThrottled = true;
+          // Both kinds are exhausted (or throttled from a previous request):
+          // retry after whichever kind was most recently attempted cools down.
+          const at = Math.max(
+            rel.refill.owe.at ?? 0,
+            rel.refill[reconnectRefillKey(reconnectMode)]?.at ?? 0
+          );
+          retryAfterMs = Math.max(0, refillRetryMs - (now - at));
+          // AND WHETHER IT IS THE MODE THAT IS EMPTY, rather than the house.
+          //
+          // NEVER WHILE THE PICK IS HELD. 'pool-exhausted-mode' exists so the
+          // panel can offer to widen to 'any' -- and under the fallback the
+          // widening has already happened, so the offer would ask the owner to
+          // choose what they are already being served. reconnectMode is 'any'
+          // on that path and modeEmptyCounts answers null for 'any' anyway;
+          // this says it rather than leaning on it, because the reason is the
+          // fallback and not the mode's name.
+          // NOR WHILE THE MODES ARE RETIRED, for the same reason as the hold:
+          // 'pool-exhausted-mode' exists so the panel can offer to widen to
+          // 'any', and there is nothing to widen from. reconnectMode is 'any'
+          // on that path and modeEmptyCounts answers null for 'any' anyway;
+          // this says it rather than leaning on it.
+          modeEmpty = modeFallback !== null || !modesLive
+            ? null
+            : modeEmptyCounts(db, rel, reconnectMode, reconnectRefillKey(reconnectMode), now);
+        } else {
+          servingKind = decision.servingKind;
+        }
+      } catch (e) {
+        rel.lastError = String(e?.message ?? e);
+      }
+    }
+    if (refillThrottled) {
+      // WITH THE MODE, like every other answer (round-4 finding 1). This is
+      // the branch a configured-but-empty install lands on -- cap recorded,
+      // producer selected, nothing to produce from yet -- so a reply without
+      // one here repaints the picker exactly where the finding says it must
+      // not.
+      send(res, 200, { card: null,
+        // 'pool-exhausted' still means the house is empty. 'pool-exhausted-mode'
+        // means the PICKER is: there are people to show, none of them in the
+        // mode being asked for, and the panel can offer to widen instead of
+        // telling the owner to come back later.
+        reason: modeEmpty !== null && modeEmpty.mode === 0 ? 'pool-exhausted-mode' : 'pool-exhausted',
+        retryAfterMs,
+        mode: pick,
+        ...heldFields,
+        ...(modeEmpty === null ? {} : { counts: modeEmpty }),
+        ...(askedMode === null ? {} : { oneOff: true }),
+        ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
+      return;
+    }
+
+    // The serving set: the single kind daily.mjs picked (eligibility path),
+    // or the whole queue (matcher path, or an eligibility-path exception
+    // above -- serve whatever is already there rather than answering nothing
+    // on a transient error). Reconnect is additionally filtered to the
+    // owner's current mode -- modes are queues, so a reconnect card produced
+    // under a DIFFERENT mode must sit unserved rather than leaking into
+    // whichever mode is live right now. Owe carries no mode (evidence.mode
+    // is always absent on an Owe card) and is unaffected; the matcher path
+    // never sets rel.mode, so its cards are unaffected too.
+    // askedMode first, for the same reason the refill used it: a card produced
+    // under a one-off mode has that mode in its evidence, and filtering the
+    // queue by rel.mode here would drop the very card this request just made.
+    //
+    // RETIRED MODES SERVE 'any', AND ONLY 'any'. Every eligibility-path
+    // reconnect snapshot records its mode, so filtering to 'any' is what keeps
+    // an unjudged investor batch -- produced before the flag flipped, or by a
+    // /refresh that named one -- from being served under a reply that says
+    // 'any'. The MATCHER path is left unfiltered exactly as it is today: its
+    // snapshots carry no evidence.mode at all, so 'any' would match none of
+    // them and the orb would go dark on an install that never had modes.
+    const serveMode = !modesLive
+      ? (producerConfig.producer === 'eligibility' ? 'any' : null)
+      : (modeFallback !== null ? 'any' : (askedMode ?? rel.mode));
+    const servingQueue = (servingKind === null ? rel.cards : rel.cards.filter((c) => c.kind === servingKind))
+      .filter((c) => c.kind !== 'reconnect' || serveMode == null || c.evidence?.mode === serveMode);
+
+    // PAGE-FIRST: among the unjudged candidates, serve whichever already has
+    // a built page (accepted or pending items -- readPersonPage already omits
+    // rejected ones) before falling back to rank order. A page-first refill
+    // usually means the top of the batch is still being built when this GET
+    // lands, so the desk should not have to wait on it -- prefer what is
+    // ready now, in the same relative rank order within each group, and fall
+    // straight through to today's behavior (first unjudged, no blocking) once
+    // no candidate has a page yet. Owe cards do not require a page to serve;
+    // this ordering just happens to also work for them, since an Owe card
+    // with no page falls into `withoutPage` and still serves in rank order.
+    //
+    // "Live" is daily.mjs's LIVE model, the same predicate the refill
+    // decision above used: not consumed (accepted/dismissed/muted/
+    // suppressed), inside the window, AND servable right now. The old filter
+    // here counted only accepted/dismissed, so a muted or unresolvable card
+    // was walked past on every request while still holding its producer's
+    // turn.
+    //
+    // THE AGE BOUND IS GATED THE SAME WAY hydrateCards GATES IT (review G
+    // finding 1), and that asymmetry is deliberate on both sides. This loop
+    // used to call isSnapshotLive -- consumed AND fresh -- on every card
+    // unconditionally, which wedged the matcher path permanently: it is the
+    // DEFAULT producer config, produceDailyBatch never runs on it (the
+    // refill above gates on producer === 'eligibility'), so nothing prunes
+    // and nothing refills. A matcher queue whose newest batch turned seven
+    // days old therefore had every card skipped, answered 'queue-empty'
+    // forever, and the orb went dark with no path back except an explicit
+    // POST /refresh the owner has no reason to make.
+    //
+    // hydrateCards already had the rule right and says why: for the
+    // eligibility family, dropping a stale batch IS the refill, because the
+    // next request produces a new one synchronously. For the matcher path
+    // there is nothing to refill from, so an old batch is all there is.
+    // Owe is eligibility-only and is age-bounded whatever the reconnect
+    // config says -- the same `kind === 'owe' || eligibilityReconnect`
+    // condition hydrateCards' own version gate uses.
+    const eligibilityReconnect = producerConfig.producer === 'eligibility';
+    const liveCards = [];
+    const blockedReasons = [];
+    // ONE INSTANT FOR THE WHOLE SERVE DECISION (contrarian review finding 7).
+    // Freshness, the cap window, the pull budget's local-day boundary, the
+    // 'shown' row's own created_at and the pullsLeft on every reply below all
+    // read this one clock. Separate Date.now() calls put a request that starts
+    // at 23:59:59.9 on both sides of local midnight: the gate refusing against
+    // yesterday's spent budget while the reply beside it reports today's full
+    // one, and a retryAfterMs counting down to a boundary the refusal did not
+    // use.
+    const nowForLive = Date.now();
+    const snapshotLive = (card) => !isSnapshotConsumed(db, card.snapshot_id)
+      && ((card.kind !== 'owe' && !eligibilityReconnect)
+        || isSnapshotFresh(db, card.snapshot_id, { now: nowForLive }));
+    for (const card of servingQueue) {
+      if (!snapshotLive(card)) continue;
+      const block = cardBlockReason(db, rel, card);
+      if (block !== null) { blockedReasons.push(block); continue; }
+      liveCards.push(card);
+    }
+
+    // THE ORDER IS LIVE, AND TOTAL WITHIN A REQUEST (review F finding 13).
+    // Page-first is RE-DERIVED on every request, deliberately: a page
+    // finishing in the background is precisely the event that should promote
+    // its candidate, which is the whole point of preferring what is ready now
+    // (relationship-pages.test.mjs's rank-one/rank-two fixture is that
+    // promise written down -- pinning the decision at first sight breaks it).
+    // What was actually wrong was that the order was not TOTAL: inside a page
+    // group it fell back to wherever a spread had left rel.cards. So the sort
+    // is explicit and complete now -- page-first, then rank (rel.cards order,
+    // which is the producers' own ranking), then snapshot_id, monotonic
+    // within a batch -- and peek/serve consistency comes from the `expect`
+    // contract below rather than from freezing an order that has a legitimate
+    // reason to move.
+    const rankOf = new Map(rel.cards.map((c, i) => [c.snapshot_id, i]));
+    const pageFirst = new Map(
+      liveCards.map((c) => [c.snapshot_id, hasBuiltPage(readPersonPage(db, c.personKey)) ? 0 : 1])
+    );
+    const orderedCards = [...liveCards].sort((a, b) =>
+      pageFirst.get(a.snapshot_id) - pageFirst.get(b.snapshot_id)
+      || (rankOf.get(a.snapshot_id) ?? 0) - (rankOf.get(b.snapshot_id) ?? 0)
+      || a.snapshot_id - b.snapshot_id
+    );
+
+    // `expect` IS THE PROMISE, AND IT IS SCOPED TO THIS REQUEST'S QUEUE. A
+    // peek answers with the snapshot_id it would serve right now; the panel
+    // hands that straight back here, and if that snapshot is still live,
+    // servable, in the owner's mode AND of the kind this request is serving,
+    // it is the one served whatever the ordering has done in between.
+    //
+    // ~~"failing that, in the whole in-process queue re-gated by hand,
+    // because the turn can have flipped between the peek and the pull ... and
+    // the card the owner was actually teased is the card they asked for"~~
+    // REMOVED 2026-09 (review G finding 7). That fallback searched all of
+    // rel.cards, so `expect` served a card of the kind produceDailyBatch had
+    // just decided NOT to serve -- and then spent underGlobalCap and recorded
+    // 'shown' for that kind, which is exactly what pickProducer reads to
+    // alternate. State: a peek returns an Owe snapshot, the turn flips to
+    // reconnect, the panel pulls with `expect`, and the same person is
+    // offered under both kinds inside one window. That is the double-offer
+    // liveQueuePersonKeys exists to prevent, and honouring a stale tease is
+    // not worth defeating the cross-kind exclusion for. A flipped turn is
+    // now simply a superseded expect.
+    //
+    // A SUPERSEDED expect IS NEITHER AN ERROR NOR A REFUSAL. The card it
+    // named was judged, muted, expired, or belongs to the kind whose turn
+    // this is not -- all ordinary. The current head of THIS queue is served
+    // and the response SAYS SO (`expectSuperseded: true`, plus
+    // `reason: 'expect-superseded'` on the branches whose `reason` is not
+    // already carrying something the panel needs more), so the panel can
+    // tell "here is the one you asked for" from "that one is gone, here is
+    // the next". Nothing else changes -- the cap is still spent, 'shown' is
+    // still recorded once per snapshot, and a peek carrying `expect` still
+    // records nothing.
+    let expectSuperseded = false;
+    if (expect !== null) {
+      const promised = orderedCards.findIndex((c) => c.snapshot_id === expect);
+      if (promised > 0) {
+        orderedCards.unshift(...orderedCards.splice(promised, 1));
+      } else if (promised === -1) {
+        expectSuperseded = true;
+      }
+    }
+    // WHY NOTHING WAS SERVED, when the gate is what refused: `{ reason }` plus,
+    // for a refused pull, how long the refusal lasts. Set once, by the first
+    // candidate that would have cost something.
+    let gateBlocked = null;
+
+    for (const card of orderedCards) {
       // 'shown' is recorded HERE, once per snapshot, when the card is first
       // handed out for display -- not by the widget. Client-side recording
       // (the audit's repro) double-counted every relaunch into the cap and
@@ -2525,15 +4815,70 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       const alreadyShown = db.prepare(
         "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'shown' LIMIT 1"
       ).get(card.snapshot_id);
+      //
+      // ASKED HERE, PAID FOR BELOW (contrarian review finding 3). Suppression
+      // and mute were already settled by cardBlockReason above; what is left
+      // for the cap-bearing gate to say is whether this window has an
+      // interruption left, and whether this serve is one. A PEEK asks it (an
+      // orb that lights for a card the cap will refuse is a lie) but never
+      // spends it, and records no 'shown'.
+      //
+      // serveAllowance owns the whole of that decision (controls.mjs): inside
+      // the cap it is an interruption; past the cap it is a pull if a rejection
+      // bought one and today's budget is not spent; otherwise nothing is
+      // served. Asked per candidate rather than once per request, because a
+      // card can still be dropped below and the next one must face the gate as
+      // it then stands.
+      let allow = null;
       if (!alreadyShown) {
-        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind, cap });
-        if (!gate.allowed) { if (gate.reason === 'global-cap') break; continue; }
-        rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
-          event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id });
-      } else {
-        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind,
-          cap: { max: Number.MAX_SAFE_INTEGER, windowMs: 1 } });
-        if (!gate.allowed) continue; // suppression/mute still bind a shown card
+        allow = rel.service.controls.serveAllowance({ cap, pull, now: nowForLive });
+        if (!allow.allowed) { gateBlocked = allow; break; }
+      }
+      if (peek) {
+        // The tease only: who and why-in-numbers, never the receipt. The
+        // widget renders name plus quiet/overdue days on the orb's title.
+        send(res, 200, { peek: true, mode: pick,
+          ...heldFields,
+          // HOW MANY TIMES "show me another" CAN STILL BE ANSWERED TODAY, on
+          // the tease as on the serve: the panel decides whether to draw the
+          // button from this, rather than by pressing it and being refused.
+          // A peek spends nothing, so this is the budget as it stands.
+          pullsLeft: rel.service.controls.pullsLeft({ now: nowForLive }),
+          // WHERE THE TEASED CARD CAME FROM, on the peek as on the serve
+          // (round-8 finding 1). The panel's one-off hand-off reads exactly
+          // this field off exactly this reply -- the peek is what the widen
+          // button calls -- so leaving it to the full serve made the whole
+          // chain unreachable: the owner pressed "show me anyone, just this
+          // once", got the card teased, and the panel then opened under the
+          // standing mode and filtered that very card out of its own answer.
+          // Same rule as the serve reply: the card's own provenance, null when
+          // it has none (an Owe card carries no mode and needs none -- nothing
+          // filters it by one).
+          servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? null) : null,
+          card: {
+            personKey: card.personKey, name: card.name, kind: card.kind,
+            snapshot_id: card.snapshot_id,
+            // NO PERSON FACTS HERE, DELIBERATELY (polish review finding 10).
+            // They were briefly spread onto the peek too, on the theory that
+            // one set of field names should answer both replies. The consumer
+            // settles it: the peek's caller is the always-on orb, which asks
+            // only whether a card exists and renders a name and a day count.
+            // Shipping this person's job title, employer, profile url and
+            // three contact timestamps to a card the owner has not opened --
+            // and may never open -- buys nothing the orb can draw, and the
+            // tease could never render as the serve anyway (it carries no
+            // evidence.messages or meetings either). The serve is where the
+            // card is actually read, and the serve is where the facts go.
+            evidence: {
+              dormancyDays: card.evidence?.dormancyDays ?? null,
+              overdueDays: card.evidence?.overdueDays ?? null,
+              owe_kind: card.evidence?.owe_kind ?? null,
+            },
+          },
+          ...(askedMode === null ? {} : { oneOff: true }),
+          ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
+        }, cors);
+        return;
       }
       // Resolve the quote from the LIVE row. Row gone or edited: the receipt
       // is gone, so the card is gone -- the deletion cascade, honored at
@@ -2544,40 +4889,630 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         if (row === undefined) continue;
         quote = String(row.text).slice(0, 200);
       }
-      send(res, 200, { card: { ...card, quote } }, cors);
+      // owe:expired-commitment carries a LIVE claim reference
+      // (evidence.commitment_claim_id), never copied text -- the same
+      // deletion-cascade discipline as the quote just above. Resolved here,
+      // at serve time: the claim's current text becomes `left` (the widget's
+      // existing "how you left it" row), and a claim that is gone (source
+      // deleted) or whose latest decision is now 'reject' (rejected between
+      // produce and serve) drops the card entirely rather than showing stale
+      // or retracted evidence.
+      let left = card.left;
+      let leftTone = card.leftTone;
+      const commitmentClaimId = card.evidence?.commitment_claim_id;
+      if (Number.isInteger(commitmentClaimId)) {
+        const claimRow = db.prepare('SELECT text FROM claim WHERE id = ?').get(commitmentClaimId);
+        if (!claimRow) continue;
+        const decision = db.prepare(
+          'SELECT action FROM claim_decision WHERE claim_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+        ).get(commitmentClaimId);
+        if (decision?.action === 'reject') continue;
+        left = claimRow.text;
+        leftTone = 'bad';
+      }
+      // THE CARD IS NOW THE ONE BEING SERVED, so this is where it is paid for
+      // (contrarian review finding 3). The three `continue`s above drop a card
+      // whose receipt has gone -- quote row deleted, claim deleted, claim
+      // rejected between produce and serve -- and recording before them spent
+      // the slot on a card nobody saw: the cap slot, the person's seven-day
+      // cooldown, the producers' turn, and, once pulls existed, a pull the
+      // owner had just pressed a button for. The refusal that followed named a
+      // budget the owner had never been shown anything from.
+      //
+      // A card that was already shown pays nothing and re-serves (see
+      // alreadyShown above): the cap limits distinct interruptions, not
+      // fetches. The peek returned before this; a tease is not a serve.
+      if (allow !== null) {
+        rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
+          event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id,
+          // The whole of the pull's durable record. Without it the next request
+          // counts this serve as an interruption and the budget is the cap
+          // again.
+          pulled: allow.pulled, now: nowForLive });
+      }
+      // The person page, when one has been built (accepted+pending items;
+      // readPersonPage already omits rejected ones). how_left is the freshest
+      // signal a page can carry -- how things were actually left, in the
+      // person's own words -- so it outranks the template tie sentence and
+      // the eligibility producer's own summary; the first ask is the next
+      // best thing when nothing names how things were left. A page with
+      // neither leaves `sentence` exactly as it was. GATED to kind==='reconnect':
+      // Owe's tie sentence ("you said you would...", "they asked...") IS the
+      // receipt for a specific overdue thing, and a page's how_left/ask text
+      // -- about the relationship in general -- must never silently replace
+      // that specific claim.
+      const page = readPersonPage(db, card.personKey);
+      const sentence = card.kind === 'reconnect'
+        ? (page.sections.how_left?.text ?? page.sections.asks[0]?.text ?? card.sentence)
+        : card.sentence;
+      // `changed`: public lookup's own signal (L5 step 6), separate from
+      // `sentence` and never displacing it -- the newest non-rejected
+      // public-web change about this person that CLEARS THE CORROBORATION
+      // BAR (two independent registrable domains, or the anchored LinkedIn
+      // profile with a date; see relationship/lookup.mjs's corroboration
+      // section), resolved through its live context row (row gone -> null).
+      // It carries `corroboration` and `sources` so a renderer can say "2
+      // sources" rather than showing one url as though it were the only
+      // thing that could be said. Wrapped the same defensively as
+      // sweepStatus below: a missing/pre-migration lookup table must not
+      // take the card route down.
+      let changed = null;
+      try {
+        changed = newestWebChange(db, card.personKey);
+      } catch {
+        changed = null;
+      }
+      // Existing drafted messages for this snapshot (may be empty -- nobody
+      // has asked for one yet), attached so the widget can show a cached
+      // draft immediately rather than waiting on a POST /draft round trip.
+      // Never builds one here: a draft is built only on explicit ask (see
+      // POST /admin/relationship/draft above), never spent on a card the
+      // owner never opens.
+      let drafts = [];
+      try {
+        drafts = existingDrafts(db, card.snapshot_id);
+      } catch {
+        drafts = [];
+      }
+      // The person facts, on the SERVE only -- the peek above carries none of
+      // them, deliberately. Spread AFTER `...card` so a producer that one day
+      // puts its own lastMeetingAt on the card object cannot shadow the
+      // pinned shape.
+      const facts = personCardFacts(db, card.personKey, { now: nowForLive });
+      send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page,
+        changed: changedForCard(changed), drafts, ...facts },
+        // PROVENANCE, NOT POLICY (round-5 finding 10). `servedMode` answers
+        // "which mode produced the card in your hand", and the only thing that
+        // knows is the batch the card came out of. A card produced before any
+        // mode was ever recorded has no answer, and `null` is that answer: the
+        // config fallback would have this route assert that an unlabelled card
+        // was produced under whatever the picker says today, so a panel
+        // comparing the two to decide whether a refresh is needed would
+        // conclude the card already matches. `mode` on the next line is the
+        // one that means "what the owner is on", and it keeps the fallback.
+        servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? null) : null,
+        mode: pick,
+        ...heldFields,
+        // WHAT IS LEFT OF TODAY'S "show me another", counted AFTER this serve
+        // -- so a card that just spent a pull reports the budget the next ask
+        // will actually meet, and an accept on this card drops it to zero on
+        // the next reply.
+        pullsLeft: rel.service.controls.pullsLeft({ now: nowForLive }),
+        // The card asked for is gone; this is the next one. A reason BESIDE a
+        // non-null card, which no other branch of this route produces.
+        ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
+        // ONE LOOK, NOT A NEW PICK. `mode` above is still the owner's own; this
+        // says the card beside it was served under a mode named by the request,
+        // so a panel reconciling its picker against `servedMode` knows to leave
+        // the picker where the owner put it.
+        ...(askedMode === null ? {} : { oneOff: true }),
+        ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
-    send(res, 200, { card: null, ...(rel.refreshing ? { refreshing: true } : {}),
-      ...(rel.lastError ? { lastError: rel.lastError } : {}) }, cors);
+    // WHY THERE IS NOTHING (review finding 15): the widget used to render
+    // "nothing to review" for a spent cap and for a queue full of muted
+    // people alike. 'cap' means come back tomorrow; a block reason means the
+    // queue holds cards the owner's own controls (or a deleted source) are
+    // refusing.
+    //
+    // AND NOW A THIRD SENTENCE. 'cap' still means "the day's interruption is
+    // spent" and is what an ordinary poll gets. 'pulls-exhausted' is the
+    // owner pressed "show me another" and today has no more, either because
+    // three rejections have already been answered or because a card was
+    // accepted and the day is done. It carries retryAfterMs (to local
+    // midnight, which is when the budget returns) for the same reason
+    // 'pool-exhausted' does: "come back later" is not a time.
+    const reason = gateBlocked?.reason ?? (blockedReasons[0] ?? 'queue-empty');
+    // expectSuperseded RIDES THIS BRANCH TOO (review G finding 7): it was
+    // computed above and then thrown away here, so a panel that asked for a
+    // specific card and got nothing could not tell "your card is gone AND
+    // the queue is empty" from "the queue was always empty". As a boolean
+    // rather than as `reason`, because on THIS branch `reason` is already
+    // carrying cap/blocked/queue-empty, which the panel needs more. The flag
+    // is on every branch so there is one field to test regardless.
+    send(res, 200, { card: null, reason, mode: pick,
+      ...heldFields,
+      ...(gateBlocked?.retryAfterMs === undefined ? {} : { retryAfterMs: gateBlocked.retryAfterMs }),
+      pullsLeft: rel.service.controls.pullsLeft({ now: nowForLive }),
+      ...(askedMode === null ? {} : { oneOff: true }),
+      ...(expectSuperseded ? { expectSuperseded: true } : {}),
+      ...(rel.refreshing ? { refreshing: true } : {}),
+      ...(rel.lastError ? { lastError: rel.lastError } : {}),
+      ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
     return;
   }
 
   if (req.method === 'POST' && url.pathname === '/admin/relationship/event') {
     const rel = relationshipState(db, policy);
     const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_EVENT_FIELDS);
     const { snapshot_id, person_key, event, reason, note, mute_days } = body ?? {};
     const ownerNote = typeof note === 'string' && note.trim().length > 0 ? note.trim() : null;
-    if (typeof person_key !== 'string' || person_key.length === 0) throw badRequest('"person_key" required');
     if (!['shown', 'opened', 'accepted', 'dismissed', 'muted'].includes(event)) throw badRequest('unknown "event"');
     const snapId = Number.isInteger(snapshot_id) ? snapshot_id : null;
+    // A verdict is terminal: once a snapshot has an accepted or dismissed row,
+    // a second one (a slow retry, a repeated click, the desk's triple-click)
+    // must not insert -- rm_card_event is append-only, so a duplicate here
+    // would be a duplicate forever. Caught before any write, including the
+    // suppression side effect a 'never-this-person' dismissal carries.
+    //
+    // EVERY REPLY FROM THIS ROUTE CARRIES pullsLeft, INCLUDING THE DUPLICATES.
+    // The page hides "show me another" from this number, and a retried verdict
+    // is exactly when it must not be told something different from the verdict
+    // that landed: the first accept ended the day, so the retry's answer is
+    // zero too. Read AFTER the write on every path, so an accept's own reply
+    // already says the budget is gone (see controls.pullsLeft).
+    if ((event === 'accepted' || event === 'dismissed') && snapId !== null) {
+      const existing = rel.service.controls.alreadyJudged({ snapshotId: snapId });
+      if (existing) {
+        send(res, 200, { ok: true, duplicate: true, existing,
+          pullsLeft: rel.service.controls.pullsLeft() }, cors);
+        return;
+      }
+    }
+    // The kind and rule version this verdict is ABOUT come from the snapshot
+    // the caller names, never a hardcoded 'reconnect' -- an Owe card's
+    // dismissal used to land as a reconnect-kind rm_card_event/rm_mute,
+    // silently misfiling every control action a second producer ever took.
+    // Falling back to 'reconnect'/MATCH_RULES_VERSION when there is no
+    // snapshot (a review-only event, or a bad id) keeps today's behavior for
+    // exactly that case, not for a named card.
+    const snap = snapId !== null
+      ? db.prepare('SELECT person_key, kind, producer_version FROM rm_candidate_snapshot WHERE id = ?').get(snapId)
+      : undefined;
+    const kind = snap?.kind ?? 'reconnect';
+    const ruleVersion = snap?.producer_version ?? MATCH_RULES_VERSION;
+    // THE SNAPSHOT NAMES THE PERSON (review finding 18). The kind and rule
+    // version already came from the snapshot rather than the body; the
+    // person key did not, so a body naming snapshot A and person B recorded
+    // B's verdict -- and a 'never-this-person' dismissal SUPPRESSED B, a
+    // person no card had offered. When a snapshot is named it is the
+    // authority; a review-only event with no snapshot still has to say who
+    // it is about.
+    const personKey = snap?.person_key
+      ?? (typeof person_key === 'string' && person_key.length > 0 ? person_key : null);
+    if (personKey === null) throw badRequest('"person_key" required');
+    // 'opened' ONCE PER SNAPSHOT (review finding 10): the card page posts it
+    // on every pull, and a re-show of the same pending card posted another
+    // -- openRate (opened/shown) climbed past 1 on a card opened twice.
+    // Deduped here rather than in the page, for the same reason 'shown' is
+    // recorded here: a relaunch must not be able to double-count.
+    if (event === 'opened' && snapId !== null) {
+      const already = db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'opened' LIMIT 1"
+      ).get(snapId);
+      if (already) {
+        send(res, 200, { ok: true, duplicate: true, pullsLeft: rel.service.controls.pullsLeft() }, cors);
+        return;
+      }
+    }
     if (event === 'muted') {
       const days = Number.isFinite(mute_days) && mute_days > 0 ? mute_days : null;
       if (days === null) throw badRequest('"mute_days" required for a mute');
-      rel.service.controls.mute({ personKey: person_key, kind: 'reconnect', untilAt: Date.now() + days * 86_400_000 });
-      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event: 'muted',
-        ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+      rel.service.controls.mute({ personKey, kind, untilAt: Date.now() + days * 86_400_000 });
+      rel.service.controls.recordEvent({ personKey, kind, event: 'muted',
+        ruleVersion, snapshotId: snapId });
     } else if (event === 'dismissed') {
       // snapshotId rides along or the card comes BACK: the acted-check keys
       // on it, and a NULL here made every plain dismissal a no-op (audit,
       // reproduced live).
-      rel.service.controls.dismiss({ personKey: person_key, kind: 'reconnect',
+      rel.service.controls.dismiss({ personKey, kind,
         reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
-        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+        note: ownerNote, ruleVersion, snapshotId: snapId });
     } else {
-      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event,
-        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+      rel.service.controls.recordEvent({ personKey, kind, event,
+        note: ownerNote, ruleVersion, snapshotId: snapId });
     }
-    send(res, 200, { ok: true }, cors);
+    // A REJECTION IS WHAT BUYS A PULL, so the verdict that just landed is the
+    // reply that should say how many are left -- the page would otherwise have
+    // to poll the card route to find out whether to draw the button, which is
+    // a request whose only purpose is to be refused.
+    send(res, 200, { ok: true, pullsLeft: rel.service.controls.pullsLeft() }, cors);
+    return;
+  }
+
+  // Build (or rebuild) one person's page, in-process on the database's only
+  // writer -- the same reasoning /admin/episodes/rebuild documents for why a
+  // second process must never open this file read-write. Bearer-only (the
+  // blanket guard at the top of this function), because this is the route
+  // that spends the owner's own model subscription and writes PENDING claims
+  // about a real person; a browser has no business triggering either.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/pages/build') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_PAGE_BUILD_FIELDS);
+    if (typeof body.personKey !== 'string' || body.personKey.length === 0) {
+      throw badRequest('"personKey" must be a non-empty string');
+    }
+    if (body.engine !== undefined && body.engine !== 'claude-cli' && body.engine !== 'llama') {
+      throw badRequest('"engine" must be "claude-cli" or "llama"');
+    }
+    // A per-call engine override (the runner's --engine flag) selects among
+    // the owner's own config; a test-seam override (policy.relationshipMemoryEngine)
+    // still wins outright, so a route test's fake engine cannot be bypassed
+    // by a body field it did not anticipate.
+    const engine = relationshipMemoryEngine(policy, body.engine);
+    const result = await buildPersonPage(db, engine, body.personKey, { now: Date.now() });
+    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  // A drafted message, on demand (L5 mode-picker follow-on, part 2): the
+  // card's own "suggested opening line", built only when the owner asks for
+  // it (never on every serve, which would spend the owner's own model
+  // subscription on cards that are never opened) and cached against the
+  // snapshot for 24h -- a second ask within that window costs nothing.
+  // Bearer-only, same reasoning as /admin/relationship/pages/build: this
+  // spends the owner's own model subscription.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/draft') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_DRAFT_FIELDS);
+    const snapshotId = body?.snapshot_id;
+    if (!Number.isInteger(snapshotId)) throw badRequest('"snapshot_id" must be an integer');
+    const snap = db.prepare('SELECT id FROM rm_candidate_snapshot WHERE id = ?').get(snapshotId);
+    if (!snap) throw badRequest(`no snapshot with id ${snapshotId}`);
+    // No per-call engine override here (unlike pages/build's `engine` body
+    // field): drafting is specified against claude-cli specifically, and the
+    // only seam is the same test-seam override every other engine getter
+    // honors -- an explicit `null` (policy.relationshipMemoryEngine) is how
+    // a test asks for "no engine configured".
+    const engine = relationshipMemoryEngine(policy);
+    if (!engine) throw badRequest('no engine configured for relationship drafting');
+    const result = await createDraft(db, engine, { snapshotId, now: Date.now() });
+    // SAY WHY IT FAILED (review finding 9). createDraft already returns a
+    // `reason` on every failure path -- engine error, unparseable output, no
+    // usable drafts -- and this route dropped it, answering 200 with an
+    // empty list. The page then showed nothing at all, because it only
+    // treats ok===false as a failure. Both now cross.
+    send(res, 200, {
+      ok: result.drafts.length > 0,
+      drafts: result.drafts.map((d) => ({ id: d.id, text: d.text })),
+      cached: result.cached,
+      ...(result.reason ? { reason: result.reason } : {}),
+      cost_usd: engine.counters?.totalCostUsd ?? null,
+    }, cors);
+    return;
+  }
+
+  // Discovery sweep (L5 step 5): one pass over sweepScope's own candidates,
+  // spawned by the Distiller's timer (Swift-side, sweep-once.mjs) or by hand
+  // from the desk. Bearer-only, same reasoning as
+  // /admin/relationship/pages/build -- this spends the owner's own model
+  // subscription and writes PENDING claims about real people.
+  //
+  // Unlike startPageBuilds (a background pass a request kicks off and
+  // returns from immediately), the sweep's own caller (sweep-once.mjs) wants
+  // the pass's own counts back in the response, so this route awaits
+  // runSweepPass directly rather than firing it and returning early.
+  //
+  // rel.sweepActive itself is set and cleared by runSweepPass, NOT by this
+  // route: sweepGate's own busy-model check reads that exact flag, and
+  // setting it here BEFORE calling runSweepPass would make that check see
+  // this very call as "already running" and skip itself on every request.
+  // The read below is only a cheap early exit for the obvious case (skip a
+  // full scope query when a pass is plainly already in flight) -- the
+  // authoritative check is still sweepGate's, inside runSweepPass.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/sweep') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_SWEEP_FIELDS);
+    if (body.power !== undefined && body.power !== 'full' && body.power !== 'trickle') {
+      throw badRequest('"power" must be "full" or "trickle"');
+    }
+    if (body.engine !== undefined && body.engine !== 'claude-cli' && body.engine !== 'llama') {
+      throw badRequest('"engine" must be "claude-cli" or "llama"');
+    }
+    const budget = body.budget ?? body.limit;
+    if (budget !== undefined && budget !== null && (!Number.isInteger(budget) || budget < 1)) {
+      throw badRequest('"budget"/"limit" must be a positive integer');
+    }
+    if (body.battery !== undefined && body.battery !== null
+        && (typeof body.battery !== 'number' || !Number.isFinite(body.battery) || body.battery < 0 || body.battery > 100)) {
+      throw badRequest('"battery" must be a number from 0 through 100');
+    }
+    if (body.onAc !== undefined && body.onAc !== null && typeof body.onAc !== 'boolean') {
+      throw badRequest('"onAc" must be a boolean');
+    }
+    if (body.thermal !== undefined && body.thermal !== null && !SWEEP_THERMAL_VALUES.includes(body.thermal)) {
+      throw badRequest(`"thermal" must be one of: ${SWEEP_THERMAL_VALUES.join(', ')}`);
+    }
+
+    const rel = relationshipState(db, policy);
+    if (rel.sweepActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const engine = relationshipMemoryEngine(policy, body.engine);
+    const result = await runSweepPass(db, engine, policy, {
+      powerMode: body.power ?? 'trickle',
+      budget: budget ?? undefined,
+      battery: body.battery ?? null,
+      onAc: body.onAc ?? null,
+      thermal: body.thermal ?? null,
+      now: Date.now(),
+    });
+    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  // Public lookup (L5 step 6): one pass over lookupScope's own due
+  // candidates, spawned by the Distiller's timer (Swift-side, a later
+  // commit's lookup-once.mjs) or by hand from the desk. Bearer-only, same
+  // reasoning as /admin/relationship/sweep -- this spends the owner's own
+  // model subscription (and real web-search rate-limit budget) and writes
+  // PENDING claims about real people, this time from the public web rather
+  // than the owner's own corpus.
+  //
+  // rel.lookupActive is set and cleared by runLookupPass itself (mirrors
+  // sweepActive's own reasoning) -- the read below is only a cheap early
+  // exit; the authoritative check is lookupGate's, inside runLookupPass.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lookup') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LOOKUP_FIELDS);
+    if (body.power !== undefined && body.power !== 'full' && body.power !== 'trickle') {
+      throw badRequest('"power" must be "full" or "trickle"');
+    }
+    const budget = body.budget ?? body.limit;
+    if (budget !== undefined && budget !== null && (!Number.isInteger(budget) || budget < 1)) {
+      throw badRequest('"budget"/"limit" must be a positive integer');
+    }
+    if (body.battery !== undefined && body.battery !== null
+        && (typeof body.battery !== 'number' || !Number.isFinite(body.battery) || body.battery < 0 || body.battery > 100)) {
+      throw badRequest('"battery" must be a number from 0 through 100');
+    }
+    if (body.onAc !== undefined && body.onAc !== null && typeof body.onAc !== 'boolean') {
+      throw badRequest('"onAc" must be a boolean');
+    }
+    if (body.thermal !== undefined && body.thermal !== null && !SWEEP_THERMAL_VALUES.includes(body.thermal)) {
+      throw badRequest(`"thermal" must be one of: ${SWEEP_THERMAL_VALUES.join(', ')}`);
+    }
+
+    const rel = relationshipState(db, policy);
+    if (rel.lookupActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const engine = relationshipLookupEngine(policy);
+    const result = await runLookupPass(db, engine, policy, {
+      powerMode: body.power ?? 'trickle',
+      budget: budget ?? undefined,
+      battery: body.battery ?? null,
+      onAc: body.onAc ?? null,
+      thermal: body.thermal ?? null,
+      now: Date.now(),
+    });
+    send(res, 200, { ...result, cost_usd: engine?.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  // "Look this person up now" -- jumps public lookup's ordinary tier/recency
+  // queue for exactly one already-known person (next_due_at forced to 0
+  // before the pass, budget 1, scope narrowed to this one personKey via
+  // runLookupPass's onlyPersonKey), but is still gated and capped through
+  // the SAME lookupGate check and the same daily call cap as an ordinary
+  // pass -- a desk click cannot bypass either.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lookup/person') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LOOKUP_PERSON_FIELDS);
+    if (typeof body.personKey !== 'string' || body.personKey.length === 0) {
+      throw badRequest('"personKey" is required');
+    }
+    // Same validation, and the same forwarding, as the pass route above --
+    // see RELATIONSHIP_LOOKUP_PERSON_FIELDS for why this route grew them.
+    if (body.battery !== undefined && body.battery !== null
+        && (typeof body.battery !== 'number' || !Number.isFinite(body.battery) || body.battery < 0 || body.battery > 100)) {
+      throw badRequest('"battery" must be a number from 0 through 100');
+    }
+    if (body.onAc !== undefined && body.onAc !== null && typeof body.onAc !== 'boolean') {
+      throw badRequest('"onAc" must be a boolean');
+    }
+    if (body.thermal !== undefined && body.thermal !== null && !SWEEP_THERMAL_VALUES.includes(body.thermal)) {
+      throw badRequest(`"thermal" must be one of: ${SWEEP_THERMAL_VALUES.join(', ')}`);
+    }
+
+    const rel = relationshipState(db, policy);
+    if (rel.lookupActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const engine = relationshipLookupEngine(policy);
+    const power = {
+      battery: body.battery ?? null,
+      onAc: body.onAc ?? null,
+      thermal: body.thermal ?? null,
+    };
+    const gate = lookupGate(db, policy, { engine, ...power });
+    if (!gate.ok) {
+      send(res, 200, { log: null, changes: [], reason: gate.reason }, cors);
+      return;
+    }
+
+    const tier = lookupTierFor(db, body.personKey, { now: Date.now() });
+    db.prepare(
+      `INSERT INTO person_lookup_state(person_key, tier, anchors_hash, last_looked_at, next_due_at, last_status, lookups, proposals)
+       VALUES (?, ?, '', NULL, 0, NULL, 0, 0)
+       ON CONFLICT(person_key) DO UPDATE SET next_due_at = 0`
+    ).run(body.personKey, tier);
+
+    await runLookupPass(db, engine, policy, {
+      budget: 1, now: Date.now(), onlyPersonKey: body.personKey, ...power,
+    });
+
+    // `log.changes` already carries the parsed shape (sources as a list,
+    // corroboration as a number or null) -- see lookupLogFor. The raw rows
+    // are kept beside it for back-compat with anything reading the columns
+    // directly, with `sources` decoded from its canonical JSON so a caller
+    // never has to parse a column to count domains.
+    const log = lookupLogFor(db, body.personKey, { limit: 1 })[0] ?? null;
+    const changes = log
+      ? db.prepare('SELECT * FROM person_lookup_change WHERE log_id = ?').all(log.id).map((row) => ({
+        ...row,
+        sources: parseLookupSources(row.sources),
+        corroboration: row.corroboration === null || row.corroboration === undefined
+          ? null : Number(row.corroboration),
+      }))
+      : [];
+    send(res, 200, { log, changes }, cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/lookups') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_LOOKUPS_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const personKey = url.searchParams.get('personKey');
+    if (typeof personKey !== 'string' || personKey.length === 0) {
+      throw badRequest('"personKey" query parameter is required');
+    }
+    // Each row now carries `changes` -- every person_lookup_change this
+    // lookup proposed, each with its `sources` list and its `corroboration`
+    // count, so the desk can render "2 sources" and say why an
+    // uncorroborated pending row is not on a card (see
+    // relationship/lookup.mjs's corroboration section) -- and
+    // `evidence: {urls, resultTextChars}` -- WHAT CAME
+    // BACK, not only what was sent. lookup_log 4520 stored a claim whose
+    // quote was a search-result TITLE, and nothing on the box could show
+    // that after the fact because only the counts were kept. The titles and
+    // URLs are inline (small, and the thing a title-only quote came from);
+    // the article itself is a separate read below, being kilobytes per row.
+    send(res, 200, { lookups: lookupLogFor(db, personKey) }, cors);
+    return;
+  }
+
+  // The observed article for ONE lookup, read-only -- the "what came back"
+  // pane. Its own route rather than a field on the list above so a desk
+  // person page with twenty lookups does not drag twenty articles with it.
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/lookups/evidence') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_LOOKUP_EVIDENCE_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const raw = url.searchParams.get('logId');
+    const logId = Number(raw);
+    if (raw === null || raw.length === 0 || !Number.isInteger(logId) || logId < 1) {
+      throw badRequest('"logId" query parameter must be a positive integer');
+    }
+    // BOTH keys, and lookupEvidenceFor matches them against lookup_log:
+    // "which person is this about" is the question an evidence read exists
+    // to answer, and a bare integer answered it for whoever happened to own
+    // that log row. A mismatch is null, not somebody else's article.
+    const evidencePersonKey = url.searchParams.get('personKey');
+    if (typeof evidencePersonKey !== 'string' || evidencePersonKey.length === 0) {
+      throw badRequest('"personKey" query parameter is required');
+    }
+    // The response is capped the same way the column is (200k characters,
+    // relationship/lookup.mjs's LOOKUP_RESULT_TEXT_CAP) and says so via
+    // `truncated`: this route returns third-party page text, and "verbatim"
+    // here means verbatim up to that cap.
+    send(res, 200, { evidence: lookupEvidenceFor(db, { logId, personKey: evidencePersonKey }) }, cors);
+    return;
+  }
+
+  // Lint (step 5½): a scheduled pass over states no other pass names --
+  // relationship/lint.mjs's own header explains what it checks and why NO
+  // MODEL CALL is involved anywhere here. Still bearer-only, same posture as
+  // /admin/relationship/sweep and /admin/relationship/lookup, even though
+  // this route spends no model subscription: it writes lint_run/lint_finding
+  // rows about real people, which a browser has no business triggering.
+  //
+  // rel.lintActive is set and cleared by runLintPass itself (mirrors
+  // sweepActive/lookupActive's own reasoning) -- the read below is only a
+  // cheap early exit; the authoritative check is lintGate's, inside
+  // runLintPass.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lint') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LINT_FIELDS);
+    if (body.checks !== undefined) {
+      if (!Array.isArray(body.checks) || body.checks.length === 0 || !body.checks.every((c) => typeof c === 'string')) {
+        throw badRequest('"checks" must be a non-empty array of strings');
+      }
+    }
+    const rel = relationshipState(db, policy);
+    if (rel.lintActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const result = runLintPass(db, policy, { now: Date.now(), checks: body.checks });
+    send(res, 200, lintRunForResponse(result), cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/lint/findings') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_LINT_FINDINGS_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const check = url.searchParams.get('check');
+    const openRaw = url.searchParams.get('open');
+    const open = openRaw === '1' ? true : openRaw === '0' ? false : null;
+    const limitRaw = url.searchParams.get('limit');
+    const limit = limitRaw === null ? undefined : Number(limitRaw);
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+      throw badRequest('"limit" must be a positive integer');
+    }
+    send(res, 200, { findings: lintFindings(db, { check, open, limit }) }, cors);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lint/resolve') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LINT_RESOLVE_FIELDS);
+    if (typeof body.findingKey !== 'string' || body.findingKey.length === 0) {
+      throw badRequest('"findingKey" is required');
+    }
+    if (!LINT_RESOLUTIONS.includes(body.resolution)) {
+      throw badRequest(`"resolution" must be one of: ${LINT_RESOLUTIONS.join(', ')}`);
+    }
+    // Role choices are valid only on a role_conflict finding -- checked here,
+    // against the finding's own check_name, before ever calling
+    // resolveLintFinding (which stays defensive about the same rule for a
+    // caller that is not this route).
+    if (body.resolution !== 'dismiss') {
+      const row = db.prepare('SELECT check_name AS checkName FROM lint_finding WHERE finding_key = ?').get(body.findingKey);
+      if (!row) throw badRequest(`no lint finding ${JSON.stringify(body.findingKey)}`);
+      if (row.checkName !== 'role_conflict') {
+        throw badRequest('"resolution" of "keep-export"/"keep-derived"/"both" is valid only for role_conflict findings');
+      }
+    }
+    const result = resolveLintFinding(db, { findingKey: body.findingKey, resolution: body.resolution });
+    if (result.rebuildNeeded) rebuildPeopleCore(db);
+    send(res, 200, result, cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/page') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_PAGE_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const personKey = url.searchParams.get('personKey');
+    if (typeof personKey !== 'string' || personKey.length === 0) {
+      throw badRequest('"personKey" query parameter is required');
+    }
+    send(res, 200, { page: readPersonPage(db, personKey) }, cors);
     return;
   }
 
@@ -2717,6 +5652,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw error;
       }
+      schedulePeopleRebuild(db, policy, 'admin/people/clear');
+      invalidateCorpusStats(policy);
       send(res, 200, { cleared }, cors);
       return;
     }
@@ -2760,6 +5697,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
+      if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/retain');
+      invalidateCorpusStats(policy);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -2794,6 +5733,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // a purged source's claims were legible in claim_fts by the same
       // mechanism.
       maintainNow(db);
+      if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/purge');
+      invalidateCorpusStats(policy);
       send(res, 200, { deleted, claims_deleted: claimsDeleted, maintained: true }, cors);
       return;
     }
@@ -2838,13 +5779,25 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
+      if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/delete-entities');
+      invalidateCorpusStats(policy);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
 
     if (url.pathname === '/admin/memory/decide') {
       const body = await readJson(req);
-      send(res, 200, decideClaim(db, body), cors);
+      // decideClaim FIRST, unconditionally: it is the owner's actual
+      // decision, and nothing downstream may risk losing it. applySweepDecision
+      // (relationship/sweep.mjs) is a no-op for every claim that is not a
+      // sweep proposal -- one indexed lookup -- so this costs nothing on the
+      // common path. rebuildPeopleCore only runs when applySweepDecision
+      // reports it actually unioned a sub-role tag (see that function's own
+      // comment on why the rebuild call lives here rather than inside it).
+      const out = decideClaim(db, body);
+      const applied = applySweepDecision(db, policy, { claimId: body.claim_id, action: body.action });
+      if (applied?.rebuildNeeded) rebuildPeopleCore(db);
+      send(res, 200, out, cors);
       return;
     }
 
@@ -3141,11 +6094,19 @@ function memoryProgress(db) {
       db.prepare("SELECT count(*) AS n FROM distill_run WHERE status = 'running'").get()?.n ?? 0
     );
     // A wide window so this is "everything still to read", not "this month's".
-    const pending = selectRows(db, {
+    //
+    // COUNT(*), NOT `.length`. This was selectRows(...).length -- up to a
+    // hundred thousand corpus rows read out of SQLite, decoded into JavaScript
+    // objects with their text and meta, and then discarded to take the length
+    // of the array. On a polled route. countSelectable runs the same selector
+    // under the same limit and returns the same number without materialising a
+    // single row; the limit is inside the subquery, so a corpus with more than
+    // `limit` selectable rows still reports exactly `limit`, as it always did.
+    const pending = countSelectable(db, {
       sinceChangedAt: Number(runs?.cursor ?? 0),
       fromDays: 3650,
       limit: 100000,
-    }).length;
+    });
     const done = Number(runs?.done ?? 0);
     return {
       claims,
@@ -3170,6 +6131,562 @@ function memoryProgress(db) {
     // check the widget uses to decide the backend is up at all.
     return null;
   }
+}
+
+// The observability half of the eager rebuild: live state from
+// people_projection_state, plus the in-process rebuilding/lastRebuildError
+// that schedulePeopleRebuild records. Null if the state table is absent
+// (same "never let a progress read break /stats" discipline as memoryProgress
+// above) rather than throwing.
+function peopleProjectionStatus(db, policy) {
+  try {
+    const state = projectionState(db);
+    if (!state) return null;
+    const holder = policy.peopleProjectionHolder ?? policy;
+    const rel = holder.__peopleProjection ?? { rebuilding: false, lastRebuildError: null };
+    return {
+      projectedRevision: Number(state.projected_revision),
+      sourceRevision: Number(state.source_revision),
+      peopleCount: Number(state.people_count),
+      builtAt: state.built_at === null || state.built_at === undefined ? null : Number(state.built_at),
+      rebuilding: rel.rebuilding === true,
+      lastRebuildError: rel.lastRebuildError ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// How many consecutive failures are worth reporting. Past two it is the same
+// verdict -- "this is not reading" -- and the loop exists to answer that, not
+// to measure how long it has been true.
+const RUN_FAIL_STREAK_CAP = 5;
+// A connector must fail twice before the screen calls it broken. One failure
+// after a success is ordinary: a locked database, a mailbox mid-rotation, a
+// laptop that slept. Saying "not reading" on the first one would make the most
+// common transient look like a fault the owner has to fix.
+const RUN_FAIL_STREAK_RED = 2;
+// run_log.error is written by connectors/lib/state.mjs as a sanitized
+// FINGERPRINT (a code or a short class, never content), and the screen shows it
+// so "messages -- not reading" can say EPERM instead of nothing. Bounded here
+// anyway: this route's contract is counts, and one unbounded string from
+// another process's table is the kind of thing that is true until it is not.
+const RUN_ERROR_LIMIT = 120;
+
+// Per-connector run state from state.db. Returns an empty map when state.db is
+// absent or unreadable -- a fresh Mac has no daemon history, and that is a
+// legitimate answer meaning "nothing has run", not a failure of this route.
+function connectorRunState(state) {
+  const runs = {};
+  let daemonLastRunTs = null;
+  if (!state) return { runs, daemonLastRunTs };
+  try {
+    daemonLastRunTs = state.prepare('SELECT MAX(finished_ts) AS ts FROM run_log').get()?.ts ?? null;
+    if (daemonLastRunTs !== null) daemonLastRunTs = Number(daemonLastRunTs);
+    const connectors = state
+      .prepare('SELECT DISTINCT connector FROM run_log')
+      .all()
+      .map((row) => String(row.connector));
+    const lastOk = state.prepare(
+      'SELECT MAX(finished_ts) AS ts FROM run_log WHERE connector = ? AND ok = 1'
+    );
+    // Newest first, capped. The streak is the run of leading failures; a
+    // success anywhere in that window ends it, which is what makes "one
+    // failure after a success" different from "it stopped working".
+    const recent = state.prepare(
+      'SELECT ok, error FROM run_log WHERE connector = ? ORDER BY id DESC LIMIT ?'
+    );
+    for (const connector of connectors) {
+      const rows = recent.all(connector, RUN_FAIL_STREAK_CAP);
+      let failStreak = 0;
+      for (const row of rows) {
+        if (Number(row.ok) === 1) break;
+        failStreak += 1;
+      }
+      const newest = rows[0];
+      const lastError = failStreak > 0 && typeof newest?.error === 'string'
+        ? newest.error.slice(0, RUN_ERROR_LIMIT)
+        : null;
+      const ts = lastOk.get(connector)?.ts ?? null;
+      runs[connector] = {
+        lastOkTs: ts === null ? null : Number(ts),
+        failStreak,
+        lastError,
+      };
+    }
+  } catch {
+    // Same discipline as memoryProgress: a progress read never breaks the
+    // route it is reported on. An unreadable run_log means "no run history",
+    // which is exactly what the empty map says.
+  }
+  return { runs, daemonLastRunTs };
+}
+
+// The four verdicts, in precedence order. See the route's own comment for why
+// `reading` outranks `ok` -- a stale projection can report more people than
+// exist, so it is never allowed to paint green.
+function sourceStatus({ rows, people, failStreak, projectionCurrent }) {
+  if (failStreak >= RUN_FAIL_STREAK_RED) return 'failing';
+  if (!projectionCurrent) return 'reading';
+  if (people > 0) return 'ok';
+  if (rows > 0) return 'empty';
+  return 'idle';
+}
+
+// WHICH CONNECTOR OWNS A HERMES SOURCE -- the exact inverse of daemon.mjs's
+// CONNECTOR_HERMES_SOURCE, and a copy rather than an import on purpose:
+// daemon.mjs reads the feature registry, the bridge databases and the retention
+// config at module scope, and none of that belongs in hermes' import graph for
+// the sake of one lookup table. The lockstep is a FACT rather than an
+// instruction -- onboarding-progress.test.mjs imports both and asserts they
+// invert, so a new bridge platform or a renamed connector fails a test instead
+// of quietly dropping a source out of the owner's table.
+//
+// `matrix` appears against seven sources because it is transport, not
+// provenance: one /sync carries every bridge, and the row's source is whichever
+// bridge's ghost sent it. `linkedin` has two owners because it genuinely has
+// two -- the Connections.csv export and the bridge's DMs land in the same
+// hermes source from different connectors, so LinkedIn is read as long as
+// EITHER is on.
+export const SOURCE_CONNECTORS = Object.freeze({
+  imessage: Object.freeze(['imessage']),
+  calendar: Object.freeze(['calendar']),
+  mail: Object.freeze(['mail']),
+  granola: Object.freeze(['granola']),
+  health: Object.freeze(['oura']),
+  photos: Object.freeze(['photos']),
+  notes: Object.freeze(['notes']),
+  notion: Object.freeze(['notion']),
+  files: Object.freeze(['files']),
+  whatsapp: Object.freeze(['whatsapp']),
+  linkedin: Object.freeze(['linkedin', 'matrix']),
+  messenger: Object.freeze(['matrix']),
+  instagram: Object.freeze(['matrix']),
+  twitter: Object.freeze(['matrix']),
+  telegram: Object.freeze(['matrix']),
+  discord: Object.freeze(['matrix']),
+  slack: Object.freeze(['matrix']),
+});
+
+// Contacts is the one connector with NO hermes source at all
+// (CONNECTOR_HERMES_SOURCE.contacts is null -- it writes state.db and never
+// ingests), so its name lives here rather than in the map above.
+const CONTACTS_CONNECTOR = 'contacts';
+
+const ONBOARDING_CONNECTORS = Object.freeze([...new Set(
+  [CONTACTS_CONNECTOR, ...Object.values(SOURCE_CONNECTORS).flat()]
+)]);
+
+// Sources whose people column is not "who wrote to you". Both of these would
+// otherwise be a permanent, structural amber on the most ordinary input each
+// one has -- see the route comment.
+const ONBOARDING_PEOPLE_KIND = Object.freeze({ linkedin: 'listed', calendar: 'met' });
+
+// Which connectors this install has switched off: `false` in the registry, plus
+// matrix whenever `bridges` is off. connectorsDisabledBy is the one place that
+// knows the second rule, so it is asked rather than re-derived.
+//
+// A registry that could NOT BE READ answers ALL_OFF by design, which is the
+// right answer for a scheduler and the wrong one here: it would empty this
+// table and report a broken bundle as "everything you connected is switched
+// off". So the filter applies only when the registry was actually read.
+// Hiding nothing is this screen's failure mode of choice; /stats is where the
+// unreadable registry is reported as itself.
+function switchedOffConnectors() {
+  const { features, registryState } = readFeatureRegistry();
+  if (registryState !== 'ok') return new Set();
+  return new Set(connectorsDisabledBy(features, ONBOARDING_CONNECTORS));
+}
+
+// Does this source belong in the owner's table at all? TWO GATES, and the
+// screen had neither.
+//
+// CAN IT MINT PEOPLE. Only a PERSON_SOURCE_POLICY 'participant' source ever
+// resolves a person; files, photos and notes are content-only or non-person by
+// design, so "connected, nobody found yet" against them is an alarm about a
+// source doing exactly its job -- three amber rows the owner cannot act on,
+// next to the one that means something.
+//
+// IS THIS INSTALL READING IT. A connector the registry has switched off is not
+// running, so its legacy rows are evidence of nothing. Left in the table they
+// are worse than noise: an Instagram archive from before the bridges were
+// turned off has real authored links and paints GREEN, which reads as a live
+// source on a machine that has not touched it in months.
+//
+// An UNMAPPED participant source is LISTED rather than hidden, the same way
+// connectorsDisabledBy leaves a connector with no registry entry alone: a newly
+// added source showing up in this table is a far smaller wrong than one the
+// owner's only diagnostic screen silently drops.
+function listedOnboardingSource(source, switchedOff) {
+  if (source === CONTACTS_CONNECTOR) return !switchedOff.has(CONTACTS_CONNECTOR);
+  if (PERSON_SOURCE_POLICY[source] !== 'participant') return false;
+  const owners = SOURCE_CONNECTORS[source];
+  if (owners === undefined) return true;
+  return owners.some((connector) => !switchedOff.has(connector));
+}
+
+// SOURCES THE OWNER HAS CONNECTED THAT HAVE NOT PRODUCED A ROW YET.
+//
+// This table is built from `context` and `run_log`, and on the second
+// clean-machine onboarding run (2026-09-12) that meant the two things the owner
+// had JUST done were the two things it did not show. They signed in to Google on
+// screen 3 and dropped their LinkedIn export in on screen 4; screen 6 then drew
+// calendar, contacts and messages and neither mail nor linkedin, because neither
+// had ingested a row or recorded a run. The screen whose whole job is "is it
+// working yet" was silent about precisely the work in question.
+//
+// A ROW WITH NOTHING IN IT IS NOT A LIE, as long as it does not claim to have
+// looked. That is why these are their own status rather than `idle` or `empty`:
+// `empty` is "connected, nobody found yet", which is an alarm, and this is not
+// one — nothing has read this source even once. The page draws `waiting` as a
+// neutral dot and "reading soon".
+//
+// FILESYSTEM FACTS ONLY, and each one asked of the module the connector itself
+// asks. A stale Google grant still counts as connected: the owner did connect
+// it, and the mail connector's first run is what discovers it is dead and turns
+// this row into a real failing one.
+//
+// The moment either source runs at all it has a run_log entry, so it leaves this
+// list and gets its ordinary verdict. This is a row for one gap — between the
+// owner connecting something and the reader reaching it — and for nothing else.
+function connectedWithoutRows(home) {
+  const out = [];
+  // A caller who named a config file belonging to no install gets nothing here,
+  // never the running user's ~/.hazlie. See installHome.
+  if (typeof home !== 'string' || home === '') return out;
+  try {
+    if (accountsWithScopeIncludingStale(GMAIL_SCOPE, { home }).length > 0) out.push('mail');
+  } catch {
+    // An unreadable secrets directory is the connect page's problem to report.
+    // Here it means only "cannot say it is connected", which is the state this
+    // table had before and is safe to fall back to.
+  }
+  try {
+    if (exportInstalled(home)) out.push('linkedin');
+  } catch {}
+  return out;
+}
+
+// THE READER'S FIRST-LOAD SPRINT, relayed rather than re-derived.
+//
+// The daemon publishes `sprint` into the activity file it already maintains
+// (connectors/daemon.mjs, SPRINT_MAX_MS) and screen 6 needs the one fact it
+// carries: this machine is walking last year hard, which is why the pool has
+// nobody quiet in it yet. Reading the file is the whole integration -- hermes
+// must not decide for itself whether a sprint is on, because the daemon is the
+// only process that knows, and a second opinion here would be a sentence the
+// owner sees contradicting the work actually happening.
+//
+// Absent, unreadable, or written by an older daemon all mean the same thing and
+// paint the same way: nothing. Absence of a claim is not a claim.
+// A FILE OUTLIVES THE PROCESS THAT WROTE IT, and the daemon drops this key by
+// REWRITING the file. So a daemon that was killed, quit with the app, or exited
+// on its own fatal tree-perms check leaves its last sprint object on disk
+// forever -- and screen 6 then printed "reading last year so i can tell who has
+// gone quiet" directly underneath its own banner saying "nothing is running. let
+// me start it." Quit the app mid-sprint, reopen it to that screen, and there it
+// was. connect/lib/status.mjs has daemonActivityFreshMs for exactly this reason.
+//
+// TWO GATES, because they catch different corpses. `until` catches a claim that
+// has simply expired, including the up-to-one-polling-interval gap between a
+// sprint ending and the next publish rewriting the file. The file's own mtime
+// catches a daemon that died mid-window, which `until` cannot see: the object is
+// still inside its half hour and nothing is standing behind it.
+//
+// FOUR MINUTES, not two. ~~Two is several times the gentle re-arm.~~ The re-arm
+// is the gap between PASSES; the file is written at the start of a pass and at
+// its end, and one sprint pass is a 120 s forward budget plus a 60 s history
+// slice, with one more slice allowed to start at the boundary. A two-minute
+// window therefore expired in the middle of a pass that was running, and screen
+// 6 dropped to "nobody qualifies yet" at the busiest moment of the phase.
+// widget/src/Connectors.swift picked 240 s for the same arithmetic, and these
+// two numbers describe the same event.
+const SPRINT_FILE_FRESH_MS = 240_000;
+
+function readerSprint(home, now = Date.now) {
+  if (typeof home !== 'string' || home === '') return null; // see installHome
+  const path = join(home, '.hazlie', 'connectors', 'activity.json');
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    const sprint = raw?.sprint;
+    if (sprint === null || typeof sprint !== 'object' || Array.isArray(sprint)) return null;
+    const since = Number(sprint.since);
+    const until = Number(sprint.until);
+    if (!Number.isFinite(since) || !Number.isFinite(until)) return null;
+    const at = now();
+    if (at >= until) return null;
+    if (at - statSync(path).mtimeMs > SPRINT_FILE_FRESH_MS) return null;
+    // The year the walk is on, when the daemon said it. The phase no longer stops
+    // at last year, so a screen that names one has to name the real one; an older
+    // daemon that does not publish it leaves the page with the generic sentence.
+    const year = Number(sprint.year);
+    return {
+      since,
+      until,
+      sources: (Array.isArray(sprint.sources) ? sprint.sources : [])
+        .filter((name) => typeof name === 'string' && name.length > 0),
+      ...(Number.isInteger(year) && year >= 1900 && year <= 3000 ? { year } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// A FIVE-SECOND BODY CACHE, per server.
+//
+// This is the only route in the app that is polled while it is EXPENSIVE. It
+// walks `context` grouped by source and runs three COUNT(DISTINCT person_key)
+// scans over person_event_links -- a table that is a multiple of the corpus --
+// and screen 6 polls it for as long as the owner leaves the setup screen open,
+// on the exact machine where the projection is being built underneath it.
+//
+// Five seconds, not thirty: this screen's contract is that it is watching. A
+// number that is at most five seconds old still reads as live, and the poll it
+// serves is itself on a five-second clock, so in the ordinary case the cache
+// absorbs the duplicate reads (the widget's own polls, a second panel) rather
+// than the owner's.
+//
+// Holder discipline is /stats': per-server from start(), never module scope,
+// because the test suite runs two servers in one process and they must not
+// share a body. Cleared by invalidateCorpusStats, so a purge is visible at
+// once rather than up to five seconds later.
+const ONBOARDING_PROGRESS_TTL_MS = 5_000;
+const ONBOARDING_PROGRESS_CACHE_KEY = 'onboardingProgress';
+
+function cachedOnboardingProgress(db, policy, now = Date.now) {
+  const holder = policy?.statsCacheHolder ?? FALLBACK_STATS_CACHE;
+  // THE REGISTRY IS AN INPUT, NOT PART OF THE CORPUS. Which connectors are
+  // switched off decides which ROWS exist at all, and an owner who turns a
+  // bridge back on and comes to this screen must see the row appear rather
+  // than wait out a TTL. It is a cheap read behind its own cache, so it is
+  // taken every time and forms part of the key; only the expensive half — the
+  // corpus walk and the three COUNT(DISTINCT) scans — is what the TTL holds.
+  const switchedOff = switchedOffConnectors();
+  const key = [...switchedOff].sort().join(',');
+  const at = now();
+  const entry = holder[ONBOARDING_PROGRESS_CACHE_KEY];
+  if (entry && entry.key === key && at - entry.at < ONBOARDING_PROGRESS_TTL_MS) return entry.body;
+  const body = onboardingProgress(db, policy, switchedOff);
+  holder[ONBOARDING_PROGRESS_CACHE_KEY] = { at, key, body };
+  return body;
+}
+
+function onboardingProgress(db, policy, switchedOffOverride) {
+  const projection = peopleProjectionStatus(db, policy);
+  // A missing projection state table is not "caught up"; it is "we cannot say
+  // yet", which is the grey reading state. Fail toward the honest word.
+  const projectionCurrent = projection !== null
+    && projection.rebuilding !== true
+    && projection.projectedRevision >= projection.sourceRevision;
+
+  const rowsBySource = new Map();
+  for (const row of db.prepare('SELECT source, COUNT(*) AS n FROM context GROUP BY source').all()) {
+    rowsBySource.set(String(row.source), Number(row.n));
+  }
+
+  // WHO WROTE TO YOU, per source. authored = 1 and room = 0: a name on a group
+  // thread is not somebody you have a relationship with, and the projection
+  // already records both facts as columns, so this needs no join back to
+  // `context` (person_event_links.source is a column of its own).
+  const peopleBySource = new Map();
+  let linkedinListed = 0;
+  let calendarMet = 0;
+  // AND THE OWNER IS NOT SOMEBODY YOU MET. graph.mjs drops owner ADDRESSES
+  // before a calendar participant is minted, but an identity the owner marked
+  // as themselves by KEY (config ownerPersonKeys) is only removed from the
+  // finished graph -- and links already written into the projection outlive
+  // the rebuild that would drop them. Without this, a calendar of solo events
+  // reports at least one person met and paints green, which is the same class
+  // of lie this count was added to remove, in the other direction.
+  //
+  // AND ownerPersonKeys IS EMPTY ON EVERY DEFAULT INSTALL. Marking an identity
+  // as yourself is a deliberate act (owner.mjs), so gating this filter on that
+  // set alone meant the route was unfiltered exactly where it mattered: a
+  // fresh machine, which is the machine this screen is drawn on. The fallback
+  // is the owner's own ADDRESSES, resolved to keys through the projection's
+  // own identifier table -- an exact lookup, not a guess, and the same
+  // addresses graph.mjs drops before it mints a calendar participant.
+  let ownerKeys = [];
+  try {
+    const owner = loadOwner(ownerLoadOptions(policy));
+    ownerKeys = [...(owner.keys ?? [])].filter((key) => typeof key === 'string');
+    if (ownerKeys.length === 0) {
+      const addresses = [...(owner.addresses ?? [])].filter(
+        (address) => typeof address === 'string' && address.length > 0
+      );
+      if (addresses.length > 0) {
+        ownerKeys = db.prepare(
+          'SELECT DISTINCT person_key FROM person_identifiers WHERE identifier IN ('
+          + addresses.map(() => '?').join(',') + ')'
+        ).all(...addresses).map((row) => String(row.person_key));
+      }
+    }
+  } catch (error) {
+    // WHY THE COUNT MAY BE WRONG, SAID ONCE. This was a bare catch that left
+    // the filter empty, so an unreadable config or an absent projection table
+    // silently produced an UNFILTERED count -- the owner counted as somebody
+    // they met -- with nothing anywhere to say so. The count is still
+    // published, because a number with a known caveat beats a blank screen;
+    // the caveat now exists.
+    //
+    // EXCEPT FOR THE ONE STATE THAT IS NOT A CAVEAT (round-4 finding 9).
+    // person_identifiers is created lazily by the projection, so before the
+    // first rebuild this query throws `no such table` on EVERY fresh install
+    // -- and screen 6 polls this route on a timer, so the ordinary load screen
+    // wrote the line continuously. It is the same exemption the people-counts
+    // catch below already makes, for the same table and the same reason: no
+    // projection yet means an empty owner filter is the truthful answer, not a
+    // degraded one.
+    if (!/no such table/iu.test(String(error?.message ?? ''))) {
+      console.warn(`onboarding progress: owner filter unavailable (${error?.message ?? error})`);
+    }
+  }
+  const notOwner = ownerKeys.length > 0
+    ? ` AND person_key NOT IN (${ownerKeys.map(() => '?').join(',')})`
+    : '';
+  try {
+    // THE SAME FILTER, because the two numbers are drawn side by side. The
+    // per-source counts excluded nobody while calendarMet excluded the owner,
+    // so the same screen disagreed with itself about whether the owner is a
+    // person.
+    for (const row of db.prepare(
+      'SELECT source, COUNT(DISTINCT person_key) AS n FROM person_event_links '
+      + 'WHERE authored = 1 AND room = 0' + notOwner + ' GROUP BY source'
+    ).all(...ownerKeys)) {
+      peopleBySource.set(String(row.source), Number(row.n));
+    }
+    linkedinListed = Number(db.prepare(
+      "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links " +
+      "WHERE source = 'linkedin' AND role = 'profile'"
+    ).get()?.n ?? 0);
+    // NOBODY AUTHORS AN INVITATION. graph.mjs mints calendar links from the
+    // attendee list and the organizer -- role 'attendee', 'organizer' or
+    // 'declined', authored:false on every single one, because an invite is not
+    // a message. The authored count above is therefore STRUCTURALLY zero for
+    // calendar however well the connector is working, and on the owner's own
+    // machine it painted "connected, nobody found yet" over 21,630 calendar
+    // rows: the exact failure state this screen exists to catch, reported
+    // about the working case.
+    //
+    // 'declined' is left out. The response the owner has on file says that
+    // person did not come, and every other calendar consumer here
+    // (calendarReconnect, matcher, the eligibility producer) already drops
+    // declines; counting them under a column headed "people you met" would be
+    // the same class of lie in the other direction.
+    //
+    // `room` is deliberately NOT in this predicate. graph.mjs sets room only
+    // for message threads, so no calendar link has ever carried it, and a
+    // filter that cannot fire reads as a rule about invitations that is not
+    // one.
+    calendarMet = Number(db.prepare(
+      "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links " +
+      "WHERE source = 'calendar' AND role IN ('attendee', 'organizer')" + notOwner
+    ).get(...ownerKeys)?.n ?? 0);
+  } catch (error) {
+    // The projection tables are created lazily; before the first rebuild they
+    // are simply absent, and zero people is the truthful answer then. Any
+    // OTHER failure here is a count this screen is about to draw as zero, so
+    // it says which one and why rather than painting "nobody found yet" over a
+    // corpus that has people in it.
+    if (!/no such table/iu.test(String(error?.message ?? ''))) {
+      console.warn(`onboarding progress: people counts unavailable (${error?.message ?? error})`);
+    }
+  }
+
+  return withPeopleDbs(db, (state) => {
+    const { runs, daemonLastRunTs } = connectorRunState(state);
+    let contactNames = 0;
+    try {
+      contactNames = Number(state?.prepare('SELECT COUNT(*) AS n FROM contact_ids').get()?.n ?? 0);
+    } catch {
+      contactNames = 0;
+    }
+
+    // Every source with corpus rows, every connector with run history, and
+    // contacts -- which has neither and is still connected. The page decides
+    // which of these to draw (a source the owner skipped renders "not
+    // connected"); this route decides what is true about each.
+    const names = new Set([...rowsBySource.keys(), ...Object.keys(runs)]);
+    if (contactNames > 0 || Object.hasOwn(runs, 'contacts')) names.add('contacts');
+
+    const switchedOff = switchedOffOverride ?? switchedOffConnectors();
+
+    // The two the owner may have connected thirty seconds ago. Added to `names`
+    // so they are gated by exactly the same two rules as every other row -- a
+    // connector this install has switched off must not appear here either --
+    // and never for a source that already has rows or a run, which would
+    // overwrite a real verdict with a placeholder.
+    const waitingNames = new Set(
+      connectedWithoutRows(installHome(policy)).filter((source) => !names.has(source))
+    );
+    for (const source of waitingNames) names.add(source);
+
+    const listedNames = [...names].filter((source) => listedOnboardingSource(source, switchedOff)).sort();
+
+    // ONE GREY LINE INSTEAD OF SEVEN AMBER ROWS. Rows this install keeps and
+    // no longer reads people from -- a photo library, an Instagram archive
+    // from before the bridges were switched off. They are not a per-source
+    // problem and they are not the owner's to fix, so they collapse to names
+    // and a total; the page says one sentence about them and moves on.
+    const dormantNames = [...rowsBySource.keys()]
+      .filter((source) => !listedOnboardingSource(source, switchedOff)).sort();
+    const dormant = {
+      sources: dormantNames,
+      rows: dormantNames.reduce((total, source) => total + (rowsBySource.get(source) ?? 0), 0),
+    };
+
+    const sources = listedNames.map((source) => {
+      const failStreak = runs[source]?.failStreak ?? 0;
+      if (source === 'contacts') {
+        // Both cells carry the same number because the address book's rows ARE
+        // names -- there is no second, smaller "and these ones wrote to you"
+        // population to report. peopleKind tells the page to say so.
+        return {
+          source,
+          rows: contactNames,
+          people: contactNames,
+          peopleKind: 'names',
+          status: sourceStatus({
+            rows: contactNames, people: contactNames, failStreak,
+            // Contacts never reaches the people projection at all, so gating
+            // its verdict on a projection revision would leave it grey
+            // forever. Its number comes straight from the connector's own
+            // table and is current the moment the connector writes it.
+            projectionCurrent: true,
+          }),
+        };
+      }
+      const peopleKind = ONBOARDING_PEOPLE_KIND[source] ?? 'authors';
+      if (waitingNames.has(source)) {
+        // Zeroes, and a word that says nobody has looked yet. Deliberately not
+        // put through sourceStatus: every branch of it answers a question about
+        // a source that HAS been read.
+        return { source, rows: 0, people: 0, peopleKind, status: 'waiting' };
+      }
+      const rows = rowsBySource.get(source) ?? 0;
+      const people = peopleKind === 'listed' ? linkedinListed
+        : peopleKind === 'met' ? calendarMet
+        : (peopleBySource.get(source) ?? 0);
+      return {
+        source,
+        rows,
+        people,
+        peopleKind,
+        status: sourceStatus({ rows, people, failStreak, projectionCurrent }),
+      };
+    });
+
+    const sprint = readerSprint(installHome(policy));
+    return {
+      state: 'ok',
+      sources,
+      dormant,
+      projection,
+      runs,
+      daemonLastRunTs,
+      ...(sprint === null ? {} : { sprint }),
+    };
+  });
 }
 
 function send(res, status, body, extraHeaders = {}) {
@@ -3427,6 +6944,60 @@ function schedulePeopleProjectionRefresh(db) {
   }, 30_000);
   timer.unref?.();
   peopleProjectionTimers.set(db, timer);
+}
+
+// The rebuild that was missing entirely: clearPeopleProjection() (a privacy
+// purge, or /admin/people/clear) leaves `people` empty and
+// projected_revision at -1 until something calls materializedPeopleGraph --
+// which previously only happened when the People page or search ran. Every
+// server-side reader in between (including a fresh boot, when the state was
+// already -1/0 from a purge that ran before the last restart) saw an empty
+// table. This is the eager trigger for both of those moments.
+//
+// Holder-per-process, same pattern as relationshipState: rebuilding/
+// lastRebuildError live on policy.peopleProjectionHolder (or policy itself,
+// for callers -- tests -- that pass a bare holder), not on the module, so
+// concurrent hermes instances in one process (tests) do not share state.
+// setImmediate, not a new timer/scheduler: this fires once, after the
+// request that triggered it (server.listen, or the clear/retain/purge/
+// delete-entities route) has already returned.
+//
+// policy.peopleProjectionAutoRebuild (default true; a start() test seam like
+// relationshipMatcher/relationshipCap) exists because "returns first" is not
+// "runs so much later that a synchronous DB check after the response
+// resolves stays clean" -- a bare setImmediate can and does land inside the
+// same tick a fast-running test's `await fetch(...)` resumes in. Several
+// existing lifecycle tests assert the projection is empty in the instant
+// after a clear/purge, which this feature makes racy by design; they opt out
+// with this flag rather than the production default changing for them.
+function schedulePeopleRebuild(db, policy, reason) {
+  if (policy.peopleProjectionAutoRebuild === false) return;
+  const holder = policy.peopleProjectionHolder ?? policy;
+  if (!holder.__peopleProjection) {
+    holder.__peopleProjection = { rebuilding: false, lastRebuildError: null };
+  }
+  const state = holder.__peopleProjection;
+  if (state.rebuilding) return;
+  state.rebuilding = true;
+  setImmediate(() => {
+    try {
+      withPeopleDbs(db, (peopleDb, resDb) => {
+        const { aliases } = resolutionState(resDb);
+        materializedPeopleGraph(db, peopleDb, { now: Date.now(), owner: loadOwner(ownerLoadOptions(policy)), aliases, force: false });
+      });
+      state.lastRebuildError = null;
+    } catch (e) {
+      // Surfaced on /stats' peopleProjection.lastRebuildError rather than
+      // thrown: the request that scheduled this already answered, and a
+      // failed rebuild leaves the previous (possibly empty) projection in
+      // place for the raw-rebuild fallback to cover, same as every other
+      // projection failure in this file.
+      state.lastRebuildError = String(e?.message ?? e);
+      console.error(`people projection rebuild (${reason}) failed:`, e?.stack ?? e);
+    } finally {
+      state.rebuilding = false;
+    }
+  });
 }
 
 // WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
@@ -3701,6 +7272,185 @@ async function handleVaultAsk(db, req, res, cors, policy) {
   }
 }
 
+// --- /stats' memoised status blocks -------------------------------------------
+//
+// WHY THIS EXISTS. On the live machine (2026-09-12) four consecutive
+// GET /stats took 15.9s, 9.1s, 6.1s and 1.0s while hermes sat at 98% CPU
+// warming the people core after an install. Timed against a read-only copy of
+// that database the cost is entirely two blocks: sweepStatus 795ms and
+// lookupStatus 637ms, against lintStatus 2ms and cardStats 1ms. The call-site
+// comments below call all four "plain aggregates"; for these two that is
+// wrong and the wrongness is the bug. sweepStatus walks sweepScope, which runs
+// one MAX(pel.context_id) query per person in the house; lookupStatus walks
+// lookupScope, which runs anchorsFor + buildLookupQuery per person. Both are
+// O(people), and /stats is polled.
+//
+// It was not merely slow, it was load-bearing: the connectors daemon's startup
+// probe gave /stats 4s and every non-`fda-*` FAIL is fatal in daemon.mjs'
+// partitionChecks, so a busy hermes stopped ALL ingestion until somebody
+// restarted the daemon by hand. The daemon half of that is fixed in
+// connectors/lib/checks.mjs (a /stats timeout is now a WARN); this half is the
+// guarantee that /stats stops being the expensive route in the first place.
+//
+// THE SHAPE, and the one honest limit in it. The first request after boot has
+// nothing to serve, so that request does pay the walk. After that the block is
+// served from the cache for TTL; the first request past the TTL schedules ONE
+// refresh and answers immediately from the last value with `staleMs`. The
+// refresh still blocks this single-threaded process when it runs -- there is no
+// worker here and these are synchronous node:sqlite reads -- but it blocks
+// BETWEEN requests, once per TTL, instead of inside every request. A caller
+// therefore never waits on the walk again, which is the property the daemon
+// probe needs.
+//
+// CACHED: sweep, lookup and features, all three on this TTL.
+//
+// ~~features is read per request on purpose -- a stale echo of the effective
+// feature set is worse than useless.~~ That sentence stood here for sixty
+// lines above `cachedStatus(statusCache, 'features', ...)`, which is a wire
+// contract describing the opposite of the code. What the original was
+// protecting is still true and is still true UNDER the cache: an owner
+// override becomes visible without a restart. The TTL changes the resolution
+// of that from "this instant" to "within STATS_CACHE_TTL_MS", and `readAt` on
+// the block makes the age legible rather than implicit, which the per-request
+// read never did.
+//
+// Deliberately NOT cached: rows, peopleProjection, lint and cards are counts
+// or state reads (lint 2ms, cards 1ms on the live database).
+//
+// memory is uncached too, and that one is a JUDGEMENT AND NOT A MEASUREMENT:
+// it was not timed during the incident. Do not read its presence here as
+// evidence that it is cheap. `pending` used to be
+// selectRows({fromDays: 3650, limit: 100000}).length -- a hundred thousand
+// corpus rows materialised to take their length -- and is now
+// countSelectable(), the COUNT(*) this comment asked for. Time it before
+// widening this cache to cover it.
+//
+// INVALIDATION. A purge deletes rows; the cached blocks do not notice, and for
+// up to a TTL afterwards /stats answered `rows: 0` beside sweep and lookup
+// numbers computed over the corpus that was just removed -- with no staleMs,
+// because a cached block inside its TTL certifies itself as current. Every
+// route that clears the people projection now clears the corpus-derived blocks
+// too (invalidateCorpusStats), so the two halves of one answer cannot disagree.
+//
+// The holder is created per server in start() and arrives on `policy`: two
+// servers in one process (the test suite runs two) must not share a cache.
+// FALLBACK_STATS_CACHE below covers the one caller that has no holder.
+export const STATS_CACHE_TTL_MS = 30_000;
+
+// How long after answering a stale request the refresh behind it starts.
+// MEASURED, not guessed: at 0ms (and worse, on setImmediate) the refresh lands
+// on top of the flush of the very response that scheduled it -- a 300ms probe
+// delayed that response's delivery by 308ms in ui/test/hermes.test.mjs. A small
+// real delay puts the answer on the wire first, which is the whole point of
+// refreshing in the background. It costs nothing: the block being refreshed is
+// already older than its TTL, and one more 50ms is not a number anybody reads
+// off /stats.
+const STATS_REFRESH_DELAY_MS = 50;
+
+// A refresh that never lands must not freeze the block forever.
+//
+// `entry.refreshing` is a latch, cleared only in the deferred timer's finally.
+// If that timer never fires -- an unref'd timer on a process shutting down, a
+// synchronous compute that wedges, a fake-timer test that never advances --
+// the entry stays latched, every later request skips scheduling a refresh, and
+// the block is served from a value that ages without bound while faithfully
+// reporting a growing staleMs. Past two TTLs the latch is treated as lost and
+// a new refresh is allowed: at worst two refreshes overlap, which costs one
+// extra walk, and the alternative is a number that is never computed again.
+const STATS_REFRESH_LOST_TTLS = 2;
+
+// The holder of last resort, for a caller that reaches handle() without the
+// per-server one start() creates.
+//
+// `policy.statsCacheHolder ?? policy` fell back to the POLICY OBJECT, and on
+// that path the policy is a fresh per-request literal -- so the fallback was a
+// cache with a lifetime of one request, which is to say no cache at all, for
+// exactly the route the cache exists to keep cheap. Module scope shares one
+// cache between such callers; that is the tradeoff, and it is the right way
+// round, because two servers in one process both get their OWN holder from
+// start() and never reach this.
+const FALLBACK_STATS_CACHE = {};
+
+// The blocks computed FROM THE CORPUS, and therefore the blocks a purge,
+// retain or entity delete makes wrong. `features` is a file read and is not
+// affected by anything that happens to `context`.
+const CORPUS_STATS_BLOCKS = Object.freeze(['sweep', 'lookup']);
+
+// Drop the corpus-derived blocks so the next /stats recomputes them. Called
+// from every route that clears the people projection -- the two states go
+// stale for the same reason and at the same instant, and a cached block inside
+// its TTL reports no staleMs at all, so nothing downstream could tell.
+function invalidateCorpusStats(policy) {
+  const holder = policy?.statsCacheHolder ?? FALLBACK_STATS_CACHE;
+  for (const key of CORPUS_STATS_BLOCKS) delete holder[key];
+  // The setup screen's table is corpus-derived too, and it is the one surface
+  // where a stale count after a purge would be read as the purge not working.
+  delete holder[ONBOARDING_PROGRESS_CACHE_KEY];
+}
+
+// Shipped on /stats.features beside `readAt`. The three processes that read
+// ops/features.json do not read it at the same times: the app (Features.swift)
+// caches for its process lifetime and the connectors daemon caches at module
+// load, while hermes re-reads on a TTL. So the flags on /stats are hermes'
+// view, and a flag flipped since the app and the daemon started is a flag
+// nothing else is acting on yet. That is a sentence on the wire rather than
+// folklore because /stats is what a retest asks from outside the box, and it
+// is the exact question a retest gets wrong.
+//
+// The first clause says "on a short TTL" and not "per request", which is what
+// this note was first drafted as, because putting the cache in and shipping a
+// sentence saying there is no cache is how a wire contract starts lying. The
+// clause that matters is the second one, and it is unchanged.
+const FEATURES_READ_NOTE =
+  `hermes re-reads the registry on a ${STATS_CACHE_TTL_MS / 1000}s TTL (see readAt); `
+  + 'the app and daemon apply flags at their next restart';
+
+function cachedStatus(holder, key, compute, { ttlMs = STATS_CACHE_TTL_MS, now = Date.now() } = {}) {
+  const entry = (holder[key] ??= {
+    value: null, computedAt: null, refreshing: false, refreshStartedAt: null,
+  });
+  const run = () => {
+    try {
+      entry.value = compute();
+    } catch {
+      // The same contract as the try/catch that used to sit at each call site:
+      // a missing or pre-migration table nulls ONE block and never takes
+      // /stats down. computedAt is stamped even on the failure, so a status
+      // that throws is not re-thrown on every request for the next TTL.
+      entry.value = null;
+    }
+    entry.computedAt = Date.now();
+  };
+  // A latch that has been held longer than two TTLs is a refresh that is not
+  // coming back -- see STATS_REFRESH_LOST_TTLS. Without this the block is
+  // frozen for the life of the process.
+  const latchLost = entry.refreshing
+    && entry.refreshStartedAt !== null
+    && now - entry.refreshStartedAt >= ttlMs * STATS_REFRESH_LOST_TTLS;
+  if (entry.computedAt === null) run();
+  else if ((!entry.refreshing || latchLost) && now - entry.computedAt >= ttlMs) {
+    entry.refreshing = true;
+    entry.refreshStartedAt = now;
+    // A real timer, not setImmediate and not 0ms -- see STATS_REFRESH_DELAY_MS
+    // for the measurement. unref'd because a warm cache is never a reason to
+    // hold the process (or a test's server.close()) open.
+    setTimeout(() => {
+      try {
+        run();
+      } finally {
+        entry.refreshing = false;
+        entry.refreshStartedAt = null;
+      }
+    }, STATS_REFRESH_DELAY_MS).unref?.();
+  }
+  if (entry.value === null) return null;
+  const out = { ...entry.value, computedAt: entry.computedAt };
+  // Only while a refresh is actually in flight: a block with no staleMs is one
+  // whose numbers are inside the TTL, and the distinction is the point.
+  if (entry.refreshing) out.staleMs = now - entry.computedAt;
+  return out;
+}
+
 async function handle(db, req, res, cors, url, policy) {
   // Deliberately the one unauthenticated route: it is the liveness probe for a
   // process that is meant to run for months, and a probe that needs a
@@ -3737,7 +7487,97 @@ async function handle(db, req, res, cors, url, policy) {
 
   if (req.method === 'GET' && url.pathname === '/stats') {
     const { n } = db.prepare('SELECT count(*) AS n FROM context').get();
-    send(res, 200, { rows: Number(n), memory: memoryProgress(db) }, cors);
+    // sweep and lookup are THE two expensive blocks on this route, and they
+    // are memoised rather than recomputed per request -- see cachedStatus
+    // above for the measurements and for what the cache does and does not
+    // promise. cachedStatus keeps the old defensive contract: a status that
+    // throws nulls its own block and never takes /stats down.
+    const statusCache = policy.statsCacheHolder ?? FALLBACK_STATS_CACHE;
+    const statusOpts = {
+      ttlMs: policy.statsCacheTtlMs ?? STATS_CACHE_TTL_MS,
+      now: Date.now(),
+    };
+    // Test seam only, same discipline as relationshipMatcher and the other
+    // start() seams: production leaves statusProbes undefined and these are
+    // the real functions.
+    const probes = policy.statusProbes ?? {};
+    // `policy` so the reported cap is the one actually in force: this used
+    // to print SWEEP_DAILY_CALL_CAP_DEFAULT unconditionally, so a config
+    // override was invisible here and the number shown was never the
+    // number sweepGate refuses at.
+    const sweep = cachedStatus(
+      statusCache, 'sweep', () => (probes.sweep ?? sweepStatus)(db, policy), statusOpts
+    );
+    const lookup = cachedStatus(
+      statusCache, 'lookup', () => (probes.lookup ?? lookupStatus)(db, policy), statusOpts
+    );
+    // lintStatus really is a plain aggregate over brand-new tables -- 2ms on
+    // the live database, so it stays live and keeps the inline wrap that
+    // cachedStatus took over for sweep/lookup: a missing/pre-migration lint
+    // schema must never take /stats down.
+    let lint = null;
+    try {
+      lint = lintStatus(db);
+    } catch {
+      lint = null;
+    }
+    // cardStats is a plain aggregate over rm_card_event (1ms), live for the
+    // same reason as lint and wrapped the same way -- a missing/pre-migration
+    // rm_card_event table must never take /stats down.
+    let cards = null;
+    try {
+      cards = cardStats(db, { now: Date.now() });
+    } catch {
+      cards = null;
+    }
+    // THE EFFECTIVE FEATURE SET, echoed so a machine can be ASKED what it
+    // believes rather than inspected. Three processes read ops/features.json —
+    // this one, the connectors daemon and the app — and the owner override at
+    // ~/.hazlie/features.json means the shipped file is not the answer. /stats
+    // is where "what is actually on, on THIS install" lives, which is the
+    // question the retest has to ask from outside.
+    //
+    // WHOSE VIEW THIS IS, which the block used to leave for the reader to
+    // assume. This paragraph replaces one saying the registry is read per
+    // request rather than cached at boot, because a stale echo would be worse
+    // than useless when the question is whether an override landed. That
+    // reasoning still holds against a BOOT read and it is why the answer is not
+    // one; it did not hold against the per-request read it was defending,
+    // because hermes was never the process the flag has to reach. The app
+    // (Features.swift) caches the registry for its process lifetime and the
+    // connectors daemon caches it at module load, so /stats could report a flag
+    // that nothing else on the machine was acting on yet, and say nothing about
+    // the gap. It now says both things: `readAt` is when hermes last read the
+    // file, and `note` is who has and has not picked the value up.
+    //
+    // Behind the same short TTL as sweep/lookup, which changes the resolution
+    // of that answer from "this instant" to "within STATS_CACHE_TTL_MS" and
+    // does not change what it means -- an override still becomes visible
+    // without a restart, which is the property the old comment was protecting,
+    // and readAt makes the age legible rather than implicit. Wrapped like every
+    // other block: an unreadable registry must never take /stats down, and
+    // readFeatures already answers ALL_OFF rather than throwing.
+    const registry = cachedStatus(statusCache, 'features', () => readFeatures(), statusOpts);
+    let features = null;
+    if (registry !== null) {
+      // computedAt is renamed rather than carried alongside: two field names
+      // for one number invites a reader to believe they are different clocks.
+      // staleMs survives under its own name, as on every other cached block.
+      const { computedAt, ...flags } = registry;
+      features = { ...flags, readAt: computedAt, note: FEATURES_READ_NOTE };
+    }
+    send(res, 200,
+      {
+        rows: Number(n),
+        memory: memoryProgress(db),
+        peopleProjection: peopleProjectionStatus(db, policy),
+        sweep,
+        lookup,
+        lint,
+        cards,
+        features,
+      },
+      cors);
     return;
   }
 
@@ -3813,7 +7653,7 @@ async function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/self' || url.pathname === '/people/role' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/avatars') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/self' || url.pathname === '/people/role' || url.pathname === '/people/sub-roles' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/avatars') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -3831,13 +7671,14 @@ const PEOPLE_INIT_FIELDS = Object.freeze(['days']);
 const PEOPLE_DECIDE_FIELDS = Object.freeze(['verdict', 'a', 'b']);
 const PEOPLE_SELF_FIELDS = Object.freeze(['key']);
 const PEOPLE_ROLE_FIELDS = Object.freeze(['key', 'role', 'year']);
+const PEOPLE_SUB_ROLES_FIELDS = Object.freeze(['personKey', 'subRoles']);
 const PEOPLE_YEAR_COMPLETION_FIELDS = Object.freeze(['year']);
 
 // Phase 1 routes. init and review both build the people map and return the
 // pairs still needing the owner's eyes; decide records one call. Split out so
 // handle() stays a flat dispatch table.
 async function handlePeople(db, req, res, cors, url, policy) {
-  const owner = loadOwner();
+  const owner = loadOwner(ownerLoadOptions(policy));
 
   // Timeframe in days back (0 = all time), from the popup's selector. Clamped to
   // a decade so a fat-fingered value can't ask for an epoch before the corpus.
@@ -3916,6 +7757,34 @@ async function handlePeople(db, req, res, cors, url, policy) {
     });
     rebuildPeopleCore(db);
     send(res, 200, { state: 'ok', ...marked }, cors);
+    return;
+  }
+
+  // The owner's correction for the eligibility producer's investor/founder
+  // mode filter (relationship/producer.mjs): same shape and posture as
+  // /people/role above, just a different override map (personSubRoles,
+  // subRoles.mjs's subRolesFor) and a closed three-value set instead of a
+  // closed four-value one. An empty array is accepted and means "none of
+  // these" -- not "no correction" -- so the override always wins once the
+  // owner has made this call for a person, even to clear every tag.
+  if (req.method === 'POST' && url.pathname === '/people/sub-roles') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, PEOPLE_SUB_ROLES_FIELDS);
+    if (typeof body?.personKey !== 'string' || body.personKey.length === 0 || body.personKey.length > 300) {
+      throw badRequest('"personKey" must be a person key');
+    }
+    if (!Array.isArray(body?.subRoles) || !body.subRoles.every((role) => typeof role === 'string' && SUB_ROLE_VALUES.includes(role))) {
+      throw badRequest(`"subRoles" must be an array drawn from: ${SUB_ROLE_VALUES.join(', ')}`);
+    }
+    const marked = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const person = materializedPeopleGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.personKey);
+      if (!person) throw badRequest('"personKey" is not a current person');
+      return markPersonSubRoles({ key: person.key, subRoles: body.subRoles });
+    });
+    rebuildPeopleCore(db);
+    send(res, 200, { ok: true, personKey: marked.key, subRoles: marked.subRoles }, cors);
     return;
   }
 
@@ -4087,10 +7956,50 @@ export async function start({
   askTimeoutMs = ASK_TIMEOUT_MS,
   bearerToken: fixedBearerToken,
   bearerTokenFile = process.env.HERMES_TOKEN_FILE ?? DEFAULT_HERMES_TOKEN_PATH,
-  // Test seams for the relationship card routes: a stub matcher (no llama)
-  // and a fixed cap (production reads the owner's config).
+  // Test seams for the relationship card routes: a stub matcher (no llama),
+  // a fixed cap, and a fixed producer selection (production reads all three
+  // from the owner's config).
   relationshipMatcher,
   relationshipCap,
+  relationshipProducerConfig,
+  // Test seam for the three routes that WRITE the owner's config file (the
+  // engine opt-in, the mode, the daily cap). Production leaves it undefined
+  // and owner.mjs resolves ~/.hazlie/connectors/config.json itself.
+  //
+  // It exists because the alternative bit a real machine. The mode route began
+  // persisting what it used to only hold in memory, and every route test that
+  // had ever posted a mode -- none of which redirect HOME, because until then
+  // the route wrote nothing -- immediately started editing the developer's own
+  // config. A test that reaches outside its tmpdir is a test that can only be
+  // noticed by accident.
+  ownerConfigPath: ownerConfigPathOverride,
+  // Test seam for the person-page builder: a pre-built `{name, complete}`
+  // engine, so a route test never spawns the real claude CLI or reaches
+  // loopback llama-server. Production leaves this undefined and
+  // relationshipMemoryEngine() reads the owner's config file per call.
+  relationshipMemoryEngine: relationshipMemoryEngineOverride,
+  // Test seam for public lookup (L5 step 6): a pre-built `{name, complete}`
+  // engine (or null, to exercise the no-engine path), same discipline as
+  // relationshipMemoryEngine above. Production leaves this undefined and
+  // relationshipLookupEngine() reads the owner's config file per call.
+  relationshipLookupEngine: relationshipLookupEngineOverride,
+  // Test seam: production always wants the eager rebuild (see
+  // schedulePeopleRebuild); a test asserting synchronous post-clear/purge
+  // emptiness opts out rather than the production default changing for it.
+  peopleProjectionAutoRebuild = true,
+  // Test seams for GET /stats' memoised status blocks (see cachedStatus):
+  // a shorter TTL, and stand-in sweep/lookup computers so a test can prove
+  // the cache without a corpus big enough to make the real walk slow.
+  // Production passes neither.
+  statsCacheTtlMs,
+  statusProbes,
+  // Test seam: the holder itself, so a test can inspect a cached entry or put
+  // one into a state a timer cannot be made to produce -- notably a
+  // `refreshing` latch left behind by a refresh that never landed, which is
+  // the one case STATS_REFRESH_LOST_TTLS exists for and the one case no amount
+  // of waiting can create. Production passes nothing and gets the per-server
+  // holder below.
+  statsCacheHolder: statsCacheHolderOverride,
   llamaModel = process.env.HAZLIE_MAIN_MODEL,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
@@ -4129,6 +8038,14 @@ export async function start({
   // state, and the relationship service (spine handle, resolutions handle,
   // current card batch) must live for the process, not the request.
   const relationshipHolder = {};
+  // Same reasoning, for the eager people-projection rebuild: rebuilding/
+  // lastRebuildError must survive across the requests that trigger and poll
+  // it (schedulePeopleRebuild, and GET /stats).
+  const peopleProjectionHolder = {};
+  // Same reasoning again, for GET /stats' memoised sweep/lookup blocks: the
+  // cache must live for the process and must NOT be shared between two servers
+  // in one process, so it is a per-start() holder rather than module state.
+  const statsCacheHolder = statsCacheHolderOverride ?? {};
   const configuredDbPath = dbPath ?? process.env.HERMES_DB;
   const resolvedDbPath = configuredDbPath ?? DEFAULT_DB_PATH;
   // Summary generation was retired. Remove its private derived database and
@@ -4174,7 +8091,16 @@ export async function start({
         peopleSearchCachePath,
         relationshipMatcher,
         relationshipCap,
+        relationshipProducerConfig,
+        ownerConfigPath: ownerConfigPathOverride,
+        relationshipMemoryEngine: relationshipMemoryEngineOverride,
+        relationshipLookupEngine: relationshipLookupEngineOverride,
         relationshipHolder,
+        peopleProjectionHolder,
+        peopleProjectionAutoRebuild,
+        statsCacheHolder,
+        statsCacheTtlMs,
+        statusProbes,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);
@@ -4184,6 +8110,17 @@ export async function start({
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {
+      // A projection left at -1/0 by a purge that ran before the last
+      // restart (or a fresh install) would otherwise sit empty until the
+      // People page or a search happened to ask for it. Read-only and
+      // skipped on any error -- a missing/unreadable state table means
+      // nothing to correct here, not a startup failure.
+      try {
+        const state = projectionState(db);
+        if (!state || Number(state.projected_revision) < 0 || Number(state.people_count) === 0) {
+          schedulePeopleRebuild(db, { peopleProjectionHolder, peopleProjectionAutoRebuild }, 'startup');
+        }
+      } catch {}
       resolve({
         server,
         db,

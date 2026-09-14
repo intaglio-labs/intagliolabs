@@ -33,6 +33,12 @@ function submitFromWidget() {
 // `talking` goes on the inner one.
 const orbBtn = document.getElementById('orb');
 const orbEl = orbBtn.querySelector('.orb');
+// The direct door to the reconnect card, next to People and Settings in the
+// gear row -- see paintReconnectBtn below for how its badge/title track the
+// same cardPending the notify orb answers to.
+const reconnectBtn = document.getElementById('reconnect');
+const reconnectBadge = document.getElementById('reconnectBadge');
+reconnectBtn.addEventListener('click', () => hzPost('openReconnect'));
 // The wake fires HERE, off the click, not off the voice stack. Arming has to
 // reach native, start the ear page, load models and speak a greeting before
 // any state comes back — and if voice is not provisioned, none ever does.
@@ -66,11 +72,23 @@ orbEl.addEventListener('animationend', (e) => {
 // needed room the window did not have: see main.swift's cloudSlot, which
 // reserves it above the bar.
 const VOICE_TEASE = true;
+// ...and one gate ABOVE it, from ops/features.json. VOICE_TEASE answers "is
+// the voice stack good enough to arm yet"; `voice` answers "is this app
+// shipping voice at all". They are different questions and the second one wins.
+//
+// Starts FALSE and is filled in when the registry lands, so a tap in the first
+// few frames of a launch cannot promise something the build does not have. See
+// applyFeatures at the foot of this file.
+let voiceFeatureOn = false;
 // The explicit break keeps the smiley with its sentence instead of letting
 // WebKit strand it on a third line inside the fixed-width thought bubble.
 const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
 // Owner direction, 2026-08-31: move the chat-unlock changes onto UI-updates
-// and keep this entry point accessible for natural-language Deep Search.
+// and keep this entry point accessible for natural-language Deep Search. This
+// also covers the frontier handoff's requirement (chat is the only place the
+// exact outbound prompt can be reviewed and edited): the tease flag that
+// briefly gated chat for that reason alone was superseded by this permanent
+// removal, so it never shipped separately.
 const TEASE_MS = 2400;
 const WORK_DETAILS_MS = 4800;
 const dreamEl = document.getElementById('wdream');
@@ -308,6 +326,18 @@ function orbTap() {
     // its tone run either way — the orb still has to answer the finger.
     hzSfx.wake();
     wakeOrb();
+    // VOICE OFF: THE ORB STILL ANSWERS THE FINGER, AND SAYS NOTHING ELSE.
+    //
+    // The wake above is deliberately outside this gate. It is the orb being
+    // alive, not the voice feature — the jackpot, the notify card and the work
+    // flywheel all still ride on it, and an orb that does not blink when
+    // pressed reads as broken rather than as dormant.
+    //
+    // What goes is the promise: no "voice coming soon" cloud for a feature that
+    // is not merely unfinished but switched off, and no arm. VOICE_TEASE keeps
+    // its exact meaning for when `voice` is on — it is still the one constant
+    // that turns the tease back into a real arm.
+    if (!voiceFeatureOn) return;
     if (VOICE_TEASE) { showTease(); return; }
     hzPost('voiceArm');
     return;
@@ -393,12 +423,34 @@ orbBtn.addEventListener('pointerleave', () => {
   // hover has no timer, so it folds away immediately.
   if (dreamKind === 'work' && !teaseTimer) hideTease();
 });
+// Names the person and the trigger instead of the generic tease, so the
+// title (which doubles as the hover tease -- there is no separate bubble for
+// the notify face) tells the owner who and why before they even tap.
+function cardTeaseText(card) {
+  if (!card?.name) return 'someone to reconnect with';
+  const ev = card.evidence ?? {};
+  // An Owe card has no dormancy at all -- it is about a specific overdue
+  // thing -- so it teased the bare name while a reconnect card got a
+  // number. Its own number is the overdue count.
+  if (card.kind === 'owe') {
+    return ev.overdueDays ? `${card.name} · ${ev.overdueDays}d overdue` : `${card.name} · waiting on you`;
+  }
+  return ev.dormancyDays ? `${card.name} · quiet ${ev.dormancyDays} days` : card.name;
+}
+// The gear-row door mirrors the orb's own notify tease (same badge digit,
+// same title text) rather than having its own opinion about whether a card
+// is waiting -- two doors into the same card should never disagree.
+function paintReconnectBtn() {
+  reconnectBadge.hidden = !cardPending;
+  reconnectBtn.title = cardPending ? cardTeaseText(cardPending) : 'Reconnect';
+}
 function paintOrbState() {
+  paintReconnectBtn();
   const processing = voiceOrbState === 'idle' && !!workLabel;
   if (voiceOrbState === 'idle' && cardPending) {
     setOrbState('notify');
     orbEl.classList.toggle('processing', false);
-    orbBtn.title = 'someone to reconnect with';
+    orbBtn.title = cardTeaseText(cardPending);
     return;
   }
   setOrbState(voiceOrbState !== 'idle' ? voiceOrbState : (processing ? 'listening' : 'idle'));
@@ -459,9 +511,17 @@ setInterval(refreshWorkState, 1500);
 // hands a card out -- recording it here double-counted every widget relaunch
 // into the global cap and could race the popup out of the last cap slot
 // (audit, reproduced). The page just renders what it is given.
+//
+// A PEEK, NOT A SERVE (review finding 4). This poll used to call the same
+// GET /card the panel does, which RECORDS the serve: a 'shown' row, a
+// global-cap slot, that person's 7-day pool cooldown, and -- because
+// pickProducer reads 'shown' -- the other producer's turn, all spent on a
+// card nobody had looked at, twice an hour, in the background. relCardPeek
+// answers only the tease (name, kind, counters) and records nothing; the
+// panel's own pull is what serves the receipt.
 async function refreshRelCard() {
   try {
-    const out = await hzPost('relCard');
+    const out = await hzPost('relCardPeek');
     cardPending = out?.card ?? null;
     if (cardPending) badge.textContent = '1';
   } catch {
@@ -469,8 +529,11 @@ async function refreshRelCard() {
   }
   paintOrbState();
 }
-setTimeout(refreshRelCard, 15_000);
+setTimeout(refreshRelCard, 5_000);
 setInterval(refreshRelCard, 600_000);
+// Native pokes this straight after a judgment or a panel close, so the orb
+// never sits dark on stale news for up to ten minutes waiting on the poll.
+window.__hzRelCardChanged = () => refreshRelCard();
 
 // A refresh rebuilds candidates through the local model -- minutes of
 // inference -- so it runs at most once a day, kicked fire-and-forget on
@@ -487,7 +550,14 @@ try {
 // Time of day lives in bridge.js so the onboarding orb reads the same bands.
 // A wake from sleep is when the clock is most likely to have moved a long way
 // since the last check — native already pokes this hook.
-window.__hzWake = hzApplyTimeOfDay(orbEl);
+// Wrapped rather than replaced: a wake from sleep is also when a card judged
+// or a panel closed while the mac slept is most likely to be stale.
+const hzApplyTod = hzApplyTimeOfDay(orbEl);
+// A wake is the moment everything here is most likely stale — including
+// whether LinkedIn has mailed the archive while the Mac was asleep, which is
+// exactly when it would have. checkLinkedInReady is defined further down;
+// this runs long after the page has finished loading.
+window.__hzWake = () => { hzApplyTod(); refreshRelCard(); checkLinkedInReady(); };
 winput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitFromWidget();
 });
@@ -633,7 +703,23 @@ gearBtn.addEventListener('click', () => {
   hzPost('openConnections');
 });
 
-document.getElementById('months').addEventListener('click', () => {
+// THE PEOPLE BUTTON FOLLOWS THE `timeline` FLAG, and it is the whole reason
+// the button is gated rather than the page behind it. With `timeline` off the
+// door behind this button is the duplicate-pair review, which is the "find
+// pairs" window the owner asked to have taken off the surface — so the button
+// opens nothing worth opening and a button that opens nothing is worse than no
+// button. No new registry key: adding one costs three files in one commit (see
+// ops/FEATURES.md) and this needs no distinction the registry does not already
+// make.
+//
+// The press is gated as well as the pixels. The button is hidden below before
+// the first paint, so this is belt and braces rather than the mechanism — but
+// `timeline` is answered asynchronously, and a press that lands before the
+// answer must not open the popup either.
+const monthsBtn = document.getElementById('months');
+let timelineFeatureOn = false;
+monthsBtn.addEventListener('click', () => {
+  if (!timelineFeatureOn) return;
   hzPost('openMonths');
 });
 
@@ -641,7 +727,38 @@ document.getElementById('months').addEventListener('click', () => {
 // the gear is the next scene's door — so it bounces and glows until settings
 // has been opened once. Native drives it live (finish -> on, open -> off);
 // the prefs check below is what survives a relaunch in between.
-window.__hzGearNudge = (on) => gearBtn.classList.toggle('nudge', on === true);
+// ONE GLOW, MORE THAN ONE ERRAND, AND NEITHER MAY HIDE THE OTHER.
+//
+// There are two reasons the gear can want the owner: the handoff out of
+// onboarding (native drives it: finish -> on, open -> off) and LinkedIn having
+// mailed the export (below). They shared the class and the title, so whichever
+// spoke last owned the hover and the other errand went invisible — and the
+// LinkedIn one only ever turned the glow ON, so it also outlived its own errand
+// (review finding 20).
+//
+// Each errand is named, so turning one off cannot take the other's glow with it,
+// and the title says whichever is outstanding. The handoff is the more urgent of
+// the two while it lasts: it is the flow's own last instruction.
+// Most specific first, NOT most recent. The handoff's own hover is the bare
+// word "Settings", which says nothing an owner cannot already see, so an errand
+// with an actual sentence in it outranks it whenever both are outstanding.
+const GEAR_ERRANDS = [
+  // The watcher has the FILE, not just the news of it, so this outranks the
+  // "open the email" nudge: one of them is a press away from being done.
+  ['export', 'found your linkedin export — import it?'],
+  ['linkedin', 'your export is ready — open the email'],
+  ['handoff', 'Settings'],
+];
+const gearErrands = new Set();
+
+function setGearErrand(name, on) {
+  if (on === true) gearErrands.add(name); else gearErrands.delete(name);
+  gearBtn.classList.toggle('nudge', gearErrands.size > 0);
+  const speaking = GEAR_ERRANDS.find(([errand]) => gearErrands.has(errand));
+  gearBtn.title = speaking ? speaking[1] : 'Settings';
+}
+
+window.__hzGearNudge = (on) => setGearErrand('handoff', on === true);
 hzPost('prefs')
   .then((p) => {
     if (p && p.onboarded === true && p.connectorsIntroDone === false) {
@@ -649,6 +766,54 @@ hzPost('prefs')
     }
   })
   .catch(() => {});
+
+// THE ONE ERRAND THE WIDGET CAN TELL THE OWNER ABOUT.
+//
+// The LinkedIn export is the only source that needs the owner to go somewhere
+// and fetch something, and the fetch happens hours after they asked — by which
+// time the setup flow is closed and the reason they asked is forgotten. The
+// mail connector notices LinkedIn's "your archive is ready" mail and leaves a
+// note; this is the widget end of it. The glow is the gear's existing "there is
+// something for you in settings", and the hover says which thing — the same
+// split the reconnect button uses, where the title IS the tease.
+//
+// A TIMESTAMP OR NOTHING. The route refuses to answer once the export is
+// installed, so there is no second condition to get wrong here, and no way for
+// this to badge an errand the owner has already run.
+//
+// NULL IS AN ANSWER TOO, and it used to be treated as "no news": this returned
+// early, so the glow it raised outlived the errand — imported the export, and
+// the gear went on asking for it until something else cleared the class (review
+// finding 20). A reply that says there is no note takes the errand back.
+//
+// A reply that never CAME is different again, and neither raises the errand nor
+// clears it: a hermes that is still starting up has no opinion about the owner's
+// inbox, and a glow must not be dropped on its silence.
+//
+// Asked when the page loads and again on a wake, and never on a timer: the note
+// is written at most once and the gear is not a status light.
+function checkLinkedInReady() {
+  hzPost('linkedInReady')
+    .then((out) => {
+      if (out?.state !== 'ok') return;
+      // Through the shared reader: `Number(null)` is 0 and finite, so coercing
+      // here lit this glow on every fresh install. See hzExportReadyAt.
+      setGearErrand('linkedin', hzExportReadyAt(out?.readyTs) !== null);
+    })
+    .catch(() => {});
+}
+checkLinkedInReady();
+
+// THE WATCHER FOUND AN EXPORT. A panel opens with the offer on it, and this is
+// the second surface: a panel can be behind something, and the widget is on the
+// desktop by definition. Pushed by native rather than polled -- the finding is
+// an event, and the gear is not a status light.
+//
+// A null takes it back, which is how the offer being answered (by either
+// button, or by the notification) puts the glow out.
+window.__hzExportFound = (name) => {
+  setGearErrand('export', typeof name === 'string' && name !== '');
+};
 
 // Anywhere that isn't a control drags the window.
 document.body.addEventListener('mousedown', (e) => {
@@ -658,3 +823,41 @@ document.body.addEventListener('mousedown', (e) => {
 
 // Native owns the Reduce Motion override; ask for it once the page exists.
 hzApplyPrefs();
+
+// ---------------- the feature registry ----------------
+//
+// HIDDEN FIRST, REVEALED ON THE ANSWER. The chat pill and its glyph are hidden
+// synchronously here, before the first paint, and only come back if `chat` is
+// on. The other order — draw, then hide when the bridge answers — is a visible
+// flash of a door that does not open, on every launch, for the majority case.
+//
+// The .wbar pill and the .wchat glyph go together and cannot be separated: the
+// glyph IS the collapsed pill's only visible part, and an input with no way to
+// open it is an invisible strip of the widget that swallows clicks. With chat
+// off the widget bar is the orb alone, which is what the repackaging plan's
+// "orb, reconnect, settings" row describes.
+//
+// [hidden] LOSES TO A CLASS THAT SETS display — palette.css says so at §2837
+// and .wchat sets position/display of its own, so the attribute alone is not
+// enough. The rules are written there explicitly; do not drop them.
+//
+// The People button is hidden on the same terms and for the same reason (see
+// its click handler above): with `timeline` off there is nothing behind it, and
+// drawing it for one frame on every launch is a door that visibly appears and
+// then is taken away. palette.css carries a `.gear[hidden]` rule because .gear
+// sets `display: flex` and would otherwise beat the attribute — the same trap
+// this comment's first paragraph records for .wchat.
+chatBtn.hidden = true;
+winput.hidden = true;
+monthsBtn.hidden = true;
+hzFeatures().then((set) => {
+  const chatOn = hzFeatureOn(set, 'chat');
+  chatBtn.hidden = !chatOn;
+  winput.hidden = !chatOn;
+  timelineFeatureOn = hzFeatureOn(set, 'timeline');
+  monthsBtn.hidden = !timelineFeatureOn;
+  voiceFeatureOn = hzFeatureOn(set, 'voice');
+  // The bar's width is part of what native anchors side panels against, and it
+  // just changed by the whole pill.
+  reportBoundsSoon();
+});

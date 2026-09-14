@@ -32,6 +32,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { helperAvailable } from './apple-data.mjs';
+import { OWNER_ONLY_DIR_MODE } from './secrets.mjs';
 
 const PASS = 'PASS';
 const WARN = 'WARN';
@@ -128,7 +129,14 @@ function checkSqliteBackup() {
 // connector cursors, store snapshots in cache/). One group-readable directory
 // quietly widens all of it, so the tree is checked as a whole rather than
 // trusting whichever setup run created each piece.
+//
+// The mode itself comes from secrets.mjs, which is where the readers demand it
+// of a secret's own parent directory (round-5 finding 3). Restating the literal
+// here is how this check and the reader that fails on a 0755 ~/.hazlie/secrets
+// could have drifted apart without anything saying so.
 const TREE_DIRS = ['bin', 'lib', 'cache', 'connectors', 'secrets', 'context', 'logs'];
+const TREE_MODE = OWNER_ONLY_DIR_MODE;
+const TREE_MODE_TEXT = TREE_MODE.toString(8).padStart(4, '0');
 
 function checkTreePerms(home) {
   const name = 'hazlie-tree-perms';
@@ -146,7 +154,7 @@ function checkTreePerms(home) {
   } catch {
     return result(name, FAIL, `${root} does not exist`, 'run ops/setup-llm.sh, then ops/setup-connectors.sh');
   }
-  if (rootMode !== 0o700) problems.push(`.hazlie is ${rootMode.toString(8)}`);
+  if (rootMode !== TREE_MODE) problems.push(`.hazlie is ${rootMode.toString(8)}`);
   for (const child of TREE_DIRS) {
     const p = join(root, child);
     let mode;
@@ -156,25 +164,25 @@ function checkTreePerms(home) {
       missing.push(child);
       continue;
     }
-    if (mode !== 0o700) problems.push(`${child}/ is ${mode === null ? 'not a directory' : mode.toString(8)}`);
+    if (mode !== TREE_MODE) problems.push(`${child}/ is ${mode === null ? 'not a directory' : mode.toString(8)}`);
   }
   if (problems.length > 0) {
     return result(
       name,
       FAIL,
-      `expected mode 0700 throughout; ${problems.join(', ')}`,
-      `chmod 700 the named paths under ${root} (ops/setup-connectors.sh reasserts all of them)`
+      `expected mode ${TREE_MODE_TEXT} throughout; ${problems.join(', ')}`,
+      `chmod ${TREE_MODE.toString(8)} the named paths under ${root} (ops/setup-connectors.sh reasserts all of them)`
     );
   }
   if (missing.length > 0) {
     return result(
       name,
       WARN,
-      `0700 where present; missing: ${missing.join(', ')}`,
+      `${TREE_MODE_TEXT} where present; missing: ${missing.join(', ')}`,
       'run ops/setup-connectors.sh to create the full runtime tree'
     );
   }
-  return result(name, PASS, `~/.hazlie and ${TREE_DIRS.length} children are 0700`);
+  return result(name, PASS, `~/.hazlie and ${TREE_DIRS.length} children are ${TREE_MODE_TEXT}`);
 }
 
 // --- secrets ------------------------------------------------------------------
@@ -468,15 +476,15 @@ function readConfigLeniently(home) {
 // different local app serving HTML on :8787, which is why hermes moved to
 // :51789 on this Mac.) Exported so run.mjs can gate hand-runs on the same
 // probe the daemon's preflight uses.
-export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
+export async function verifyHermesIdentity(base, { fetchImpl = fetch, timeoutMs = HERMES_HEALTH_TIMEOUT_MS } = {}) {
   const offBox = loopbackProblem(base);
   if (offBox) {
-    return { ok: false, detail: `hermes URL ${base} ${offBox}`, fix: LOOPBACK_FIX };
+    return { ok: false, kind: 'off-box', detail: `hermes URL ${base} ${offBox}`, fix: LOOPBACK_FIX };
   }
   let res;
   try {
     res = await fetchImpl(`${base}/health`, {
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(timeoutMs),
       // Without this a squatter on the port answers 302 to a host it controls,
       // that host returns {"ok":true}, and the identity gate this function
       // exists to be passes — after which the caller POSTs household rows to
@@ -485,8 +493,24 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
       redirect: 'error',
     });
   } catch (error) {
+    // TWO DIFFERENT MACHINE STATES, and the caller has to be able to tell them
+    // apart. A refused connection means nothing holds the port; a timeout means
+    // something accepted the connection and has not answered yet, which on a
+    // single-threaded hermes is what a synchronous warm looks like from outside.
+    // Only the second is worth trying again, so the kind travels with the
+    // verdict rather than being re-derived from the detail string.
+    if (isTimeoutFailure(error)) {
+      return {
+        ok: false,
+        kind: 'timeout',
+        detail: `${base}/health did not answer within ${timeoutMs}ms`,
+        fix: 'hermes accepted the connection but did not answer — it is busy or wedged. '
+          + 'Check the hermes log, then launchctl kickstart -k gui/$UID/io.intaglio.hermes',
+      };
+    }
     return {
       ok: false,
+      kind: 'unreachable',
       detail: `${base}/health unreachable (${error?.cause?.code ?? error?.name ?? error})`,
       fix: 'launchctl kickstart -k gui/$UID/io.intaglio.hermes (or bash ops/setup-connectors.sh)',
     };
@@ -510,6 +534,7 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
   if (res.status !== 200 || keys === null || keys.length !== 1 || keys[0] !== 'ok' || body.ok !== true) {
     return {
       ok: false,
+      kind: 'not-hermes',
       detail: `${base}/health answered ${res.status} with a non-Hermes body — another process may hold the port`,
       fix: `lsof -nP -iTCP:${new URL(base).port} -sTCP:LISTEN  # see who holds the port, then point HAZLIE_HERMES_URL (or config.json "hermesUrl") at the real hermes`,
     };
@@ -517,15 +542,89 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
   return { ok: true };
 }
 
-async function checkHermesHealth(env, config) {
+// ONE PROBE IS NOT A VERDICT ON A SINGLE-THREADED SERVER.
+//
+// This check is FATAL in daemon.mjs' preflight: a FAIL here exits the daemon
+// and stops every connector. On 2026-09-12 the sibling /stats probe did exactly
+// that and the fix was to stop conflating slow with dead -- but the same
+// conflation survived HERE, one probe wide. Hermes is one node process; while
+// it is inside a synchronous block it serves NOTHING, /health included. It
+// warms the people core 250ms after listen() with ~7.6s of straight-line work
+// (ui/server/hermes.mjs), so a preflight landing in that window gets no answer
+// inside any single budget, FAILs, and kills the daemon over a server that is
+// two seconds from being fine.
+//
+// So a timeout is retried rather than believed. Four attempts with growing
+// gaps spans ~30s, which clears the warm with room, and a hermes still silent
+// after 30s is genuinely wedged -- that FAIL is the one the check is for.
+//
+// WHAT IS NOT RETRIED, because retrying it only delays a true answer: an
+// ECONNREFUSED (nothing is listening -- a second probe cannot conjure a
+// process), an off-box URL, and a 200 whose body is not hermes' (a squatter
+// answers the same way every time, and this is the identity gate that stops
+// household rows being POSTed at it).
+export const HERMES_HEALTH_TIMEOUT_MS = 4000;
+
+// 4s + 2 + 4s + 4 + 4s + 8 + 4s = 30s worst case, all four attempts timing out.
+const HERMES_HEALTH_BACKOFF_MS = [2000, 4000, 8000];
+
+// The seams are the same pair checkHermesStats takes, plus `sleep` so a test
+// proves the retry loop without waiting the production half-minute for it.
+export async function checkHermesHealth(env, config, {
+  fetchImpl = fetch,
+  timeoutMs = HERMES_HEALTH_TIMEOUT_MS,
+  backoffMs = HERMES_HEALTH_BACKOFF_MS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
   const name = 'hermes-health';
   const base = hermesBase(env, config);
-  const identity = await verifyHermesIdentity(base);
-  if (!identity.ok) return result(name, FAIL, identity.detail, identity.fix);
-  return result(name, PASS, `${base}/health is Hermes`);
+  const attempts = backoffMs.length + 1;
+  let last = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = await verifyHermesIdentity(base, { fetchImpl, timeoutMs });
+    // `attempts` is in the PASS detail because "it answered on the third try"
+    // is the observation that explains a slow launch, and a check that swallows
+    // it leaves the next incident with nothing to read.
+    if (last.ok) return result(name, PASS, `${base}/health is Hermes (attempts: ${attempt})`);
+    if (last.kind !== 'timeout') return result(name, FAIL, last.detail, last.fix);
+    if (attempt < attempts) await sleep(backoffMs[attempt - 1]);
+  }
+  const spanMs = backoffMs.reduce((sum, ms) => sum + ms, 0) + attempts * timeoutMs;
+  return result(
+    name,
+    FAIL,
+    `${last.detail} on any of ${attempts} attempts over ~${Math.round(spanMs / 1000)}s`,
+    last.fix
+  );
 }
 
-async function checkHermesStats(env, home, config) {
+// The /stats probe's ceiling, raised from 4s on 2026-09-12. It is not a
+// liveness budget -- hermes-health is, and it answered in 1-18ms throughout the
+// incident that moved this number. It is the budget for hermes' most expensive
+// DIAGNOSTIC route, which on that day took 15.9s, 9.1s, 6.1s and 1.0s on four
+// consecutive calls while the people core warmed after an install. ui/'s side
+// of the fix memoises the two O(people) blocks behind a 30s TTL, so the walk is
+// now paid at most once per TTL and between requests; 10s is the headroom for
+// the one cold request that still pays it, on a machine already at 98% CPU.
+export const HERMES_STATS_TIMEOUT_MS = 10_000;
+
+// A fetch rejection that means "it did not answer in time", as distinct from
+// "there is nothing there". Verified on node 24: AbortSignal.timeout rejects
+// fetch with a DOMException named TimeoutError, while a refused connection
+// arrives as TypeError('fetch failed') with cause.code ECONNREFUSED. The
+// undici codes cover a stall that lands during the body read rather than the
+// headers.
+function isTimeoutFailure(error) {
+  return error?.name === 'TimeoutError'
+    || error?.cause?.name === 'TimeoutError'
+    || error?.cause?.code === 'UND_ERR_HEADERS_TIMEOUT'
+    || error?.cause?.code === 'UND_ERR_BODY_TIMEOUT';
+}
+
+// `fetchImpl`/`timeoutMs` are test seams, the same pair checkConnectHealth
+// takes: a test proves the timeout branch against a real stub server without
+// waiting the production ten seconds for it.
+export async function checkHermesStats(env, home, config, { fetchImpl = fetch, timeoutMs = HERMES_STATS_TIMEOUT_MS } = {}) {
   const name = 'hermes-stats';
   // The destination is settled BEFORE the token is read, not after. This probe
   // is the one place doctor spends the bearer, so an off-box URL has to end the
@@ -546,18 +645,43 @@ async function checkHermesStats(env, home, config) {
   if (!/^[0-9a-f]{64}$/.test(token)) {
     return result(name, FAIL, `${tokenPath} is not one 256-bit hex token`, 'rm the file and re-run ops/setup-llm.sh');
   }
+  // A SLOW /stats IS NOT A DEAD HERMES, and conflating the two stopped the
+  // house's ingestion on 2026-09-12: this check FAILed on a 4s timeout,
+  // daemon.mjs' partitionChecks treats every non-`fda-*` FAIL as fatal, and the
+  // daemon exited while hermes was answering /health in milliseconds. Nothing
+  // restarted it until somebody noticed by hand.
+  //
+  // So the timeout branch below is a WARN, and the reasoning is that liveness
+  // is ALREADY covered: checkHermesHealth runs immediately before this one in
+  // runChecks, is FAIL-and-fatal on its own, and proves both that the port
+  // answers and that the thing answering is hermes. What this check adds is the
+  // BEARER CHANNEL, and a channel that could not be proven inside the budget is
+  // unproven, not broken. Everything else here still FAILs -- a refused or
+  // unreachable port, a non-200, a body that is not hermes' -- because each of
+  // those says something is wrong with the port rather than slow behind it.
+  //
+  // partitionChecks needs no change for this: it filters on status === 'FAIL'
+  // and a WARN was already non-fatal. daemon.mjs is untouched.
+  const timeoutFix =
+    'hermes is alive (see hermes-health) — /stats is slow, not down, so this no longer stops ingestion. ' +
+    'If it persists, GET /stats and read sweep.computedAt / lookup.computedAt: those two blocks walk every ' +
+    'person in the house and are memoised for 30s, so a cold cache or a machine pinned at 100% CPU is the ' +
+    'expected cause and neither needs a restart.';
   let res;
   try {
     // No Origin header on purpose: that is what selects Hermes' bearer
     // channel, the same channel every connector uses. Passing this check
     // therefore attests the exact auth path production writes ride.
-    res = await fetch(`${base}/stats`, {
+    res = await fetchImpl(`${base}/stats`, {
       headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(timeoutMs),
       // This request carries the bearer. A redirect would carry it onward.
       redirect: 'error',
     });
   } catch (error) {
+    if (isTimeoutFailure(error)) {
+      return result(name, WARN, `${base}/stats did not answer within ${timeoutMs}ms — the bearer channel is unproven, not broken`, timeoutFix);
+    }
     return result(name, FAIL, `${base}/stats unreachable (${error?.cause?.code ?? error?.name ?? error})`, 'see hermes-health');
   }
   if (res.status !== 200) {
@@ -571,7 +695,19 @@ async function checkHermesStats(env, home, config) {
         : 'see hermes-health'
     );
   }
-  const body = await res.json().catch(() => null);
+  // The timeout covers the BODY too, not just the headers, and the two failures
+  // are not the same finding: a stall here is the slow-/stats case again (WARN),
+  // while anything else that will not parse is a body that is not hermes' (FAIL).
+  // `.catch(() => null)` used to collapse both into the second.
+  let body = null;
+  try {
+    body = await res.json();
+  } catch (error) {
+    if (isTimeoutFailure(error)) {
+      return result(name, WARN, `${base}/stats did not finish answering within ${timeoutMs}ms — the bearer channel is unproven, not broken`, timeoutFix);
+    }
+    body = null;
+  }
   if (typeof body?.rows !== 'number') {
     return result(name, FAIL, `${base}/stats returned an unexpected shape`, 'another process may hold the port; see hermes-health');
   }

@@ -310,7 +310,12 @@ test('Settings mounts its controls without the retired memory-review row', () =>
   assert.match(connections, /rows\.push\(settingRow\(/u);
   assert.match(connections, /settings\.replaceChildren\(\.\.\.rows\)/u);
   assert.doesNotMatch(connections, /modelRow|local model size|model-pick/u);
-  assert.doesNotMatch(connections, /actionRow|what i have learned|openMemoryReview/u);
+  // ~~`actionRow` was in this list~~ — it was the helper the retired row was
+  // built with, and banning the NAME banned the shape. Settings has rows whose
+  // control is a button again (quit, uninstall, 2026-09-13) and they use a
+  // helper of that name. What the row must not come back as is the memory
+  // review itself, which is what the two markers below actually name.
+  assert.doesNotMatch(connections, /what i have learned|openMemoryReview/u);
   assert.doesNotMatch(swift, /openMemoryReview/u);
 });
 
@@ -576,17 +581,29 @@ test('setupState answers from disk immediately, and fetches rows only when asked
   assert.match(block, /rows \{ n, memory in/u, 'the row count is still available on request');
 });
 
-test('only onboarding code that reads rows pays for the row count', () => {
+// ~~"only onboarding code that reads rows pays for the row count"~~, which
+// pinned the CTA starting a model download and the data screen asking
+// setupState for rows. Both are gone with the six-screen flow, and what
+// replaced them is better on exactly the axis this test was defending.
+//
+// setupState's `rows` branch is an HTTP call into hermes, which blocks for the
+// length of its boot warm; everything else in that reply is a symlink read and
+// two file existence checks. NO PAGE ASKS FOR ROWS ANY MORE. The first-load
+// screen reads counts from /admin/onboarding/progress, a counts-only route
+// built for being polled, and onboarding's one setupState call is the fast
+// one — screen 5 asking "is a download already running" before it probes.
+test('no page pays for the slow half of setupState', () => {
   const onboarding = readFileSync(join(WIDGET, 'ui/onboarding.js'), 'utf8');
   const connections = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
-  assert.match(
-    onboarding,
-    /document\.getElementById\('cta'\)[\s\S]{0,260}hzPost\('setupState'\)/u,
-    'the welcome CTA must start model selection from the instant local state'
-  );
-  assert.match(onboarding, /hzPost\('setupState', \{ rows: true \}\)/u);
-  assert.ok(
-    !/hzPost\('setupState', \{ rows: true \}\)/u.test(connections),
-    'Settings never reads rows and must not wait for them'
-  );
+  for (const [name, source] of [['onboarding', onboarding], ['Settings', connections]]) {
+    assert.ok(
+      !/hzPost\('setupState', \{ rows: true \}\)/u.test(source),
+      `${name} must not wait on the row count`
+    );
+  }
+  // And the fast call is still there, doing the one job it is now for: a
+  // download already in flight must not be restarted by a resumed screen.
+  assert.match(onboarding, /hzPost\('setupState'\)[\s\S]{0,200}st\.downloading/u);
+  // The counts come from the route built for them.
+  assert.match(onboarding, /hzPost\('onboardingProgress'\)/u);
 });

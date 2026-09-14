@@ -58,7 +58,16 @@ test('automatic model changes are staged and activated only while idle', () => {
   assert.match(bridge, /activateAutomaticModel[\s\S]{0,500}pauseAutomaticModelSupervisors\(\)/u);
   assert.match(bridge, /resumeAutomaticModelSupervisors/u);
   assert.match(connectors, /func pauseForModelMaintenance\(\)/u);
-  assert.match(connectors, /guard !isRunning, !stopping, !modelMaintenancePaused/u);
+  // ~~one `guard !isRunning, !stopping, !modelMaintenancePaused`~~ — the three
+  // conditions are separate now so each can say WHICH of them refused a start,
+  // which is what the settings panel's "start it" button reports. All three
+  // still gate it, and model maintenance is still one of them.
+  const start = /func start\(bypassingThrottle: Bool = false\) -> StartOutcome \{([\s\S]*?)\n  \}/u
+    .exec(connectors)?.[1] ?? '';
+  assert.match(start, /if isRunning \{ return \.alreadyRunning \}/u);
+  assert.match(start, /if stopping \{ return \.stopping \}/u);
+  assert.match(start, /if modelMaintenancePaused \{ return \.modelMaintenance \}/u,
+    'a model download still holds the reader, and now says so');
   assert.match(distiller, /func pauseForModelMaintenance\(\)/u);
   assert.match(distiller, /guard !stopping, !modelMaintenancePaused/u);
 });

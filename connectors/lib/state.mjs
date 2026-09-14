@@ -162,7 +162,36 @@ export function openStateDb(path = defaultStateDbPath()) {
       'ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts'
   );
   const deleteCursorStmt = db.prepare('DELETE FROM cursor WHERE name = ?');
-  const deleteCursorsStmt = db.prepare("DELETE FROM cursor WHERE name = ? OR name LIKE ? ESCAPE '\\'");
+  // WHAT A PURGE HAS TO FORGET, WHICH IS MORE THAN ONE NAMESPACE.
+  //
+  // Observed on the live machine 2026-09-12: `node run.mjs mail --purge`
+  // deleted 81,725 mail rows from hermes and left every
+  // `yearly-backfill:connector:mail:done:<year>` behind, because those keys
+  // live under the SCHEDULER's prefix rather than the connector's. The re-pull
+  // then fetched a few days forward and one unfinished history year; 2024, 2025
+  // and 2026 were still marked done and would never have been fetched again. A
+  // cursor asserting "this year is finished" about a corpus that no longer
+  // exists is the worst kind of survivor: it is silent, and it is believed.
+  //
+  // THE ONE KEY THAT STAYS is `<connector>:history-slices-per-pass` — a rolling
+  // measurement of how many slices the last pass got through, which the
+  // activity panel turns into an ETA. It describes the machine, not the rows,
+  // so a purge has nothing to say about it.
+  const deleteCursorsStmt = db.prepare(
+    "DELETE FROM cursor WHERE (name = ? OR name LIKE ? ESCAPE '\\' "
+      + "OR name = ? OR name LIKE ? ESCAPE '\\') AND name <> ?"
+  );
+  // Did this connector take part in the yearly walk at all? See deleteCursors.
+  const countYearlyStmt = db.prepare(
+    "SELECT COUNT(*) AS n FROM cursor WHERE name = ? OR name LIKE ? ESCAPE '\\'"
+  );
+  // The product barriers for the year a reopened walk restarts at. See
+  // deleteCursors: yearlyBackfill's own reopen() and classify() both call
+  // reopenBarriers(currentYear), and this is the third door into the same
+  // state, so it has to leave the same state behind.
+  const deleteBarriersStmt = db.prepare(
+    "DELETE FROM cursor WHERE name LIKE 'yearly-backfill:barrier:%:done:' || ?"
+  );
   const recordRunStmt = db.prepare(
     'INSERT INTO run_log(connector, started_ts, finished_ts, ok, ingested, updated, unchanged, deleted, error) ' +
       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -217,6 +246,42 @@ export function openStateDb(path = defaultStateDbPath()) {
     return list;
   }
 
+  // Where the SHARED yearly walk stands — the three keys that are nobody's
+  // connector namespace. Exposed on the handle below; see the comment there.
+  //
+  // `now` IS INJECTABLE, and it has to be. yearlyBackfill resolves the walk's
+  // year through its own injected clock (yearlyBackfill.mjs savedYear), and
+  // this used the wall clock -- so under a test clock, or a purge that
+  // straddles midnight on 31 December, the barriers cleared here are for a
+  // different year than the one the reopened walk restarts at, and advance()
+  // then steps past that year without rebuilding its product phase. One walk,
+  // one clock.
+  function reopenYearlyWalk({ now = Date.now } = {}) {
+    let changes = 0;
+    // COMPLETE, because yearlyBackfill.task() short-circuits on it for EVERY
+    // connector: left standing over a purged source's missing checkpoints it
+    // means that source is never scheduled to walk its history again.
+    //
+    // THE YEAR, because with COMPLETE gone and the saved year still pointing at
+    // 1997 the reopened walk resumes at 1997 and the recent years never come
+    // back. An absent year reads as the current one, which is where a re-walk
+    // has to start.
+    for (const key of ['yearly-backfill:complete', 'yearly-backfill:year']) {
+      changes += Number(deleteCursorStmt.run(key).changes);
+    }
+    // AND THE PRODUCT BARRIER FOR THE YEAR THE WALK NOW RESTARTS AT. A barrier
+    // still marked done there claims the product phase for that year is
+    // finished — over a corpus that has just changed under it — so advance()
+    // would step straight past the year without rebuilding anything. This is
+    // what yearlyBackfill's own reopen() and classify() do (reopenBarriers) when
+    // they rewind the same walk from inside the daemon; three doors into one
+    // piece of state have to leave the same state behind. Barrier names are not
+    // known in this file, so the year is the key and the LIKE covers the roster.
+    // Older years are finished work and are left alone.
+    changes += Number(deleteBarriersStmt.run(String(new Date(now()).getFullYear())).changes);
+    return changes;
+  }
+
   return {
     db,
 
@@ -249,15 +314,85 @@ export function openStateDb(path = defaultStateDbPath()) {
       return Number(deleteCursorStmt.run(name).changes);
     },
 
+    // THE GLOBAL RESET, AS A CALL OF ITS OWN — the only thing in this file
+    // that touches state no single connector owns.
+    //
+    // It used to be three statements inlined at the end of deleteCursors, which
+    // made a per-connector verb do two jobs of very different blast radius and
+    // return one number covering both. Split out, each half can be called and
+    // counted on its own, and the name says what the blast radius is.
+    //
+    // WHAT IT DOES NOT TOUCH: any other connector's year receipts. Those stay,
+    // deliberately — a walk reopened at the current year re-uses every year the
+    // other sources already finished instead of re-fetching a decade. What it
+    // clears is only the three pieces of state that describe WHERE THE SHARED
+    // WALK IS, which a purge has just made untrue.
+    reopenYearlyWalk,
+
     // Wipes every cursor a connector owns: the exact name plus the
     // `<name>:...` namespace. Used by run.mjs --purge so a purged source
     // re-ingests from scratch instead of resuming past its own absence.
-    deleteCursors(connector) {
+    //
+    // AND THE GLOBAL GATE, WHEN THIS CONNECTOR WAS PART OF WHAT CLOSED IT.
+    //
+    // `yearly-backfill:complete` is not somebody else's key. It is the barrier
+    // that says every history-walking source has finished walking, and
+    // yearlyBackfill.task() short-circuits on it for EVERY connector — so a
+    // purge that removes one source's year checkpoints while leaving COMPLETE
+    // set means the purged source is never scheduled to walk its history
+    // again. The rows come back forward-only, and the years that were marked
+    // done stay gone.
+    //
+    // It survived because classify() happens to delete COMPLETE when it sees a
+    // connector with no current-year checkpoint — a branch written for a
+    // connector that becomes available mid-run, which rescues this by
+    // accident, and only while the connector is still available. Correctness
+    // that depends on an unrelated branch is not correctness.
+    //
+    // GATED ON THIS CONNECTOR'S OWN EVIDENCE rather than on a walksHistory
+    // flag the caller would have to supply: the purge path in run.mjs never
+    // loads the source module. A connector that has yearly-backfill rows is by
+    // definition one that took part in the walk, and one that has none
+    // contributed nothing the barrier could have been counting — so the
+    // globals are left exactly as they were.
+    //
+    // `reopenYearly: false` DECLINES the global half, for a caller that means
+    // "this namespace and nothing else". The default stays ON: retain.mjs's
+    // purge is the only production caller and is the path the whole branch
+    // exists for, so flipping the default would silently restore the bug the
+    // paragraphs above describe. Either way the two halves are counted
+    // separately in the return, and a caller that wants them applied
+    // separately calls deleteCursors(name, { reopenYearly: false }) and then
+    // reopenYearlyWalk() itself.
+    deleteCursors(connector, { reopenYearly = true, now = Date.now } = {}) {
       if (typeof connector !== 'string' || connector.length === 0) {
         throw new Error('deleteCursors requires a connector name');
       }
       const escaped = connector.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
-      return Number(deleteCursorsStmt.run(connector, `${escaped}:%`).changes);
+      const yearly = `yearly-backfill:connector:${connector}`;
+      const walked = reopenYearly && Number(
+        countYearlyStmt.get(yearly, `yearly-backfill:connector:${escaped}:%`)?.n ?? 0
+      ) > 0;
+      const cursorsDeleted = Number(
+        deleteCursorsStmt.run(
+          connector,
+          `${escaped}:%`,
+          yearly,
+          `yearly-backfill:connector:${escaped}:%`,
+          `${connector}:history-slices-per-pass`
+        ).changes
+      );
+      // TWO COUNTS, BECAUSE THEY ARE ABOUT TWO THINGS. ~~One total.~~ The
+      // caller logs its return as `cursorsDeleted` for ONE connector, and the
+      // total silently folded in the shared complete/year rows and every
+      // barrier row for the current year -- so a purge of notion reported a
+      // number that had nothing to do with notion's namespace, and an operator
+      // reading it to tell a complete purge from the old half of one was
+      // reading the wrong number to do it with.
+      return {
+        cursorsDeleted,
+        yearlyWalkReopened: walked ? reopenYearlyWalk({ now }) : 0,
+      };
     },
 
     recordRun({

@@ -125,14 +125,18 @@ test('the total processing estimate uses the plain approximate-hours label', () 
   assert.match(connections, /activity-estimate/u);
   assert.match(connections, /estimate\.hidden = !total/u,
     'the total is pinned in the header and hidden only when no queue exists');
-  assert.match(connections, /estimateLine\.hidden = !total/u,
-    'the explanation stays beside a real estimate and disappears with it');
   assert.ok(connections.includes('Your Mac is importing and indexing everything privately. More chats and years mean more time.'),
     'the estimate explains the wait in two simple sentences');
-  assert.ok(connections.includes("'Why is this taking so long?'"),
-    'the hint icon has an accessible question');
-  assert.match(palette, /\.activity-estimate-line \.setting-hint-copy \{[\s\S]*?right: 0;/u,
-    'the right-edge hint grows inward instead of clipping');
+  // ~~a "?" beside the total, and the wrapper line built to hold it, with its
+  // own rule so the pop-over grew inward from the card's right edge.~~ The
+  // icon went with every other "?" in that panel (owner, 2026-09-13: "so much
+  // fucking text"). The question was worth answering and the icon was not, so
+  // the answer hangs off the read-out being asked about.
+  assert.match(connections, /estimate\.title = ESTIMATE_HELP;/u,
+    'the wait explains itself on the hover of the number that is waiting');
+  assert.doesNotMatch(connections.replace(/\/\/[^\n]*/gu, ''), /estimateLine|infoHint/u);
+  assert.match(palette, /\.activity-estimate\[hidden\] \{ display: none; \}/u,
+    'and the read-out hides itself, with no wrapper to hide with it');
   // The row answers TWO questions now, and each side of the merge asserted on
   // its own half of one string. Which year comes from the cross-connector
   // barrier; how many conversations replaced an ETA that could not move (it was

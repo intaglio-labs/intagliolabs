@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readToken } from './memory.mjs';
-import {  readStatus } from './status.mjs';
+import { daemonRegistryState, featureRegistryStatus, readStatus } from './status.mjs';
 
 const BEARER_RE = /^Bearer ([0-9a-f]{64})$/u;
 const TOKEN_RE = /^[0-9a-f]{64}$/u;
@@ -59,5 +59,28 @@ export function statusResponse({ origin, authorization, home = homedir() } = {})
     // One response for missing, malformed and wrong — a probe learns nothing.
     return { status: 401, body: { error: 'unauthorized' } };
   }
-  return { status: 200, body: { sources: readStatus({ home }) } };
+  // registryState travels WITH the rows: an unreadable feature registry turns
+  // every connector off, including the card's own, and the shelf would
+  // otherwise draw that total outage as the same empty list it draws for a
+  // machine where nothing has been connected yet. Three fixed words, no paths.
+  // AND WITH `home`, which featureRegistryState() used to drop: the override it
+  // merges lives under ~/.hazlie, so a read with no argument answered about the
+  // machine's own home on an alt-home install and in every temp-home test.
+  //
+  // Three answers, because they fail differently. `registryState` is this
+  // process' read of the shipped file; `overrideState` is what became of the
+  // owner's, which is never a reason to reinstall; `daemonRegistryState` is
+  // where the process that actually schedules connectors stands, so a registry
+  // repaired under a running daemon reads as "restart the app" instead of as
+  // silence. Fixed words only — no paths, no owner data.
+  const { registryState, overrideState } = featureRegistryStatus({ home });
+  return {
+    status: 200,
+    body: {
+      sources: readStatus({ home }),
+      registryState,
+      overrideState,
+      daemonRegistryState: daemonRegistryState({ home }),
+    },
+  };
 }

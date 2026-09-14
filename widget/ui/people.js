@@ -1,10 +1,14 @@
-// The People popup. Screen 1 of the People/network feature: a short line, then
-// the CONNECTIONS BAR — the same connector tiles as the settings screen (same
-// .list/.row/.mark/.dot classes, same hzGlyph). Messages, Contacts and Calendar
-// own the top-clockwise positions; remaining disconnected/errored sources lead
-// the rest, so the popup reads as "connect these to search your people deeper."
-// Clicking a tile hands off to the settings connections popup, where the connect
-// flow already lives. bridge.js provides hzPost, hzGlyph, hzAutoFit.
+// The People popup. Its actual job is identity review: initSearch finds
+// candidate duplicate-person pairs across connected sources over a timeframe,
+// and review mode asks "is this the same person?" one pair at a time (yes /
+// no / skip via peopleReview/peopleDecide). It used to open on a ring of
+// connector icons around "unify your circles" — legible to nobody as "this is
+// where you review duplicate people" (owner, 2026-09-07: "wtf is this image?
+// fix this"). The header now says what the page does; the connector ring is
+// gone, replaced by a one-line status count built from the same /api/status
+// data. Per-connector fix-it (a connector's own login flow) lived here only
+// because the ring rendered the tiles — with the tiles gone, that door is the
+// Connections popup, not this page. bridge.js provides hzPost, hzGlyph.
 'use strict';
 
 document.getElementById('close').addEventListener('click', () => {
@@ -14,24 +18,22 @@ document.getElementById('close').addEventListener('click', () => {
   hzPost('close').catch(() => {});
 });
 
-const pconn = document.getElementById('pconn');
 const phint = document.getElementById('phint');
-let openId = null; // which connector's flow is showing, for toggle
 let onboardingAttention = false; // this open is the handoff from onboarding
 
 // Search parameters. Timeframe in days back; 0 = max (all time). Default 1 year.
 const TIME_LABEL = { 7: '1 week', 30: '1 month', 180: '6 months', 365: '1 year', 1095: '3 years', 1825: '5 years', 0: 'all time' };
 const timeSelect = document.getElementById('ptime');
 let searchDays = Number(timeSelect.value);
-timeSelect.addEventListener('change', () => { searchDays = Number(timeSelect.value); });
+const pcaption = document.getElementById('pcaption');
+function paintCaption() {
+  pcaption.textContent = `looks back ${TIME_LABEL[searchDays] || searchDays + ' days'} across your sources`;
+}
+timeSelect.addEventListener('change', () => { searchDays = Number(timeSelect.value); paintCaption(); });
+paintCaption();
 
-// Clicking a tile opens THAT connector's own flow inline here — the exact flow
-// settings shows (shared via hzConnectorHint), not the settings screen. Toggles:
-// clicking the open one closes it; clicking another swaps.
 // Close the side panel: clear it and shrink the popup back.
 function closeHint() {
-  openId = null;
-  for (const r of pconn.querySelectorAll('.row')) r.classList.remove('open');
   phint.replaceChildren();
   // No fitContent here any more: the pop-over floats, so opening and closing
   // it never changed the window's size to restore.
@@ -55,122 +57,58 @@ function growPanel(anchor) {
   hzPlacePop(phint, anchor);
 }
 
-function openConnector(src, row) {
-  const wasOpen = openId === src.id;
-  phint.replaceChildren();
-  for (const r of pconn.querySelectorAll('.row')) r.classList.remove('open');
-  if (wasOpen) { closeHint(); return; }
-  // Same shortcut as the settings shelf (owner, 2026-08-25): an FDA tile's
-  // card held only the one button, so pressing the tile presses it — and the
-  // primed verb lands "intaglio labs" in the pane's list before opening it.
-  if (src.action === 'fda') {
-    openId = null;
-    hzPost('openFullDiskAccess').catch(() => {});
-    return;
-  }
-  // Match the Settings shelf: for an unconnected Google row, the tile press
-  // opens sign-in directly instead of presenting instructions with no action.
-  // Calendar's local/FDA row remains local because base backend selection is
-  // authoritative; only a row already advertising the Google action gets here.
-  // ~~Pressing a Google tile started sign-in directly.~~ Parked with the Settings
-  // shelf (owner, 2026-08-27): the flow reached a "Which Google account?" picker,
-  // a second menu inside a panel where every other tile loads its login straight
-  // away. The card below now says "coming soon" for these, which is the same
-  // answer both surfaces give.
-
-  // The disabled-connector shortcut was reverted with its settings-shelf
-  // twin (owner, 2026-08-25): the card and its connect button are back.
-  openId = src.id;
-  row.classList.add('open');
-  // The ring closes with everything the ring owns -- the open row, the open id,
-  // the hint host -- so a cancelled login here ends exactly where it does in
-  // Settings, rather than leaving an open card with nothing in it.
-  hzConnectorHint(src, phint, {
-    refresh: reload,
-    onClose: closeHint,
-    // The TILE carries the wait, not a card: a bridge press opens its login
-    // window and says nothing until there is something to say.
-    onBusy: (on) => row.classList.toggle('logging-in', on),
-  });
-  addHintClose();
-  growPanel(row);
-  row.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
-}
-
-// The tile is the SHARED component (connector-tile.js): same markup, status
-// dot, and hover label as the settings shelf. Only the click handler is ours.
-// Wrapped in .rowwrap to match the shelf's markup.
-function tile(src, nudgeImessage) {
-  const wrap = document.createElement('div');
-  wrap.className = 'rowwrap';
-  const row = hzConnectorTile(src, { onOpen: openConnector });
-  if (nudgeImessage && kindOf(src.id) === 'imessage') row.classList.add('p-imessage-nudge');
-  wrap.appendChild(row);
-  return wrap;
-}
-
 // Same set settings hides — non-people sources that don't belong on a people map.
 const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
 const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 
-// The first three positions are spatial, not merely a scan order: index zero
-// is twelve o'clock, then the ring proceeds clockwise. Messages is the door;
-// Contacts and Calendar sit immediately to its right. Everything after those
-// anchors keeps the old needs-attention-first ordering.
-const PEOPLE_ANCHORS = ['imessage', 'contacts', 'calendar'];
-const anchorRank = (src) => {
-  const i = PEOPLE_ANCHORS.indexOf(kindOf(src.id));
-  return i === -1 ? PEOPLE_ANCHORS.length : i;
-};
+const pstatus = document.getElementById('pstatus');
 
-function render(sources) {
-  // Hide the non-people connectors. The three spatial anchors stay fixed;
-  // remaining disconnected/errored sources lead the rest, stable within each
-  // group. Connecting something must never rotate Messages away from the top.
+// The status line under the header: same "visible" filter the old ring used
+// (real people-sources only, one row per linked Google account), so the count
+// means what the ring's tiles used to show at a glance -- just as text.
+//
+// "manage sources" would open the Connections popup, but this page's bridge
+// compartment (Bridge.swift Bridge.pageCapabilities["people"]) does not grant
+// openConnections -- only the widget bar has that door today. Rather than
+// widen the grant for a copy change, this stays a read-only count; flagging
+// that rather than routing around it.
+function paintStatus(sources) {
   const hasGoogleAccount = sources.some(
     (s) => s.connected && typeof s.id === 'string' && s.id.startsWith('mail:')
   );
   const visible = sources.filter((s) =>
     !HIDDEN_CONNECTORS.has(kindOf(s.id)) && !(hasGoogleAccount && s.id === 'mail')
   );
-  const nudgeImessage = onboardingAttention || !visible.some((s) => s.connected);
-  const ordered = visible
-    .map((s, i) => ({ s, i }))
-    .sort((a, b) =>
-      anchorRank(a.s) - anchorRank(b.s)
-      || (a.s.connected === b.s.connected ? a.i - b.i : a.s.connected ? 1 : -1))
-    .map((x) => x.s);
-  pconn.replaceChildren(...ordered.map((src) => tile(src, nudgeImessage)));
-  // The ring positions each tile by transform (people.css), reading these two
-  // custom properties: --n is the same on every tile, --i is its index, so an
-  // evenly-spaced angle falls out of pure CSS with no per-count stylesheet.
-  // --n also lands on the ring container itself, one level up, so the ring's
-  // own size (and therefore the popup's total height) can grow only as far
-  // as the actual connector count needs — a handful of sources gets a small
-  // ring instead of always paying for the worst case.
-  const rows = pconn.querySelectorAll('.row');
-  const pring = document.getElementById('pring');
-  if (pring) pring.style.setProperty('--n', rows.length);
-  rows.forEach((row, i) => {
-    row.style.setProperty('--i', i);
-    row.style.setProperty('--n', rows.length);
-  });
-  if (typeof fitPeople === 'function') fitPeople();
+  const connected = visible.filter((s) => s.connected).length;
+  const rows = [];
+  const line = document.createElement('div');
+  line.className = 'p-status-line';
+  line.textContent = `${connected} of ${visible.length} sources connected`;
+  rows.push(line);
+  // A pending batch left over from earlier this session (the popup survives
+  // hidden rather than reloading — see main.swift openPeople) is a cheap,
+  // real number to show; a fresh session has none, and none is what shows.
+  const pending = rQueue.length - rIdx;
+  if (pending > 0) {
+    const waiting = document.createElement('div');
+    waiting.className = 'p-status-waiting';
+    waiting.textContent = `${pending} pair${pending === 1 ? '' : 's'} waiting`;
+    rows.push(waiting);
+  }
+  pstatus.replaceChildren(...rows);
+  fitPeople();
 }
 
-// Re-fetch status and repaint the bar. Passed to hzConnectorHint as its refresh,
-// so a successful link flips the dot green here too.
+// Re-fetch status and repaint the summary line.
 function reload() {
   hzPost('status')
-    .then((d) => { if (d && d.state === 'ok' && Array.isArray(d.sources)) render(d.sources); })
+    .then((d) => { if (d && d.state === 'ok' && Array.isArray(d.sources)) paintStatus(d.sources); })
     .catch(() => {});
 }
 
 // A fresh People page pulls the handoff flag itself; a reused page receives
 // the same fact from native through __hzPeopleIntro. In both cases, record the
-// intro only after this page is actually alive to show it. The local boolean
-// deliberately stays true for this visit, so an existing install replaying
-// onboarding still sees Messages jump even if several connectors are linked.
+// intro only after this page is actually alive to show it.
 function enterFromOnboarding(on) {
   onboardingAttention = on === true;
   reload();
@@ -184,17 +122,15 @@ function firstLoad() {
     hzPost('prefs').catch(() => null),
   ]).then(([d, p]) => {
     onboardingAttention = !!(p && p.onboarded === true && p.connectorsIntroDone === false);
-    if (d && d.state === 'ok' && Array.isArray(d.sources)) render(d.sources);
+    if (d && d.state === 'ok' && Array.isArray(d.sources)) paintStatus(d.sources);
     if (onboardingAttention) hzPost('connectorsIntroSeen').catch(() => {});
   });
 }
 
 // ---------------- deep search controls ----------------
-// "what it does": opens the details as the side panel (same mechanism as a
-// connector's flow), listing the actual actions + caps.
+// "what it does": opens the details as the side panel, listing the actual
+// actions + caps.
 function openSearchDetails() {
-  openId = null;
-  for (const r of pconn.querySelectorAll('.row')) r.classList.remove('open');
   phint.replaceChildren();
   const tip = document.createElement('div');
   tip.className = 'hint hold';
@@ -211,8 +147,15 @@ function openSearchDetails() {
   for (const line of [
     'maps every person you have talked to, across all connected sources',
     `within your timeframe — ${TIME_LABEL[searchDays] || searchDays + ' days'}`,
-    'the map is built on this mac; no cloud model sees it',
-    'builds your private people-map; searching it for specifics comes next',
+    // ~~'no cloud model sees it'~~ (stale 2026-08-31: the owner-reviewed
+    // frontier handoff can send reviewed text to a cloud model — the map and
+    // its rows still never leave).
+    'the map is built and kept on this mac',
+    // ~~'builds your private people-map; searching it for specifics comes
+    // next'~~ — a promise about unbuilt work, shown twice on the owner's own
+    // screen (the other was under "your people-map is ready"). What this page
+    // does is above; what it might do one day is not a feature of it.
+    'builds your private people-map',
   ]) {
     const li = document.createElement('li');
     li.textContent = line;
@@ -226,6 +169,13 @@ function openSearchDetails() {
 document.getElementById('pspecs').addEventListener('click', (e) => {
   e.preventDefault();
   openSearchDetails();
+});
+// The only other door to the reconnect card besides tapping the notify orb.
+// A demoted text link now (owner, 2026-09-07) rather than a button, so it
+// needs the same preventDefault as the "read specs" link above.
+document.getElementById('preconnect').addEventListener('click', (e) => {
+  e.preventDefault();
+  hzPost('openReconnect').catch(() => {});
 });
 // ---------------- review mode: ask, don't guess ----------------
 // After "initialize search", the code has built the people-map and handed back
@@ -369,14 +319,14 @@ function renderDone() {
   l2.textContent = rDecided > 0
     ? `${rDecided} merge${rDecided === 1 ? '' : 's'} you confirmed.`
     : 'nothing needed merging.';
-  const l3 = document.createElement('p');
-  l3.className = 'rv-next';
-  l3.textContent = 'searching it for specifics comes next.';
+  // ~~"searching it for specifics comes next."~~ went with its twin in the
+  // what-this-does list: the same promise about unbuilt work, on the screen
+  // that reports a finished job.
   const btn = document.createElement('button');
   btn.className = 'p-init';
   btn.textContent = 'done';
   btn.addEventListener('click', showSetup);
-  done.append(h, l1, l2, l3, btn);
+  done.append(h, l1, l2, btn);
   preview.replaceChildren(done);
   fitPeople();
 }
@@ -399,12 +349,12 @@ document.getElementById('pinit').addEventListener('click', () => {
     })
     .catch(() => {
       b.textContent = 'couldn’t start — try again';
-      setTimeout(() => { b.textContent = 'search'; }, 1800);
+      setTimeout(() => { b.textContent = 'find pairs'; }, 1800);
     })
     .finally(() => {
       // Re-enable for next time; it is hidden while review mode is up anyway.
       b.disabled = false;
-      if (!preview.hidden) b.textContent = 'search';
+      if (!preview.hidden) b.textContent = 'find pairs';
     });
 });
 
@@ -431,41 +381,16 @@ function fitPeople() {
   requestAnimationFrame(() => {
     const win = document.querySelector('.win');
     if (!win) return;
-    // Measure what the content WANTS, not what the last squeeze left it: with
-    // the cap still applied, the measurement would ratify the shrunken ring
-    // and the window could never grow back when the widget is moved and the
-    // ceiling rises. Cleared and re-applied inside one rAF, so no intermediate
-    // layout is ever painted.
-    const pring = document.getElementById('pring');
-    if (pring) pring.style.removeProperty('--ring-cap');
     hzPost('fitContent', { height: Math.ceil(win.getBoundingClientRect().height) + 4 }).catch(() => {});
-    capRing();
   });
 }
-
-// The other half of the bargain fitContent strikes: the page asks for the
-// height its content wants, and native answers with the room it actually has
-// (popupCeiling clamps every popup to the space above the widget). When the
-// answer is short, shrink the RING to fit it rather than scrolling — a ring
-// with its bottom arc cut off reads as broken, and the overlay scrollbar that
-// would say otherwise is invisible until touched. Solving the box arithmetic
-// backwards (box = 2r + 44, so r = room/2 − 22) makes the shrunken ring land
-// exactly inside the granted height in one step, no creep and no oscillation:
-// re-running with an unchanged grant computes the same cap. CSS floors the
-// result at 64px — below that the tiles would overlap, so scrolling returns
-// as the honest last resort.
-function capRing() {
-  const pring = document.getElementById('pring');
-  const win = document.querySelector('.win');
-  if (!pring || !win) return;
-  const ringH = pring.getBoundingClientRect().height;
-  if (ringH < 1) return; // review mode: no ring on screen, nothing to size
-  const chrome = win.getBoundingClientRect().height - ringH;
-  pring.style.setProperty('--ring-cap', `${Math.floor((window.innerHeight - chrome) / 2) - 22}px`);
-}
-// Native's resize lands after the fitContent round trip, as a window resize
-// here — that is the moment the granted height is knowable.
-window.addEventListener('resize', capRing);
+// ~~capRing: when native granted less height than the ring wanted, shrink the
+// ring's --ring-cap to fit rather than scroll.~~ Retired with the ring
+// (owner, 2026-09-07): the header + status-line layout is short enough that
+// popupCeiling's clamp should never engage, and if it ever does, body.people's
+// overflow-y: auto (people.css) is the honest fallback — a scroll, never a
+// silent clip. A missing #pring can no longer break this fitter because
+// nothing here reads #pring any more.
 
 firstLoad();
 // No hzAutoFit here — see fitPeople's header for why the two cannot both run.

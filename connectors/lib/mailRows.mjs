@@ -40,11 +40,208 @@ export function mailEntityId({ messageId, account, folder, uidValidity, uid }) {
   return `mail:${account}:${folder}:${uidValidity}:${uid}`;
 }
 
+// RFC-5322-ish address parsing for a RAW HEADER STRING — `From: "Doe, Jane"
+// <jane@d.com>, a@b.com` — returning lowercase addresses in header order,
+// deduped.
+//
+// WHY THIS EXISTS, AND WHY IT IS HERE RATHER THAN IN THE CONNECTOR. When mail
+// moved off IMAP/mailparser to the Gmail REST API (2026-08-26),
+// sources/mail.mjs began handing this module the header strings the API
+// returns, on the strength of a comment over there stating that
+// normalizeAddresses "handles both a string and mailparser's object form". It
+// did not. A string is neither an array nor `{value:[...]}`, so it fell
+// through to the empty list and the entire Gmail backfill wrote rows with
+// meta.from = [], meta.to = [], meta.cc = [] and a null speaker — 81,725 of
+// them, none of which the people projection could link anyone to, which is
+// why the reconnection card had never once shown a Gmail contact. The parser
+// lives beside the consumer so the comment and the behaviour cannot drift
+// apart again.
+//
+// SPLIT LAST, BRACKETS FIRST. The order matters and the naive order is wrong:
+// `"Nayak, Rishab" <r@x.com>` split on commas first becomes two entries, the
+// first of them address-shaped enough to fool a lenient filter. So commas are
+// only separators OUTSIDE a quoted string (and outside `<...>`), and within an
+// entry the bracketed form wins outright — a display name is never an address,
+// even when it contains an @. ui/server/relationship/owe.mjs learned the same
+// lesson independently for its participant guard (see its headerAddresses
+// note, 2026-09-09); the two are deliberately NOT shared yet, see the report
+// in that file's comment — this one is stricter (it validates the token it
+// found) and changing owe.mjs's card behaviour is a separate decision.
+//
+// What it deliberately does NOT do: RFC 2047 encoded-word decoding (a display
+// name only, never an address), obsolete route addresses beyond taking the
+// part after the last colon, and folding-whitespace reassembly (the API hands
+// headers already unfolded).
+
+// A comma inside a quoted display name, or inside <...>, is not a separator.
+function splitHeaderEntries(raw) {
+  const entries = [];
+  let current = '';
+  let quoted = false;
+  let angle = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (quoted) {
+      if (ch === '\\' && i + 1 < raw.length) { current += ch + raw[i + 1]; i += 1; continue; }
+      if (ch === '"') quoted = false;
+      current += ch;
+      continue;
+    }
+    if (ch === '"') { quoted = true; current += ch; continue; }
+    if (ch === '<') angle = true;
+    else if (ch === '>') angle = false;
+    if (ch === ',' && !angle) { entries.push(current); current = ''; continue; }
+    current += ch;
+  }
+  entries.push(current);
+  return entries;
+}
+
+// RFC comments — `a@x.com (Alice at work)` — nest, and a parenthesis inside a
+// quoted string is not one.
+function stripComments(entry) {
+  let out = '';
+  let quoted = false;
+  let depth = 0;
+  for (let i = 0; i < entry.length; i += 1) {
+    const ch = entry[i];
+    if (quoted) {
+      if (ch === '\\' && i + 1 < entry.length) { out += ch + entry[i + 1]; i += 1; continue; }
+      if (ch === '"') quoted = false;
+      out += ch;
+      continue;
+    }
+    if (depth > 0) {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '(') depth += 1;
+      else if (ch === ')') depth -= 1;
+      continue;
+    }
+    if (ch === '"') { quoted = true; out += ch; continue; }
+    if (ch === '(') { depth += 1; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+// The first `<...>` pair that is not inside a quoted display name. Returns the
+// content, which may be empty: `Mailer Daemon <>` names nobody, and that is a
+// different answer from "no brackets at all".
+function bracketContent(entry) {
+  let quoted = false;
+  let start = -1;
+  for (let i = 0; i < entry.length; i += 1) {
+    const ch = entry[i];
+    if (quoted) {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '"') quoted = false;
+      continue;
+    }
+    if (ch === '"') { quoted = true; continue; }
+    if (ch === '<' && start === -1) start = i;
+    else if (ch === '>' && start !== -1) return entry.slice(start + 1, i);
+  }
+  return null;
+}
+
+function lastIndexOutsideQuotes(token, want) {
+  let quoted = false;
+  let found = -1;
+  for (let i = 0; i < token.length; i += 1) {
+    const ch = token[i];
+    if (quoted) {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '"') quoted = false;
+      continue;
+    }
+    if (ch === '"') { quoted = true; continue; }
+    if (ch === want) found = i;
+  }
+  return found;
+}
+
+// Group syntax (`Team: a@x.com, b@y.com;`) survives the comma split as a
+// labelled first entry and a semicolon-terminated last one; `mailto:` and the
+// obsolete source route put the address after a colon too. Taking everything
+// after the last colon outside quotes handles all three, and leaves
+// `undisclosed-recipients:;` with nothing — which is correct, it IS nobody.
+function trimAddressNoise(raw) {
+  let token = raw.trim().replace(/^[<;,\s]+/u, '').replace(/[>;,\s]+$/u, '');
+  const colon = lastIndexOutsideQuotes(token, ':');
+  if (colon !== -1) token = token.slice(colon + 1).trim();
+  return token;
+}
+
+// Exactly one @ outside quotes, something on both sides of it, and no
+// unquoted whitespace. Strict on purpose: a token that fails this is a display
+// name or a fragment, and inventing a participant is worse than missing one —
+// meta.from is what the people projection links a human being to.
+function looksLikeAddress(token) {
+  let quoted = false;
+  let ats = 0;
+  let at = -1;
+  for (let i = 0; i < token.length; i += 1) {
+    const ch = token[i];
+    if (quoted) {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '"') quoted = false;
+      continue;
+    }
+    if (ch === '"') { quoted = true; continue; }
+    if (/\s/u.test(ch)) return false;
+    if (ch === '@') { ats += 1; at = i; }
+  }
+  if (quoted) return false;
+  return ats === 1 && at > 0 && at < token.length - 1;
+}
+
+function addressFromEntry(entry) {
+  const bracketed = bracketContent(entry);
+  // Brackets are authoritative: if an entry has them, the address is in them
+  // or the entry has none. Falling back to the display name here is how
+  // `Mailer Daemon <>` becomes a participant called "mailer".
+  const candidates = [];
+  if (bracketed !== null) {
+    candidates.push(bracketed);
+  } else {
+    const bare = stripComments(entry).trim();
+    candidates.push(bare);
+    // Last resort for the malformed-but-common `Jane Doe jane@x.com`, which
+    // has no brackets to prefer. Whole-entry first, so a well-formed bare
+    // address is never taken apart.
+    for (const piece of bare.split(/\s+/u)) candidates.push(piece);
+  }
+  for (const candidate of candidates) {
+    const token = trimAddressNoise(candidate);
+    if (looksLikeAddress(token)) return token.toLowerCase();
+  }
+  return null;
+}
+
+export function parseAddressHeader(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  const out = [];
+  const seen = new Set();
+  for (const entry of splitHeaderEntries(raw)) {
+    const address = addressFromEntry(entry);
+    if (address === null || seen.has(address)) continue;
+    seen.add(address);
+    out.push(address);
+  }
+  return out;
+}
+
 // Addresses are sorted so an identical recipient set always renders the same
 // string. Without it, a server reordering To: on a re-fetch would look like an
 // edit and churn an update through hermes for a message that never changed.
+//
+// Three input shapes, all of them real: mailparser's `{value:[{address}]}`
+// (the IMAP era, still what a test fixture speaks), a plain array of strings,
+// and a raw header string (what every REST adapter has, Gmail included).
 export function normalizeAddresses(value) {
-  const list = Array.isArray(value?.value) ? value.value : Array.isArray(value) ? value : [];
+  const list = typeof value === 'string'
+    ? parseAddressHeader(value)
+    : Array.isArray(value?.value) ? value.value : Array.isArray(value) ? value : [];
   const addresses = list
     .map((a) => (typeof a === 'string' ? a : a?.address))
     .filter((a) => typeof a === 'string' && a.length > 0)

@@ -67,11 +67,51 @@ Do not re-add these; their absence is a decision, not an oversight.
    describing the product. Correct stale comments in place with the history kept
    — a stale comment that reads as authority does more damage than a missing one.
 
-3. **Nothing leaves the box, and the list is enforced.** Every host this software
-   may contact is enumerated in `ops/EGRESS.json`, and
+3. **Every outbound path is explicit, and the list is enforced.** Every host
+   reached by repository-owned networking is enumerated in `ops/EGRESS.json`,
+   which also records the narrower boundary for installed provider clients, and
    `connectors/test/egress.test.mjs` fails the suite on any undeclared host found
    in tracked source. That is a tripwire, not a document. If you add a network
    call, declare it there with a real justification, or the build stops.
+
+   Public lookup is the one path that sends anything outward, and what it
+   sends is a search string built only from allowlisted public identifiers:
+   display name, firm/company, a public handle already in the corpus, and a
+   public LinkedIn profile URL — assembled by buildLookupQuery, whose input
+   gate refuses any object carrying any other field, and never fired at all
+   without two anchors.
+
+   Never leaves the box, under any lookup: message or transcript text,
+   anything from claim, email addresses, phone numbers, calendar contents,
+   owner-side data of any kind, the person's person_key, and the fact that a
+   lookup is for a reconnect — the prompt is told nothing about why it is
+   being asked.
+
+   The search itself runs on Anthropic's side (api.anthropic.com, kind
+   public-lookup in ops/EGRESS.json); this repo opens no other socket, stores
+   no fetched page, and records every query in lookup_log — field names, the
+   assembled string, and its hash — on the person's own page.
+
+   Lint (step 5½, ui/server/relationship/lint.mjs) runs right after public
+   lookup on the same schedule and is deliberately the opposite of it: no
+   model call, no outbound socket, nothing to declare in ops/EGRESS.json.
+   Every check is SQL against the local store, or SQL plus a pure JS
+   recomputation. It also never auto-fixes anything it finds — the owner
+   resolves each finding by hand; the only automatic transition is a finding
+   closing itself once the condition that produced it is gone.
+
+   The orb's card queue now has TWO producers, not one: the eligibility
+   producer (`ui/server/relationship/producer.mjs`, kind `reconnect`) and Owe
+   (`ui/server/relationship/owe.mjs`, kind `owe` — an unanswered
+   direct-message question, or an owner commitment/page-ask past its due
+   date). Neither calls a model. `ui/server/relationship/daily.mjs`
+   alternates between them (whichever kind was least recently shown goes
+   next) over one shared queue, one frequency cap, and the same owner
+   controls (`rm_suppression`/`rm_mute`) — scoped per-kind wherever the two
+   must not interfere with each other's judged/mute history (a dismissal on
+   one kind must not silence the other), and kind-agnostic wherever a shown
+   card of either kind really is one interruption (the 7-day recently-shown
+   cooldown, the global frequency cap).
 
 4. **Logs never carry row content.** The logger refuses fields named like message
    content. Counts, timings, IDs and error types only. This holds for probes too.

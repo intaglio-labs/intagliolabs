@@ -175,89 +175,79 @@ new MutationObserver(() => {
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
 
-let settingHintSerial = 0;
+// ~~infoHint / settingHint: a round "?" beside a label that opened a pop-over
+// of explanation, and .setting-note, the paragraph under every label.~~ Both
+// yeeted (owner, 2026-09-13, opening this panel: "what the fuck are these
+// settings??? so much fucking text??"). The screenshot he was looking at is
+// nine cards tall and only four of them are a control — the rest is prose.
+//
+// EVERY ROW IS ONE LINE NOW: a bold name on the left, its control on the
+// right, nothing underneath. The copy was not deleted — each sentence is the
+// `title` of the row it explained, which is hover-only and costs the column no
+// height. The constants below are that copy, named rather than inlined so the
+// ones that are PROMISES can still be found and compared against the screen
+// that made them (ENGINE_PRIVACY is word-for-word onboarding's).
+//
+// The one exception is uninstall, which keeps a single short line on the
+// surface: it is the one press here that cannot be taken back.
+// TWO SENTENCES, BECAUSE THERE ARE TWO PRODUCTS BEHIND THIS ROW. With
+// `timeline` off (the default since the owner's 2026-09-13 decision) reconnect
+// serves one person a day and there is no group to change, so a hover pointing
+// at three chips would send the owner looking for controls that are not on the
+// card. The chips come back with the flag, and so does the sentence about them.
+// ~~"one person a day, …"~~ NAMES A NUMBER THIS SENTENCE DOES NOT READ. Six
+// lines below is the comment that deleted the previous hard-coded "one" from
+// this very row, for this very reason -- it read as a hard-coded one to an owner
+// whose config says 50 -- and the replacement put it straight back in the hover.
+// The digit is the row's own job and it comes from the config; the hover says
+// what the card IS, which is true at any cadence.
+const CARD_HELP = 'whoever has gone quiet — dismiss a card to ask for another.';
+const CARD_HELP_MODES = 'change who it looks for on the card itself — the three chips at the top.';
+const SOUNDS_HELP = 'presses, sending and replies make a sound.';
+const MOTION_HELP = 'reduce motion is on for this Mac. this puts back only this app\u2019s own movement.';
+const AWAKE_HELP = 'Keeps imports and local indexing moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.';
+const PERFORMANCE_HELP = 'maxx does more work in each pass and asks macOS for foreground priority, '
+  + 'so imports and local indexing finish sooner. Using less power does the same work '
+  + 'in smaller passes at background priority — slower, but the machine stays quiet. '
+  + 'Both keep running on battery; neither one stops.';
+const ESTIMATE_HELP = 'Your Mac is importing and indexing everything privately. More chats and years mean more time.';
+// TRUE, AND CHECKED AGAINST WHAT ACTUALLY HAPPENS (main.swift
+// applicationWillTerminate): the reader is this app's own child and stops with
+// it, while hermes, connect and the model server are launch agents and keep
+// running. Saying "everything keeps running" would be the comfortable sentence
+// and the wrong one.
+const QUIT_HELP = 'closes this window and the app. what it has already read stays, and the '
+  + 'services behind it keep running — but nothing new is read until you open it again.';
+const UNINSTALL_HELP = 'stops and removes the background services and deletes the app. everything it '
+  + 'has read is left where it is, and the next screen says exactly what will happen.';
+// THE ONE LINE LEFT ON THE SURFACE, under the one irreversible row. Seven
+// words, and the count is not the constraint the wording is fighting: the row
+// is 252px of monospace, so a line here is 41 characters and this is 41. "its"
+// and "your" were the two words that could go without taking a fact with them.
+const UNINSTALL_NOTE = 'removes the app and services. data stays.';
 
-// A small, keyboard-accessible explanation. CSS reveals it on hover/focus;
-// click pins it until another click, Escape, or an outside press. The copy is
-// textContent only.
-function infoHint(copy, ariaLabel) {
-  const wrap = document.createElement('span');
-  wrap.className = 'setting-hint';
-  const button = document.createElement('button');
-  button.className = 'setting-hint-icon';
-  button.type = 'button';
-  button.textContent = '?';
-  button.setAttribute('aria-label', ariaLabel);
-  button.setAttribute('aria-expanded', 'false');
-  const tip = document.createElement('span');
-  tip.className = 'setting-hint-copy';
-  tip.id = `setting-hint-${settingHintSerial += 1}`;
-  tip.setAttribute('role', 'tooltip');
-  tip.textContent = copy;
-  button.setAttribute('aria-describedby', tip.id);
-
-  const close = () => {
-    wrap.classList.remove('open');
-    button.setAttribute('aria-expanded', 'false');
-  };
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const open = !wrap.classList.contains('open');
-    document.querySelectorAll('.setting-hint.open').forEach((other) => {
-      other.classList.remove('open');
-      other.querySelector('.setting-hint-icon')?.setAttribute('aria-expanded', 'false');
-    });
-    wrap.classList.toggle('open', open);
-    button.setAttribute('aria-expanded', String(open));
-  });
-  button.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') close();
-  });
-  document.addEventListener('click', (event) => {
-    if (!wrap.contains(event.target)) close();
-  });
-  wrap.append(button, tip);
-  return wrap;
-}
-
-// Setting hints share one question; other surfaces can use infoHint with an
-// accessible label that actually matches what their icon explains.
-function settingHint(label, copy) {
-  return infoHint(copy, `Why leave ${label} on?`);
-}
-
-// One row per setting: a name, a line of context, and a switch. Generic
-// because there are two of them now and they differ only in wording, in which
-// bridge message they send, and in whether they are shown at all.
-function settingRow({ name, note, hint, on, message }) {
+// One row per setting, and it is ONE LINE: the name, and the switch. Generic
+// because there are three of them now and they differ only in wording, in
+// which bridge message they send, and in whether they are shown at all.
+//
+// `help` is the row's hover, never a line under it — see the note above.
+function settingRow({ name, help, on, message }) {
   const el = document.createElement('div');
   el.className = 'setting';
+  if (help) el.title = help;
 
-  const text = document.createElement('div');
-  text.className = 'setting-text';
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = name;
-  const labelLine = document.createElement('span');
-  labelLine.className = 'setting-label-line';
-  labelLine.appendChild(label);
-  if (hint) labelLine.appendChild(settingHint(name, hint));
-  text.appendChild(labelLine);
-  // The note is optional now — both switch rows shed theirs (owner,
-  // 2026-08-25): "Reduce Motion is on for this Mac" and "presses, sending
-  // and replies" explained controls whose names already say it.
-  if (note) {
-    const sub = document.createElement('span');
-    sub.className = 'setting-note';
-    sub.textContent = note;
-    text.appendChild(sub);
-  }
 
   const sw = document.createElement('button');
   sw.className = 'switch' + (on ? ' on' : '');
   sw.setAttribute('role', 'switch');
   sw.setAttribute('aria-checked', String(on));
-  sw.title = name;
+  // NO TITLE ON THE CONTROL. The row owns the hover; a second one on the
+  // switch would answer a different sentence depending on where the pointer
+  // happened to land.
+  sw.setAttribute('aria-label', name);
   const knob = document.createElement('span');
   knob.className = 'knob';
   sw.appendChild(knob);
@@ -278,121 +268,619 @@ function settingRow({ name, note, hint, on, message }) {
     }
   });
 
-  el.append(text, sw);
+  el.append(label, sw);
   return el;
 }
 
-// A setting that holds a NUMBER. Stacked rather than in a row — a slider in
-// the space a switch occupies has about 30px of travel in a 312px popup.
+// WHAT THE DAILY CARD IS SET TO, read from the owner config rather than
+// guessed. GET /admin/config/card (bridge verb `cardConfig`) answers mode,
+// capPerDay, producer and engine WITHOUT running the producers — which is what
+// makes it safe to ask on every settings render, where a card peek would spend
+// a cap slot and flip the producers' turn for a panel nobody asked a card from.
 //
-// No end labels under the track: the live read-out in the head already says
-// where the thumb is, and two more numbers underneath were saying the same
-// thing twice in a 312px popup.
+// ONE REQUEST, TWO ROWS. The promise is made once in renderSettings and handed
+// to whoever needs it, so opening settings is one question to the reader and
+// not one per row.
+// A REPLY IS NOT A SUCCESS.
 //
-// `input` fires continuously while dragging and `change` once on release, and
-// both are wired on purpose: the first is what makes the widget resize under
-// the thumb so the size can be CHOSEN by looking at it, the second is what
-// commits. Only `change` persists, so a drag across the whole range writes
-// UserDefaults once instead of forty times.
-function rangeRow({ name, note, value, min, max, step, message, format }) {
-  const el = document.createElement('div');
-  el.className = 'setting setting-col';
+// Bridge.reply always sends `ok: true` — that envelope says the message was
+// dispatched, not that the verb worked — and bridge.js resolves on it. So
+// hzPost NEVER rejects for a handled verb, and every `.catch` on one of these
+// is decoration. relHermes, which every reader-facing verb goes through,
+// answers `{state:'down'}` when hermes is restarting and `{state:'auth'}` when
+// there is no bearer yet; both RESOLVE, and both mean nothing happened.
+//
+// `ok === false` is the other half: the route answered, and said no.
+//
+// NOT FOR engineProbe. Its states are the PROBE'S vocabulary, where 'auth'
+// means claude is installed but not signed in — a real answer about the world,
+// not a bridge failure. Two different words spelled the same; see paint().
+const landed = (out) => out?.state === 'ok' && out?.ok !== false;
 
-  const head = document.createElement('div');
-  head.className = 'setting-head';
+// WHAT THE CONFIG SAYS THE ENGINE IS, from a reply that arrived. 'claude-cli'
+// is the only value that means anything leaves this Mac; every other answer,
+// INCLUDING the absent key the route sends as null, is the loopback model
+// (engines.mjs' own default). Returns null only for a reply that never came,
+// which is the one state that may not be reported as a setting.
+function configEngine(cfg) {
+  if (cfg === null || cfg === undefined) return null;
+  return cfg.engine === 'claude-cli' ? 'claude-cli' : 'local';
+}
+
+function cardConfigRow(configPromise) {
+  const el = document.createElement('div');
+  el.className = 'setting';
+  // WHAT THIS ROW IS FOR NOW. ~~"a new owner reading settings saw no sign the
+  // product had modes at all"~~ — there are no modes to see any more, and the
+  // picker this sentence pointed at is off the card. What is left is the one
+  // number an owner may want to check without opening the panel: how often the
+  // card comes. The hover says what the card IS, and names the groups again
+  // only where the groups exist.
+  // Asked, not assumed: hzFeatures caches per page load and fails closed, and
+  // this row may be built before the shelf's own refresh has read the registry.
+  const modesPromise = hzFeatures()
+    .then((set) => hzFeatureOn(set, 'timeline'))
+    .catch(() => false);
+  el.title = CARD_HELP;
   const label = document.createElement('span');
   label.className = 'setting-name';
-  label.textContent = name;
-  const read = document.createElement('span');
-  read.className = 'setting-value';
-  read.textContent = format(value);
-  head.append(label, read);
+  label.textContent = 'daily card';
+  const said = document.createElement('span');
+  said.className = 'setting-said';
+  // EMPTY UNTIL THE READER ANSWERS. A placeholder here would be a busy label
+  // for a question that is usually answered in the same frame, and this panel
+  // keeps one busy word per idea rather than one per row
+  // (connect-affordances.test.mjs).
+  said.textContent = '';
+  // LABEL LEFT, VALUE RIGHT, one line.
+  //
+  // It was label, value and a description stacked in a text column, because
+  // the value had been a right-hand slot and lost a width fight with the
+  // description on a 312px panel (run 6, the row printing one word per line).
+  // The description is gone — it is this row's `title` now — so the fight has
+  // no second party: the value is the only thing beside the label, it is
+  // nowrap and right-aligned, and the label ellipsizes before either wraps.
+  el.append(label, said);
 
-  const sub = document.createElement('span');
-  sub.className = 'setting-note';
-  sub.textContent = note;
-
-  const input = document.createElement('input');
-  input.type = 'range';
-  input.className = 'setting-range';
-  input.min = String(min);
-  input.max = String(max);
-  input.step = String(step);
-  input.value = String(value);
-  input.title = name;
-
-  // Applied live but not stored. If the bridge refuses it the read-out would
-  // be lying, so it is only trusted once the reply comes back.
-  // COALESCED TO ONE PER FRAME. `input` fires as fast as the mouse moves, and
-  // each one costs a window resize plus a full relayout of three zoomed
-  // pages — dragging the thumb across the range queued dozens of them and the
-  // first pull visibly stuttered. The read-out still updates on every event,
-  // because that is just text; only the expensive half is throttled. Skipping
-  // an unchanged value matters too: a slider held still between steps keeps
-  // firing.
-  let pending = null;
-  let applied = value;
-  input.addEventListener('input', () => {
-    read.textContent = format(Number(input.value));
-    if (pending !== null) return;
-    pending = requestAnimationFrame(() => {
-      pending = null;
-      const v = Number(input.value);
-      if (v === applied) return;
-      applied = v;
-      hzPost(message, { value: v, commit: false }).catch(() => {});
-    });
+  Promise.all([configPromise, modesPromise]).then(([cfg, modesOn]) => {
+    const help = modesOn ? CARD_HELP_MODES : CARD_HELP;
+    el.title = help;
+    const bits = [];
+    // THE MODE WORD ONLY WHERE THE MODE IS A THING. hermes answers `mode` on
+    // this route whatever the flag says — it is a config key, and it is still
+    // read when `timeline` is on — so the row saying "any · 1 a day" with no
+    // chips anywhere would be naming a setting the owner cannot see or change.
+    if (modesOn && typeof cfg?.mode === 'string' && cfg.mode) bits.push(cfg.mode);
+    // THE REAL NUMBER, ALWAYS. ~~`n === 1 ? 'one card a day' : ...`~~ — the
+    // singular was a word where every other reading of this row is a digit,
+    // and it read as a hard-coded "one" to an owner whose config says 50.
+    if (Number.isInteger(cfg?.capPerDay) && cfg.capPerDay > 0) bits.push(`${cfg.capPerDay} a day`);
+    // NOTHING IS ASSERTED WHEN NOTHING ANSWERED. A reader that is still
+    // starting up must not be reported as a setting: an em dash says "not
+    // known", where a default would say "investor" to somebody on 'any'.
+    said.textContent = bits.length > 0 ? bits.join(' · ') : '—';
+    // THE ENGINE IN WORDS, in the hover rather than as a third clause on the
+    // line (owner: no third clause — the engine is the toggle above). It is
+    // still SAID somewhere, because this row is where an owner who cannot see
+    // that toggle (no claude on this Mac, or a probe that failed) finds out
+    // which way it is set.
+    //
+    // ABSENT IS NOT UNKNOWN. The route answers `engine: null` when the config
+    // key has never been written, and engines.mjs reads an absent key as the
+    // loopback model — so on a fresh install "nothing is set" IS "nothing
+    // leaves this Mac". An answer with no engine key is still an answer; only
+    // a reply that never came is unknown, and that is `cfg` itself being null.
+    if (cfg) {
+      const engine = configEngine(cfg) === 'claude-cli' ? 'reading with claude' : 'reading on this Mac';
+      el.title = `${help} ${engine}.`;
+    }
+    fitConnections();
   });
-  input.addEventListener('change', () => {
-    applied = Number(input.value);
-    hzPost(message, { value: Number(input.value) })
-      .then((d) => {
-        // Native clamps; if it came back different, the control has to say so
-        // rather than keep showing a value that was not stored.
-        if (d && typeof d.scale === 'number') {
-          input.value = String(d.scale);
-          read.textContent = format(d.scale);
-        }
-      })
-      .catch(() => {});
-  });
-
-  el.append(head, sub, input);
   return el;
 }
+
+// THE ONE SOURCE THIS APP CANNOT FETCH FOR ITSELF.
+//
+// Everything else on this panel is a switch or a login. LinkedIn is a FILE the
+// owner asks LinkedIn for and then hands over, which gives it a state no other
+// row has: asked for, not here yet. Until this row existed that state was
+// invisible — settings showed no sign the export was a thing at all, and the
+// only places to hand the file over were a connector card on the shelf above
+// and a setup flow the owner had already finished.
+//
+// ONE LINE, LIKE EVERY ROW HERE (owner, 2026-09-13: "so much fucking text??").
+// The value carries the state AND is the control: press it for the picker, or
+// drop the file on this panel, which native takes and imports through the same
+// path (ClickThroughWebView.onFileDrop). Every explanation, refusals included,
+// is the row's hover.
+// THE HOVER IS THE ONLY EXPLANATION THIS ROW HAS ROOM FOR, so it carries the
+// same instruction screen 4 gives — including the half that only turned up when
+// the page was walked live (2026-09-13): the Connections box is not always on
+// LinkedIn's download page, and the larger archive is the way round it. An owner
+// meets these two surfaces in either order, and one of them telling them to tick
+// a box that is not there is worse than its saying nothing.
+const LINKEDIN_HELP = 'linkedin will not let anything read your connections, so you ask them '
+  + 'for a copy and hand the file over. tick connections if linkedin offers it; '
+  + 'if it is not there, choose the larger archive, which includes them. '
+  + 'it is what tells a founder from an investor.';
+// FOUR WORDS, BECAUSE THE ROW IS 252px OF MONOSPACE. ~~"waiting for your file ·
+// drop it here"~~ needed 307px of it, so the value was cut AND the label
+// shrank to "linke…" beside it — both halves unreadable, on the row whose
+// entire job is to say whether the file is here. The drop target did not go
+// anywhere; the sentence that advertises it is the hover now, which costs the
+// line nothing. settings-exits.test.mjs budgets every one of these states.
+const LINKEDIN_WAITING = 'waiting for your file';
+// ...and what the same row says once LinkedIn has mailed to say the archive is
+// downloadable. "waiting for your file" is still true there and no longer
+// useful: the thing being waited for has arrived, in the owner's inbox, and the
+// errand is to go and get it. The mail connector leaves the note
+// (connectors/lib/linkedinExport.mjs) and connect's linkedin-export row carries
+// its timestamp — spent the moment an export is installed, so a timestamp
+// reaching this row always means there is still something to do.
+// ...and this one needed 313px. ~~"your export is ready — open the email"~~ is
+// the hover; the line is the flag. "open email" rather than "open the email"
+// because the panel's own arithmetic says the article costs 8px it does not
+// have — measured, not guessed.
+const LINKEDIN_READY = 'export ready · open email';
+const LINKEDIN_READY_FULL = 'your export is ready — open the email linkedin sent you.';
+// WHAT WENT WRONG, TWICE OVER: a few words on the line, the whole sentence on
+// the hover. The row may not grow to hold a remedy, and a remedy nobody can
+// read is not one — so the short form says which failure it was and the hover
+// says what to do about it.
+const LINKEDIN_REFUSALS = {
+  'zip-connections': ['no connections in that zip',
+    'there is no Connections.csv anywhere in that archive. tick "connections" when you '
+    + 'request the export and it will be in the next one.'],
+  zip: ["couldn't open that zip", 'that file is not an archive i can read.'],
+  columns: ["columns i don't recognise", 'i can only read the english export today.'],
+  newer: ['yours is older — kept', 'the export already here is newer than the file you chose.'],
+  duplicate: ['two of those — choose one',
+    'you chose two files that are both the same export. pick one of them.'],
+};
+const LINKEDIN_REFUSAL_DEFAULT = ["couldn't read that file", "i couldn't read that file."];
+
+// Set when the row is built, so an import nobody started here — the Downloads
+// watcher's notification, a file dropped on this panel — can repaint it.
+// Native calls __hzLinkedInChanged; see main.swift linkedInExportChanged.
+let repaintLinkedIn = null;
+// The drop the export filter turned away, so the row that says "drop it here"
+// can say what the file was not. Native swallows every drop on this panel now —
+// it used to hand unmatched ones to WebKit, which NAVIGATES to them — so
+// without a word here a drop the owner aimed at this row vanishes in silence.
+let refuseLinkedInDrop = null;
+// ...and the one fact the row cannot ask for itself. `linkedinExportReady`
+// rides connect's linkedin-export source row, which refresh() below already
+// fetches on every open and every focus — asking for it a second time through a
+// bridge verb of its own would be two readers of one note, which is how two
+// lines in one panel come to disagree.
+//
+// BUFFERED, NOT A SLOT TO CALL BACK INTO (review finding 13). renderSettings is
+// async and builds the row after its own `await`, so refresh() could get there
+// first, find nothing to hand the value to, and drop it — leaving the row
+// reading "waiting for your file", which is the one sentence the marker exists
+// to replace, until something refocused the panel. The value is kept here and
+// the row reads it when it is built, whichever of the two arrives first.
+let linkedInReadyTs = null;
+let noteLinkedInReady = (ts) => { linkedInReadyTs = hzExportReadyAt(ts); };
+
+function linkedInRow() {
+  const row = document.createElement('div');
+  row.className = 'setting';
+  const label = document.createElement('span');
+  // THE LABEL DOES NOT SHRINK ON THIS ROW. Every other row here has a name at
+  // least as long as its control, so `min-width: 0` costs them nothing; this
+  // one has the shortest name and the longest value in the panel, and the
+  // default let the name go first -- "linke…" next to a value that was itself
+  // cut. See .setting-name-keep.
+  label.className = 'setting-name setting-name-keep';
+  label.textContent = 'linkedin';
+  // A BUTTON, NOT A SPAN. It is the control as well as the read-out, and a span
+  // would lose the keyboard and the focus ring on the only door into the picker
+  // this panel has.
+  const said = document.createElement('button');
+  said.type = 'button';
+  said.className = 'setting-said setting-said-press';
+  row.append(label, said);
+
+  const say = (line, hover) => {
+    said.textContent = line;
+    row.title = hover;
+    // The row owns the hover, so the control carries the whole line for anyone
+    // reading it aloud — same split as settingRow.
+    said.setAttribute('aria-label', `linkedin — ${line}`);
+  };
+
+  // WHAT THE ROW SAYS WHILE THERE IS NO FILE, which is one of two things: the
+  // mail has arrived and the errand is to go and open it, or it has not and
+  // there is nothing to do but wait. Held rather than read, because the two
+  // answers arrive from different places at different times — the shelf hands
+  // over the mail's timestamp, `linkedInState` says whether a file is here —
+  // and whichever lands second must not paint the other one's answer away.
+  // `linkedInReadyTs` is module-level and may already hold an answer refresh()
+  // delivered before this row existed; see the buffer above.
+  let installed = false;
+  const paint = () => {
+    if (installed) return;
+    if (linkedInReadyTs !== null) {
+      say(LINKEDIN_READY, `${LINKEDIN_READY_FULL} ${LINKEDIN_HELP}`);
+      return;
+    }
+    // The drop target lives in the hover now; the line has no room to advertise
+    // it and still say what the row is for.
+    say(LINKEDIN_WAITING, `drop it here, or press to choose it. ${LINKEDIN_HELP}`);
+  };
+
+  paint();
+
+  // COUNTS AND A DATE. Nothing else ever crosses the bridge from that file —
+  // see linkedInState in Bridge.swift. `present: false` is the ordinary
+  // first-run answer and hands the line back to the two waiting states above.
+  const paintState = (out) => {
+    installed = out?.present === true;
+    if (!installed) { paint(); return; }
+    const n = Number(out.connections || 0);
+    // THE THIRD `Number(null) === 0` SITE. Bridge sends NSNull when it cannot
+    // read the file's date, and coercing it here rendered "2,970 · 1 jan" with
+    // a hover saying "imported on 01/01/1970" — a wrong number, shown to the
+    // owner, on the same page the shared reader was introduced to fix.
+    const when = hzExportReadyAt(out.modifiedTs);
+    // A DAY AND A SHORT MONTH. ~~toLocaleDateString()~~ is "13/09/2026", and
+    // "2,970 connections · 13/09/2026" is 267px of a 252px row. The word
+    // "connections" and the year both go to the hover, where the count is
+    // spelled out in full.
+    const short = when === null ? ''
+      : new Date(when).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+        .toLowerCase();
+    const dated = short ? ` · ${short}` : '';
+    const full = when === null ? '' : ` on ${new Date(when).toLocaleDateString()}`;
+    say(n > 0 ? `${n.toLocaleString()}${dated}` : `an export is here${dated}`,
+      n > 0
+        ? `${n.toLocaleString()} connections, imported${full}. ${LINKEDIN_HELP} press to replace it.`
+        : `an export is here${full}. ${LINKEDIN_HELP} press to replace it.`);
+  };
+
+  const ask = () => hzPost('linkedInState').then(paintState).catch(() => {});
+  repaintLinkedIn = ask;
+  // A TIMESTAMP OR NULL, and null is an answer: the note is spent the moment an
+  // export is installed, so the row has to be able to stop saying "open the
+  // email" once the owner has. Writes the module-level buffer, so a later
+  // rebuild of this row starts from the same answer.
+  noteLinkedInReady = (ts) => {
+    // Through the shared reader: hermes sends null when there is no marker, and
+    // `Number(null)` is 0 and finite -- which painted READY on every fresh
+    // install. See hzExportReadyAt.
+    linkedInReadyTs = hzExportReadyAt(ts);
+    paint();
+    fitConnections();
+  };
+  // A DROP THIS ROW ASKED FOR AND COULD NOT USE. Stays until the next thing
+  // happens to the row, which is what every other refusal here does — the
+  // owner has to be able to read it after the file has gone back to wherever
+  // they dragged it from.
+  // ~~`if (installed) return;`~~ An export already being imported does not make
+  // a mis-drop unworthy of an answer: native swallows every drop on this panel
+  // now, so if this row says nothing, nothing does. The line goes back to what
+  // is installed on the next read.
+  refuseLinkedInDrop = (name) => {
+    say("that isn't a linkedin export",
+      `${name || 'that file'} is not Connections.csv or the zip linkedin sends. ${LINKEDIN_HELP}`);
+    fitConnections();
+  };
+  ask();
+
+  said.addEventListener('click', () => {
+    said.disabled = true;
+    const previous = said.textContent;
+    const previousHover = row.title;
+    said.textContent = 'opening…';
+    hzPost('importLinkedIn')
+      .then((out) => {
+        // A cancel is an answer, not a failure: the row goes back to saying
+        // whatever it said before the panel opened.
+        if (!out || out.state === 'cancelled') { say(previous, previousHover); return; }
+        if (out.state === 'ok') {
+          // Read back rather than rendered from the reply. The reply says what
+          // this pick imported; this row's job is to say what is INSTALLED, and
+          // a pick that lands two files would make those different answers.
+          ask();
+          return;
+        }
+        const [short, why] = LINKEDIN_REFUSALS[out.reason] ?? LINKEDIN_REFUSAL_DEFAULT;
+        say(short, `${why} ${LINKEDIN_HELP}`);
+      })
+      .catch(() => {
+        const [short, why] = LINKEDIN_REFUSAL_DEFAULT;
+        say(short, `${why} ${LINKEDIN_HELP}`);
+      })
+      .finally(() => { said.disabled = false; fitConnections(); });
+  });
+
+  return row;
+}
+
+// A setting whose control is a BUTTON, because what it does happens once
+// instead of being on or off. The press is awaited and the button is dead while
+// it runs: both of these reach native, and one of them is deleting things.
+function actionRow({ name, help, note, label, danger = false, onPress }) {
+  // THE NOTE RUNS THE FULL WIDTH, under the name and the button rather than
+  // beside them. Squeezed into the column left over by a 90px pill it had
+  // about 25 characters a line, which turned one sentence into three lines —
+  // and made native's live uninstall narration, which lands in this same
+  // element, unreadable at the moment it matters most. With an empty note the
+  // row is its head and nothing else, which is one line.
+  const el = document.createElement('div');
+  el.className = 'setting setting-col';
+  if (help) el.title = help;
+  const text = document.createElement('div');
+  text.className = 'setting-head';
+  const title = document.createElement('span');
+  title.className = 'setting-name';
+  title.textContent = name;
+  // THE ONLY LINE LEFT UNDER A LABEL IN THIS PANEL, and only uninstall passes
+  // one: it is the press that cannot be taken back, so what it keeps is said
+  // on the surface rather than on a hover nobody is obliged to try.
+  //
+  // The element is built for every row regardless, because `say` writes into
+  // it — quit's one failure sentence, and uninstall's step-by-step narration
+  // from native — and a row that cannot report what just happened is worse
+  // than a row with a line under it. Empty, it renders as nothing (`:empty`).
+  const sub = document.createElement('span');
+  sub.className = 'setting-note';
+  sub.textContent = note || '';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'setting-btn' + (danger ? ' setting-btn-danger' : '');
+  btn.textContent = label;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      // `say` rewrites the row's own note, which is where the owner is already
+      // looking. A toast somewhere else would be a second place to watch for
+      // the answer to a button they just pressed.
+      await onPress({ say: (line) => { sub.textContent = line; fitConnections(); } });
+    } catch {
+      sub.textContent = 'that did not go through — try again.';
+      fitConnections();
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  text.append(title, btn);
+  el.append(text, sub);
+  return el;
+}
+
+// WHY A START DID NOT HAPPEN, in the owner's words. The keys are
+// Connectors.StartOutcome's own cases, so a new guard over there arrives here
+// as `unknown` rather than as silence.
+const START_REFUSED = {
+  stopping: 'it is shutting down. reopen the app and it will start again.',
+  modelMaintenance: 'it is paused while a local model finishes downloading.',
+  missingRuntime: 'the local runtime is missing — this install needs repairing.',
+  missingConfig: 'there is nothing set up for it to read yet. finish setup first.',
+  // The reply itself did not land, or landed saying the settings write failed.
+  // Whatever is or is not running, nothing here was configured.
+  config: 'i could not write down what it should read. nothing changed.',
+  unknown: 'it did not start, and did not say why.',
+};
+
+// THE ONE SWITCH THAT DECIDES WHETHER ANYTHING LEAVES THIS MAC, and until now
+// it had no home outside the setup flow: `setEngine` was granted to onboarding
+// alone, so once the flow was finished the owner could neither see the answer
+// nor change it. Same copy as onboarding screen 5 on purpose — two wordings for
+// one privacy switch is two promises, and only one of them can be the one that
+// was read.
+// THREE WORDS AND AN AMPERSAND (owner, 2026-09-13). The sentence this used to
+// be — "use your claude subscription for reading and drafting" — wrapped to two
+// lines at 312px before the panel had said anything at all. What it means is
+// the hover, and the hover is the privacy promise itself.
+const ENGINE_LABEL = 'claude reads & drafts';
+const ENGINE_PRIVACY = "when this is on, excerpts of your messages go to anthropic's servers "
+  + 'to be read. when it is off, nothing leaves this Mac.';
+// NEUTRAL ABOUT THE DIRECTION, because the row shows it after a press either
+// way — and it was written about turning the switch OFF, so turning it on
+// printed an off-specific sentence about what had just been turned on.
+const ENGINE_TIMING = 'this applies to the next person it reads about — one already being '
+  + 'written finishes with what it started.';
+// What a probe that is not `ok` means, in the same voice as the rest of this
+// panel. NEVER a raw error string: see onboarding's statusCell for the same
+// rule, and the review item that asked for it.
+const ENGINE_STATE_COPY = {
+  missing: 'no claude on this Mac, so it reads with the local model instead.',
+  auth: 'claude is installed but not signed in. open it, sign in, then check again.',
+  limit: 'claude is installed and signed in, but your plan is rate-limited right now.',
+  upgrade: 'this claude is too old for the way i call it.',
+  slow: 'claude did not answer. it may be busy — check again in a moment.',
+  busy: 'still checking…',
+  error: 'claude is here but it did not answer the way i expected.',
+};
+// A WRITE THAT DID NOT LAND. The switch snapping back is what the owner sees;
+// these say why on the hover. Neither may imply anything was stored.
+const ENGINE_NO_SAVE_AUTH = 'i could not reach the part of me that keeps this. nothing changed.';
+const ENGINE_NO_SAVE = 'that did not save — the reader may still be starting up. nothing changed.';
+const ENGINE_UNKNOWN = 'claude is here, but i cannot tell how this is set right now.';
+
+function engineRow(configPromise) {
+  const el = document.createElement('div');
+  el.className = 'setting';
+  const label = document.createElement('span');
+  label.className = 'setting-name';
+  label.textContent = ENGINE_LABEL;
+
+  // EVERY SENTENCE THIS ROW USED TO PRINT, on the hover. It had two lines
+  // under its label at all times — the privacy promise and a live state line —
+  // which is four lines of a nine-row panel spent on one switch. The words did
+  // not change; where they live did. The promise is always in there, because
+  // it is the one this panel is answerable for.
+  const say = (line) => { el.title = line ? `${ENGINE_PRIVACY} ${line}` : ENGINE_PRIVACY; };
+  say('');
+
+  // The control slot holds the busy word while a probe is in flight, then the
+  // switch once one has come back ok, or a "check" pill when it has not — and
+  // the switch keeps a one-word marker beside it if a write did not land.
+  const control = document.createElement('span');
+  control.className = 'setting-control';
+  el.append(label, control);
+
+  // ONE BUSY WORD, the same one onboarding's engine screen uses — see
+  // connect-affordances.test.mjs, which rejects a new verb per call site.
+  const busy = document.createElement('span');
+  busy.className = 'setting-said';
+  busy.textContent = 'checking…';
+
+  // A FAILED WRITE IS SAID ON THE ROW, not only on its hover. The snap back
+  // below is the first half of the report, and it is not enough on its own: a
+  // switch that springs back with nothing beside it is a switch the owner
+  // presses again, and this is the one control in the panel where what the
+  // owner believes about it IS a privacy claim. One word, in the slot a value
+  // would use, next to the switch rather than under it — the reason is the
+  // hover, the fact is on the row. Cleared by the next answer of any kind.
+  const warn = document.createElement('span');
+  warn.className = 'setting-said setting-warn';
+  warn.textContent = 'unsaved';
+
+  const sw = document.createElement('button');
+  sw.type = 'button';
+  sw.className = 'switch';
+  sw.setAttribute('role', 'switch');
+  sw.appendChild(Object.assign(document.createElement('span'), { className: 'knob' }));
+  const paintSwitch = (on) => {
+    sw.classList.toggle('on', on);
+    sw.setAttribute('aria-checked', String(on));
+    sw.setAttribute('aria-label', on
+      ? 'Reading with your Claude subscription'
+      : 'Reading on this Mac only');
+  };
+  sw.addEventListener('click', async () => {
+    const next = !sw.classList.contains('on');
+    paintSwitch(next);
+    const out = await hzPost('setEngine', { engine: next ? 'claude-cli' : 'local' })
+      .catch(() => null);
+    if (landed(out)) {
+      control.replaceChildren(sw);
+      say(ENGINE_TIMING);
+      return;
+    }
+    // NOTHING WAS WRITTEN, so the switch must not claim otherwise — this is the
+    // switch where a wrong paint is a false privacy claim, and the failure it
+    // has to survive is the ordinary one: hermes mid-restart answers
+    // {state:'down'} and RESOLVES, so the `catch` this replaces caught nothing
+    // and the switch stayed where the owner put it while the config did not.
+    paintSwitch(!next);
+    control.replaceChildren(warn, sw);
+    say(out?.state === 'auth' ? ENGINE_NO_SAVE_AUTH : ENGINE_NO_SAVE);
+  });
+
+  const again = document.createElement('button');
+  again.type = 'button';
+  again.className = 'setting-btn';
+  // 'check', not 'check again': at 312px the label above is 21 monospace
+  // characters and the row has about 100px left for a control. The longer pill
+  // did not fit beside it, and the row may not wrap.
+  again.textContent = 'check';
+  again.addEventListener('click', () => { probe({ manual: true }); });
+
+  // THE SWITCH IS OFFERED ONLY WHEN THE PROBE WORKED. "you have it" and "it
+  // works" are different questions, and only the second one may put a switch on
+  // screen that sends message excerpts off this Mac — onboarding's own rule.
+  //
+  // AND ONLY WHEN ITS POSITION IS KNOWN. `paintSwitch(out.engine ===
+  // 'claude-cli')` reads a MISSING field as off, which on this particular
+  // switch is a silent implied opt-out nobody made — one tap from being written
+  // back as the real answer. The probe carries the configured engine and so
+  // does GET /admin/config/card, so the second answers when the first does not;
+  // with neither able to say, there is no switch, exactly as with no probe.
+  //
+  // THE "CAN'T TELL" STATE IS A CONTROL, NOT A SENTENCE (owner, 2026-09-13),
+  // and the control is the pill rather than a disabled switch: a switch drawn
+  // disabled still draws a POSITION, and the position it would draw is off —
+  // the exact false privacy answer the paragraph above exists to refuse. The
+  // pill says the same "not now" and keeps the one verb that can change it.
+  async function paint(out) {
+    const st = out && out.state;
+    if (st !== 'ok') {
+      say(ENGINE_STATE_COPY[st] || ENGINE_STATE_COPY.error);
+      control.replaceChildren(again);
+      fitConnections();
+      return;
+    }
+    const fromProbe = typeof out.engine === 'string' ? out.engine : null;
+    const engine = fromProbe ?? configEngine(await configPromise);
+    if (engine !== 'claude-cli' && engine !== 'local') {
+      say(ENGINE_UNKNOWN);
+      control.replaceChildren(again);
+      fitConnections();
+      return;
+    }
+    say(ENGINE_TIMING);
+    paintSwitch(engine === 'claude-cli');
+    control.replaceChildren(sw);
+    fitConnections();
+  }
+  // A `busy` PROBE IS A QUEUE, NOT AN ANSWER. EngineProbe returns it when
+  // another probe holds the job — which is exactly what happens while the
+  // onboarding flow is open and probing beside this panel. It clears itself in
+  // seconds, so the row asks again rather than parking on a pill the owner has
+  // to notice and press. Bounded, because a probe that is busy for ever is a
+  // different bug and a page that retries for ever hides it.
+  let busyRetries = 0;
+  // `manual` is a press, and a press starts the budget again. Without that the
+  // three retries were spent once per panel session and every later press
+  // parked on the busy pill for good — the exact state the retry was added to
+  // get out of. Any answer that is not `busy` resets it too.
+  function probe({ manual = false } = {}) {
+    if (manual) busyRetries = 0;
+    control.replaceChildren(busy);
+    hzPost('engineProbe')
+      .then((out) => {
+        if (out?.state !== 'busy') busyRetries = 0;
+        if (out?.state === 'busy' && busyRetries < 3) {
+          busyRetries += 1;
+          setTimeout(probe, 2000);
+        }
+        paint(out);
+      })
+      .catch(() => paint({ state: 'error' }));
+  }
+  probe();
+  return el;
+}
+
+// ~~rangeRow: a setting that holds a NUMBER — a full-width track under its
+// label, with a live read-out and a line of explanation.~~ The size slider was
+// yeeted (owner, 2026-08-24: everything runs at 100%) and this builder stayed
+// behind uncalled for three weeks. It is deleted here rather than kept
+// "in case": it was the last thing in this file that put a paragraph under a
+// label, and a panel whose rule is one line per row cannot carry a dormant
+// exception to it. renderSettings still snaps a stored non-1 scale back to 1,
+// which is the only part of the slider era that has to survive.
 
 // One explicit performance switch replaces the old implicit charger/thermal
 // policy. Both settings keep processing — only pass size and process priority
 // change, and neither reads the charger.
 //
-// The high-throughput label remains the owner's compact "maxx" name. The low
-// side says what it does: use less power. The hint carries the concrete
-// difference rather than making either label do too much work.
+// THE ROW IS NAMED FOR WHAT THE SWITCH TURNS ON (owner, 2026-09-13: "use less
+// power" — the toggle IS the answer). ~~A row called "performance" with a
+// "maxx / use less power" read-out printed beside its switch~~: the name asked
+// a question the read-out then had to answer, which is two pieces of text for
+// one control. Named this way the switch means what it says — ON is less
+// power — and needs nothing beside it.
+//
+// THE POLARITY FLIPPED WITH THE NAME, AND ONLY ON SCREEN. What is stored and
+// sent is untouched: `setPerformance` still writes full_speed / less_power,
+// and a preference written before the rename still resolves rather than
+// silently reading as the other setting. The owner's compact "maxx" name for
+// the high-throughput side survives in the hover and in the accessible name.
 function performanceRow(selected) {
   const el = document.createElement('div');
-  el.className = 'setting performance-setting';
+  el.className = 'setting';
+  el.title = PERFORMANCE_HELP;
 
-  const text = document.createElement('div');
-  text.className = 'setting-text';
   const name = document.createElement('span');
   name.className = 'setting-name';
-  name.textContent = 'performance';
-  const labelLine = document.createElement('span');
-  labelLine.className = 'setting-label-line';
-  labelLine.append(name, settingHint(
-    'performance',
-    'maxx does more work in each pass and asks macOS for foreground priority, '
-    + 'so imports and local indexing finish sooner. Using less power does the same work '
-    + 'in smaller passes at background priority — slower, but the machine stays quiet. '
-    + 'Both keep running on battery; neither one stops.'
-  ));
-  text.append(labelLine);
+  name.textContent = 'use less power';
 
-  const control = document.createElement('div');
-  control.className = 'performance-toggle';
-  const modeLabel = document.createElement('span');
-  modeLabel.className = 'performance-mode-label';
-  modeLabel.setAttribute('aria-live', 'polite');
   const sw = document.createElement('button');
   sw.className = 'switch';
   sw.type = 'button';
@@ -408,17 +896,13 @@ function performanceRow(selected) {
   const normalise = (v) => (v === FULL || v === 'god_mode' ? FULL : LESS);
   let active = normalise(selected);
   const paint = () => {
-    const full = active === FULL;
-    modeLabel.textContent = full ? 'maxx' : 'use less power';
-    sw.classList.toggle('on', full);
-    sw.setAttribute('aria-checked', String(full));
+    const less = active === LESS;
+    sw.classList.toggle('on', less);
+    sw.setAttribute('aria-checked', String(less));
     // The accessible name says what the switch DOES, since a screen reader user
-    // gets no hint text alongside it.
+    // gets no hover alongside it.
     sw.setAttribute('aria-label',
-      full ? 'Processing: maxx' : 'Processing: use less power');
-    sw.title = full
-      ? 'maxx: larger passes, foreground priority'
-      : 'Smaller passes, background priority';
+      less ? 'Processing: use less power' : 'Processing: maxx');
   };
   sw.addEventListener('click', async () => {
     const previous = active;
@@ -434,9 +918,8 @@ function performanceRow(selected) {
     paint();
   });
   paint();
-  control.append(modeLabel, sw);
 
-  el.append(text, control);
+  el.append(name, sw);
   return el;
 }
 
@@ -444,6 +927,14 @@ function performanceRow(selected) {
 // not call a connector "active" just because its daemon is running: only model
 // bytes in flight and app-owned indexing/distillation phases appear here.
 function activityRow() {
+  // WHAT THE LAST PRESS OF "start it" ANSWERED, held here rather than in a node.
+  //
+  // paint() below begins by emptying the list and runs on a two-second
+  // interval, so a refusal written straight into the row was gone within two
+  // seconds of the press — taking the entire reason the start outcome is
+  // reported at all. Held in the closure, read on every repaint, cleared by a
+  // fresh press or by the reader actually coming up.
+  let startNote = null;
   const el = document.createElement('div');
   el.className = 'setting setting-col activity-setting';
   const head = document.createElement('div');
@@ -454,24 +945,20 @@ function activityRow() {
   const estimate = document.createElement('span');
   estimate.className = 'activity-estimate';
   estimate.hidden = true;
-  const estimateLine = document.createElement('span');
-  estimateLine.className = 'activity-estimate-line';
-  estimateLine.hidden = true;
-  estimateLine.append(estimate, infoHint(
-    'Your Mac is importing and indexing everything privately. More chats and years mean more time.',
-    'Why is this taking so long?'
-  ));
-  head.append(name, estimateLine);
+  // ~~a "?" beside the total, opening "why is this taking so long?"~~ The
+  // question is worth answering and the icon was not: the answer is this
+  // read-out's own hover now, on the very thing being asked about.
+  estimate.title = ESTIMATE_HELP;
+  head.append(name, estimate);
   const list = document.createElement('div');
   list.className = 'activity-list';
   el.append(head, list);
 
-  const gb = (bytes) => `${(Number(bytes || 0) / 1e9).toFixed(1)} GB`;
+  const gb = (bytes) => `${(Number(bytes || 0) / 1e9).toFixed(1)}`;
   const paint = (data) => {
     const total = data && typeof data.estimate === 'string' ? data.estimate.trim() : '';
     estimate.textContent = total;
     estimate.hidden = !total;
-    estimateLine.hidden = !total;
     const latestItems = data && Array.isArray(data.items) ? data.items : [];
     // The queue stays intact: the first row is current and the remaining real
     // scheduled work follows in order. Current + next two fit; more scroll here.
@@ -480,10 +967,57 @@ function activityRow() {
     const items = [...active, ...queued];
     list.replaceChildren();
     if (!items.length) {
+      // ~~"nothing processing right now"~~ WAS THE SAME SENTENCE for three
+      // different states: the reader has finished what it can see, the reader
+      // has never started, and the reader is not running any more. The first is
+      // fine and the other two are the owner's problem to fix — and the panel
+      // was telling them apart for nobody. `reading` is the app's own child
+      // process, which is the thing that would be doing the work.
       const idle = document.createElement('span');
       idle.className = 'activity-idle';
-      idle.textContent = 'nothing processing right now';
+      const reading = data && data.reading;
+      if (reading !== false) startNote = null; // it came up; the refusal is history
+      idle.textContent = startNote
+        || (reading === false
+          ? 'nothing is running.'
+          : 'nothing to do right now — everything it can see is read.');
       list.appendChild(idle);
+      if (reading === false) {
+        // The same idempotent call onboarding's banner offers, and the same
+        // one the permission screens make: native guards a daemon that is
+        // already up, so pressing it twice costs nothing.
+        const start = document.createElement('button');
+        start.className = 'setting-btn';
+        start.type = 'button';
+        start.textContent = 'start it';
+        start.addEventListener('click', async () => {
+          start.disabled = true;
+          startNote = null;
+          idle.textContent = 'starting…';
+          const out = await hzPost('startSources').catch(() => null);
+          start.disabled = false;
+          // A BUTTON THE OWNER PRESSES AND WATCHES. Native answers whether the
+          // reader actually came up and, when it did not, which of the six
+          // guards refused — two of which are states this button used to sit
+          // in for ever, saying "starting…" and meaning nothing.
+          //
+          // STATE FIRST. `reading` rides on a reply whose `state` can be
+          // "error": the config write failed and the daemon happened to be up
+          // already, which is not a reader anybody configured. Trusting
+          // `reading` alone said "reading now." about a configuration that was
+          // never written.
+          if (landed(out) && out.reading === true) {
+            startNote = out.why === 'queued' ? 'starting…' : 'reading now.';
+          } else if (!landed(out)) {
+            startNote = START_REFUSED.config;
+          } else {
+            startNote = START_REFUSED[out?.why] || START_REFUSED.unknown;
+          }
+          idle.textContent = startNote;
+          fitConnections();
+        });
+        list.appendChild(start);
+      }
     } else {
       for (const item of items) {
         const row = document.createElement('div');
@@ -495,7 +1029,9 @@ function activityRow() {
         const text = document.createElement('span');
         if (item.kind === 'model') {
           const verb = item.phase === 'verifying' ? 'verifying' : 'downloading';
-          text.textContent = `${verb} ${item.tier || 'local model'} · ${gb(item.got)} of ${gb(item.total)}`;
+          // `1.2/4.0 GB`, not `1.2 GB of 4.0 GB`: the list is three lines in a
+          // 252px column and this one ellipsized mid-number.
+          text.textContent = `${verb} ${item.tier || 'local model'} · ${gb(item.got)}/${gb(item.total)}`;
         } else {
           text.textContent = item.label || 'processing locally';
         }
@@ -582,12 +1118,30 @@ async function renderSettings() {
     return; // no bridge, nothing to toggle
   }
   const rows = [];
+  // FIRST, BECAUSE IT IS THE ONLY ONE ABOUT DATA LEAVING THIS MAC. Everything
+  // below it is about how the app behaves; this one is about where the words
+  // go. It paints itself asynchronously — a probe runs the claude binary and
+  // can take seconds, and settings must not wait on it to draw.
+  // ASKED ONCE, READ TWICE. A rejected promise is an answer too — every reader
+  // of it renders "not known" rather than a default — so the catch is here and
+  // not at each use.
+  // NULL FOR ANY REPLY THAT IS NOT OK. `.catch(() => null)` alone could never
+  // produce that null: a down hermes resolves with {state:'down'}, which is
+  // truthy, so every reader of this promise treated "the reader did not answer"
+  // as a configuration — and the daily-card row said "reading on this Mac"
+  // about a config it had not read.
+  const cardConfig = hzPost('cardConfig')
+    .then((out) => (landed(out) ? out : null))
+    .catch(() => null);
+  rows.push(engineRow(cardConfig));
+  rows.push(cardConfigRow(cardConfig));
   // The motion row only appears when the system setting it overrides is
   // actually on. With Reduce Motion off it would do nothing, and a control
   // that does nothing is worse than no control.
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     rows.push(settingRow({
       name: 'animations',
+      help: MOTION_HELP,
       on: p && p.motion === true,
       message: 'setMotion',
     }));
@@ -596,16 +1150,21 @@ async function renderSettings() {
   // the only place they can be turned off.
   rows.push(settingRow({
     name: 'sounds',
+    help: SOUNDS_HELP,
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));
   rows.push(settingRow({
     name: 'keep mac awake',
-    hint: 'Keeps imports and local indexing moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
+    help: AWAKE_HELP,
     on: p && p.keepAwake === true,
     message: 'setKeepAwake',
   }));
   rows.push(performanceRow(p && p.performance));
+  // Above the behaviour rows would put a file-handover between two switches;
+  // below them, next to activity, is where the rows about what the app HAS
+  // rather than how it behaves belong.
+  rows.push(linkedInRow());
   // The size slider was yeeted (owner, 2026-08-24): everything runs at 100%.
   // Native's setScale plumbing survives untouched, so a stored non-1 scale
   // from the slider era is snapped back to 1 here — without the control, a
@@ -619,15 +1178,104 @@ async function renderSettings() {
   // does, not where you re-watch its introduction, and the one control here
   // that took over the whole screen was the one nobody wanted twice.
   //
-  // This page's `openOnboarding` grant and the bridge case behind it went too,
-  // because bridge-capabilities.test.mjs holds the map to exactly what the
-  // pages call: an ungranted case is an orphan and a granted-but-uncalled verb
-  // is a re-widened surface, and it fails on both. main.swift keeps its own
-  // openOnboarding, so first run and the two paths that still reach it — a
-  // resumed flow, and the `onboarding` URL scheme — are unchanged.
+  // The grant behind it — and `markHandheld`, which no page ever called — went
+  // with the surface review (2026-09-13), along with both bridge cases.
+  // ~~"This page's `openOnboarding` grant and the bridge case behind it went
+  // too"~~ was written here at the time and was NOT true: the grant and the
+  // case both survived, so the settings page kept a door into the setup flow
+  // that nothing on it could open. bridge-capabilities.test.mjs holds the map
+  // to exactly what the pages call — an ungranted case is an orphan and a
+  // granted-but-uncalled verb is a re-widened surface — and it was the comment,
+  // not the test, that was wrong. main.swift keeps its own openOnboarding, so
+  // first run and the two paths that still reach it (a resumed flow, and the
+  // `onboarding` URL scheme) are unchanged.
+
+  // LAST, AND IN THIS ORDER. Leaving is the bottom of a settings panel
+  // everywhere else, and the reversible one goes above the one that is not.
+  //
+  // THE APP IS LSUIElement: no menu bar, no ⌘Q, no status item. Before these
+  // two rows the only ways to stop it were Activity Monitor and a shell script
+  // in a repo, which on somebody else's Mac means it cannot be turned off at
+  // all — the worst thing on the surface, and the reason these are here.
+  // NO LINE UNDER IT. Quitting is one press and one keystroke away from being
+  // undone — reopen the app — so what it does is the hover, and the row is the
+  // word and the button.
+  rows.push(actionRow({
+    name: 'quit',
+    help: QUIT_HELP,
+    label: 'quit',
+    onPress: async () => { await hzPost('quitApp'); },
+  }));
+  // THE ONE ROW THAT KEEPS A LINE, because it is the one press that cannot be
+  // taken back. Nine words, and the half of them that matter are the promise
+  // that the data stays; the rest of what happens is the hover.
+  rows.push(actionRow({
+    name: 'uninstall',
+    help: UNINSTALL_HELP,
+    note: UNINSTALL_NOTE,
+    label: 'uninstall',
+    danger: true,
+    onPress: async ({ say }) => {
+      // NATIVE NARRATES IT. The work runs off the main thread and pushes each
+      // step here as it lands, so a launchd that takes seconds per agent is a
+      // row that is saying something rather than a window that has stopped
+      // answering. Cleared when the call settles, whichever way it went.
+      window.__hzUninstallStep = (step) => say(String(step));
+      const out = await hzPost('uninstallApp').finally(() => {
+        window.__hzUninstallStep = null;
+      });
+      // Native asks first, with an alert listing what is actually on this Mac.
+      // A cancel is an answer, not a failure, and must leave the row as it was.
+      if (!out || out.cancelled === true) return;
+      if (out.state === 'partial') {
+        // EXACTLY WHAT REMAINS, because the app does not quit on this path and
+        // the owner is left looking at an install that is part gone. Native
+        // puts the reader back before answering, so the thing they are looking
+        // at is a working install and not a shell.
+        const failures = Array.isArray(out.failures) ? out.failures : [];
+        const gone = Array.isArray(out.services) ? out.services.length : 0;
+        const removed = gone > 0 ? `${gone} service${gone === 1 ? '' : 's'} were removed. ` : '';
+        // WHAT THE RESTART ACTUALLY ANSWERED. This used to assert "still
+        // running and still reading" on every partial — including the one
+        // where the app had just deleted its own bundle, so the reader had
+        // nothing left to run and start() said so.
+        const still = out.readerRestarted === true
+          ? 'the app is still running and still reading.'
+          : 'the app is still running, but the reader did not come back — quit and reopen it.';
+        say(`${removed}this was left: ${failures.join('; ')}. ${still}`);
+        return;
+      }
+      if (!landed(out)) {
+        say('that did not go through — nothing was removed.');
+        return;
+      }
+      // The app is quitting behind this line, so it is the last thing the owner
+      // reads — and it has to name what was KEPT, because nothing else will get
+      // the chance to.
+      say(`removed. everything it read is still in ${out.dataKept || 'your home folder'}.`);
+    },
+  }));
   settings.replaceChildren(...rows);
 }
 renderSettings();
+
+// AN EXPORT THAT LANDED WITHOUT ANYBODY PRESSING ANYTHING HERE — the Downloads
+// watcher's notification, or a file dropped on this panel, which native takes
+// because a page never sees a dropped file's path. The row reads its state once
+// when it is built, so without this it would go on saying "waiting for your
+// file" about a file that is installed. See main.swift linkedInExportChanged.
+window.__hzLinkedInChanged = () => { if (repaintLinkedIn) repaintLinkedIn(); };
+// ...and a drop this panel was given and could not use. Native takes every file
+// drop on this window now, so it is the only thing that can answer for one.
+window.__hzLinkedInDropRefused = (name) => {
+  const dropped = String(name ?? '');
+  if (refuseLinkedInDrop) { refuseLinkedInDrop(dropped); return; }
+  // NO ROW TO SPEAK FOR IT. linkedInRow() is not built when the registry has
+  // linkedin off, and native swallows every drop regardless — so without this
+  // the owner dropped a file on the panel and nothing anywhere said a word.
+  // The shelf's own notice line is the one surface that is always here.
+  showNotice({ text: `${dropped || 'that file'} is not a linkedin export.` });
+};
 
 // ---------------- the connectors intro (yeeted) ----------------
 // There WAS a guided first visit here: a banner above the shelf ("first --
@@ -713,6 +1361,39 @@ const HINTS = {
   // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
   // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
   // tile renders the ordinary cookie-login flow like Messenger's.
+  //
+  // BACK, for the export ROW and not the bridge one (see isHiddenSource). With
+  // `bridges` off there is no bridge to log into, and the export connector is
+  // still scheduled and still polling ~/.hazlie/imports/linkedin — so this is
+  // the only place the owner can be told that the folder is what it wants. The
+  // path IS the instruction: nothing else on the shelf can name it, because no
+  // other tile is waiting on a file the owner has to put there by hand.
+  'linkedin-export': {
+    // ~~"put Connections.csv in ~/.hazlie/imports/linkedin"~~ — a raw dotfile
+    // path in a tooltip, and an instruction that CONTRADICTED onboarding screen
+    // 4, which does the same job with a native file picker. Two ways to do one
+    // thing, and the one written here was the one that asks the owner to go
+    // digging in a hidden folder. The card carries the picker now (see
+    // `pickLinkedInExport` below); the sentence is only how you get the file.
+    // ~~"unzip it and choose Connections.csv here."~~ The zip is the only thing
+    // LinkedIn ever sends, and the import takes Connections.csv out of it now
+    // (Bridge extractConnections) — so this card was still asking the owner to
+    // do by hand the job the picker on it had just been taught to do, and
+    // contradicting that picker's own message ("choose the zip LinkedIn sent
+    // you") on the same install (review finding 9).
+    // ~~'tick "Connections" → Request archive'~~ assumed a box that is not always
+    // on the page: walked live on the owner's account (2026-09-13), the "Want
+    // something in particular?" list offered no Connections at all and the
+    // larger archive was the only route to the file.
+    text: 'On LinkedIn: Settings → Data privacy → Get a copy of your data. Tick "Connections" '
+      + 'if it is offered; if it is not there, request the larger archive, which includes them. '
+      + 'It arrives by email — about ten minutes for connections alone, up to a day for the '
+      + 'archive. Hand me the zip and I will take it from there.',
+    url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
+    link: 'linkedin.com · get a copy of your data',
+    // One export folder per Mac, so no "+ add account" once it is imported.
+    local: true,
+  },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -804,8 +1485,11 @@ const BRIDGE_HELP = {
 // renders under EVERY tile including the social bridges, which hold a live
 // authenticated session to the platform — so "your data never leaves this
 // mac" was false there (the ops/EGRESS.json ledger enumerates the real
-// paths). What IS true everywhere: hazlie reasons over it locally and no
-// cloud model sees it.
+// paths). What IS true everywhere: ~~hazlie reasons over it locally and no
+// cloud model sees it~~ (stale 2026-08-31: the owner-reviewed frontier
+// handoff can send reviewed text to a cloud model) — the rows themselves stay
+// local, and no cloud model receives anything the owner did not review and
+// approve in chat.
 const STAY = "data stored locally";
 
 const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
@@ -819,16 +1503,79 @@ const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 const CONNECTOR_ORDER = [
   'imessage',
   'whatsapp', 'messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin',
+  // The export tile stands beside the bridge tile when both flows are provisioned
+  // (visibleSources names them apart then), and in its place when they are not.
+  'linkedin-export',
   'mail',
   'calendar',
   'contacts',
   'photos', 'notes', 'files', 'granola', 'oura', 'notion',
 ];
-// TEMPORARILY HIDDEN (owner, front-end only, 2026-08-22 — "bring them back
-// later"). The connectors and their status are untouched; the tiles just
-// don't render. To restore one, delete it from this set. Nothing else keys
-// off it, so a hidden id still works everywhere else it appears.
-const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
+// ~~TEMPORARILY HIDDEN (owner, front-end only, 2026-08-22 — "bring them back
+// later"): const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files',
+// 'notion', 'notes']).~~ DERIVED from ops/features.json now (see
+// ops/FEATURES.md), together with the daemon's DEFAULT_DISABLED_CONNECTORS,
+// which used to carry a comment telling whoever edited one list to remember the
+// other. Same five ids fall out of the registry today; the difference is that
+// nobody has to remember.
+//
+// The rows come from connect/lib/status.mjs and its `id` is not always a
+// connector name, so two rules rather than one:
+//
+//   * a row whose connector feature is false is hidden;
+//   * EVERY BRIDGE TILE is hidden while `bridges` is off — messenger,
+//     instagram, twitter, telegram, discord, slack and LinkedIn's bridge row.
+//     `isBridge` is the discriminator, not the id, and that matters for
+//     LinkedIn specifically: `linkedin` is BOTH a bridge platform and the
+//     connector that reads the data export, sharing one hermes source name.
+//     The export connector stays on (the card's professional tags come from
+//     it); what goes is the login tile for a bridge that is not provisioned.
+//     Filtering by id would have switched off the export with it.
+//
+// The status rows themselves are untouched, exactly as the old hand-written
+// version promised: a hidden id still works everywhere else it appears.
+let featureSet = null; // filled by the first refresh(); see hzFeatures in bridge.js
+// LinkedIn is two flows behind two different flags, and exactly one tile.
+//
+// The bridge tile goes with `bridges`, above. The EXPORT row (connect/lib/status.mjs
+// LINKEDIN_EXPORT_ID) belongs to `connectors.linkedin`, which the card leaves
+// ON — connectors/sources/linkedin.mjs keeps polling ~/.hazlie/imports/linkedin
+// whatever the bridges flag says. Hiding both left a scheduled connector with
+// no surface anywhere telling the owner to drop Connections.csv in. So: show
+// the export tile when its connector is on and no bridge tile is carrying
+// LinkedIn, and never show the two at once.
+const LINKEDIN_EXPORT_ID = 'linkedin-export';
+/// THE CONNECTOR A ROW BELONGS TO, which is not always the row's id. `mail:<…>`
+/// rows are the mail connector, and the export row is the `linkedin` connector —
+/// sources/linkedin.mjs, the thing that polls ~/.hazlie/imports/linkedin. That
+/// second mapping used to live inside isHiddenSource only, so isOptionalSource
+/// asked the registry about a connector named "linkedin-export" that does not
+/// exist and got `undefined`: the tile showed and was never labelled optional
+/// while the daemon was waiting for the owner to start it. One mapping, both
+/// rules. connect/lib/status.mjs' connectorForStatusRow is its server-side twin.
+const connectorOf = (id) => (id === LINKEDIN_EXPORT_ID ? 'linkedin' : kindOf(id));
+function isHiddenSource(src) {
+  // The export row answers to its own connector and NOTHING ELSE. It used to
+  // hide whenever `bridges` came on, which re-created the bug it was brought
+  // back to fix, mirrored: connectors.linkedin stays true with bridges on, so
+  // the export connector is still scheduled and still polling, and the hint
+  // carrying the drop path was the only place that path is written down.
+  if (src.id === LINKEDIN_EXPORT_ID) {
+    return hzConnectorFeature(featureSet, 'linkedin') === false;
+  }
+  if (isBridge(src)) return !hzFeatureOn(featureSet, 'bridges');
+  // `=== false` and not a falsy test, deliberately: hzConnectorFeature answers
+  // `undefined` for a connector the registry does not mention, and the daemon
+  // LEAVES SUCH A MODULE ALONE (connectorsDisabledBy). A row whose kind is
+  // unknown here is one the daemon is scheduling and ingesting, so hiding it
+  // would draw the owner a shelf that disagrees with what the machine is doing.
+  return hzConnectorFeature(featureSet, connectorOf(src.id)) === false;
+}
+/// Offered, but the owner has to ask for it. Labelled on the tile so "not
+/// connected" does not read as "broken" for a source nothing auto-starts.
+function isOptionalSource(src) {
+  return !isBridge(src) && hzConnectorFeature(featureSet, connectorOf(src.id)) === 'optional';
+}
 // Status returns one real row per authorized mailbox plus a synthetic `mail`
 // row for starting another grant. Once a real account exists, its card owns
 // "+ add account"; leaving the synthetic grey tile visible makes a successful
@@ -839,11 +1586,25 @@ function visibleSources(sources) {
   const hasGoogleAccount = sources.some(
     (s) => s.connected && typeof s.id === 'string' && s.id.startsWith('mail:')
   );
-  return sources
-    .filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)) && !(hasGoogleAccount && s.id === 'mail'))
+  const shown = sources
+    .filter((s) => !isHiddenSource(s) && !(hasGoogleAccount && s.id === 'mail'))
     .map((s) => s.id.startsWith('mail:')
       ? { ...s, clients: addGoogle && Array.isArray(addGoogle.clients) ? addGoogle.clients : [] }
       : s);
+  // TWO LINKEDIN TILES, WHEN BOTH FLOWS ARE REALLY RUNNING — and then they have
+  // to say which is which. With `bridges` on and `connectors.linkedin` true the
+  // bridge logs in and the export connector polls the import folder, so both
+  // are work the owner can act on and both carry the label "LinkedIn" from
+  // connect/lib/status.mjs. Only rename them when both survive the filter: with
+  // bridges off there is a single tile and "(export)" is noise on it.
+  const bridgeRow = shown.find((s) => s.id === 'linkedin');
+  const exportRow = shown.find((s) => s.id === LINKEDIN_EXPORT_ID);
+  if (!bridgeRow || !exportRow) return shown;
+  return shown.map((s) => {
+    if (s.id === 'linkedin') return { ...s, label: `${s.label} (bridge)` };
+    if (s.id === LINKEDIN_EXPORT_ID) return { ...s, label: `${s.label} (export)` };
+    return s;
+  });
 }
 // Google sign-in is intentionally parked while its authorization path is not
 // ready to ship. Keep its normal tile so people can discover it, but mute it
@@ -920,7 +1681,49 @@ const NOTICES = {
   noroute: 'connect service predates /api/status — status unknown',
   error: 'checking connector status…',
   pending: 'finishing the sign-in…',
+  // NOT AN EMPTY SHELF. A missing or malformed ops/features.json resolves to
+  // everything-off — iMessage, mail, calendar and contacts included — so the
+  // grid below renders nothing, which is pixel-for-pixel what a machine that
+  // has connected nothing looks like. The one state the owner cannot diagnose
+  // is the one where the app is entirely broken, so it gets its own sentence
+  // and the alarm colour.
+  registry: 'feature registry unreadable — reinstall, then restart the app. '
+    + 'nothing can be connected until it is.',
+  // A DIFFERENT SITUATION, AND DIFFERENT WORDS. The registry this page reads is
+  // fine; the daemon that does the ingesting loaded the broken one at startup
+  // and caches it for its whole process life (connectors/daemon.mjs resolves it
+  // at module scope). Repairing the file clears the line above while nothing is
+  // being scheduled, so the shelf would go quiet about a machine that reads
+  // nothing at all. Telling the owner to reinstall here would be wrong — the
+  // bundle is fine. The daemon has to go round again.
+  registryStale: 'the connector service is still running on the old feature registry — '
+    + 'restart the app.',
 };
+
+/// WHICH LINE THE OWNER IS OWED, and whether it is an alarm — one decision, so
+/// that the colour cannot be left behind by a path that forgot to clear it.
+///
+/// It was: the registry path painted --status-bad and only the all-clear path
+/// reset it, so a repaired registry followed by an ordinary "cannot reach
+/// connect" rendered a routine, transient line in the alarm colour. The reset
+/// belongs to the same place the set does.
+///
+/// `null` is "say nothing", which is the ordinary answer.
+function noticeFor(data) {
+  if (!data || data.state !== 'ok') {
+    return { text: (data && NOTICES[data.state]) || NOTICES.error, alarm: false };
+  }
+  // The registry outage is drawn OVER a normal payload rather than instead of
+  // one: the rows are fine, it is the answer about which of them this build
+  // offers that is missing.
+  if (data.registryState && data.registryState !== 'ok') {
+    return { text: NOTICES.registry, alarm: true };
+  }
+  if (data.daemonRegistryState && data.daemonRegistryState !== 'ok') {
+    return { text: NOTICES.registryStale, alarm: true };
+  }
+  return null;
+}
 
 // WKWebView never draws the native title-attribute tooltip, so the tile's
 // name needs one of our own: a single shared element, fixed-position and
@@ -1044,11 +1847,25 @@ function card(src, keep) {
     dot.className = 'dot off';
   }
 
+  // 'optional' in ops/features.json: a real participant source, small today,
+  // offered but never auto-started — the daemon leaves it to the owner's own
+  // Connect press. SAY SO ON THE TILE. Without the word, "not connected" on a
+  // source the app will never start by itself reads as something that failed,
+  // and the shelf's whole promise is that a tile tells you whose move it is.
+  //
+  // The label rides the tooltip rather than a new element: these tiles are
+  // 4-to-a-row squares with the label already in the hover tip, and a second
+  // line of text inside one would cost the grid its shape. dataset.optional is
+  // for the tests and for anyone styling it later.
+  const optional = isOptionalSource(src);
+  if (optional) row.dataset.optional = 'true';
+  const tipLabel = optional ? `${src.label} · optional` : src.label;
+
   row.append(mark, name, dot);
 
-  row.addEventListener('mouseenter', () => showTileTip(row, src.label));
+  row.addEventListener('mouseenter', () => showTileTip(row, tipLabel));
   row.addEventListener('mouseleave', hideTileTip);
-  row.addEventListener('focus', () => showTileTip(row, src.label));
+  row.addEventListener('focus', () => showTileTip(row, tipLabel));
   row.addEventListener('blur', hideTileTip);
 
   // Every tile opens a hint. It has two sizes: the FIRST press of a kind
@@ -1100,6 +1917,72 @@ function card(src, keep) {
   // connectors reach it by different routes now: granola through the plain
   // hint, telegram from inside its bridge branch (its api keys must exist
   // before its bot can be spoken to at all).
+  // The LinkedIn export's own picker, shaped like onboarding's: one press, a
+  // native file panel, and the answer said in the card the press came from.
+  // Every branch native can return is answered — a cancel is silence, a zip and
+  // an unrecognised header both have their own remedy, and "imported" without a
+  // count would leave the owner wondering whether anything was read.
+  const pickLinkedInExport = (button, tip) => {
+    const previous = button.textContent;
+    button.disabled = true;
+    button.textContent = 'opening…';
+    const say = (line) => {
+      let out = tip.querySelector('.setup-result');
+      if (!out) {
+        out = document.createElement('span');
+        out.className = 'setup setup-result';
+        tip.appendChild(out);
+      }
+      out.textContent = line;
+      fitConnections();
+    };
+    hzPost('importLinkedIn')
+      .then((out) => {
+        if (!out || out.state === 'cancelled') return;
+        if (out.state === 'ok') {
+          const n = Number(out.connections || 0);
+          say(n > 0 ? `${n.toLocaleString()} connections imported.` : 'imported.');
+          button.textContent = 'replace';
+          return;
+        }
+        // ~~"that's the zip — unzip it and choose Connections.csv from inside
+        // it."~~ The zip IS what LinkedIn sends, and sending the owner off to
+        // unpack it by hand was the app refusing the only file it had asked
+        // for. Native takes Connections.csv out of the archive now (Bridge
+        // extractConnections); the two answers left are the two real failures,
+        // and only one of them has a remedy in it.
+        if (out.reason === 'zip-connections') {
+          say(`there is no Connections.csv anywhere in ${out.file || 'that zip'} — tick `
+            + '"connections" when you request the export and it will be in the next one.');
+          return;
+        }
+        if (out.reason === 'zip') {
+          say("i couldn't open that zip.");
+          return;
+        }
+        if (out.reason === 'columns') {
+          say(`i don't recognise this file's columns — the first one is "${out.firstColumn}". `
+            + 'i can only read the english export today.');
+          return;
+        }
+        if (out.reason === 'newer') {
+          say(`you already have a newer ${out.file} — i kept the one you have.`);
+          return;
+        }
+        if (out.reason === 'duplicate') {
+          const [first, second] = out.files || [];
+          say(`"${first}" and "${second}" are both ${out.file} — choose one.`);
+          return;
+        }
+        say("i couldn't read that file.");
+      })
+      .catch(() => say("i couldn't read that file."))
+      .finally(() => {
+        button.disabled = false;
+        if (button.textContent === 'opening…') button.textContent = previous;
+      });
+  };
+
   const walkthrough = (hint) => {
     // lives right here — open the site, make a key, paste it — instead of
   // handing the owner to the connect page. hint.url is the door;
@@ -1299,6 +2182,18 @@ function card(src, keep) {
         soon.className = 'setup';
         soon.textContent = 'coming soon. help us build it :)';
         tip.appendChild(soon);
+      } else if (src.id === LINKEDIN_EXPORT_ID) {
+        // THE SAME PICKER ONBOARDING USES. Native opens the file panel, checks
+        // the anchor column before copying, and answers with what it found —
+        // so the outcomes here are onboarding's outcomes, said in one line.
+        const pick = document.createElement('button');
+        pick.className = 'hold-ok';
+        pick.textContent = 'choose the file';
+        pick.addEventListener('click', (e) => {
+          e.stopPropagation();
+          pickLinkedInExport(pick, tip);
+        });
+        tip.appendChild(pick);
       } else if (CONNECT_PAGE.has(kindOf(src.id))) {
         const open = document.createElement('button');
         open.className = 'hold-ok';
@@ -2382,15 +3277,37 @@ const finishSettingsPointer = () => {
 document.addEventListener('pointerup', finishSettingsPointer, true);
 document.addEventListener('pointercancel', finishSettingsPointer, true);
 
+/// THE ONLY PLACE THE NOTICE IS WRITTEN. Colour through element.style because
+/// these pages ship a CSP with no 'unsafe-inline'
+/// (widget/test/csp-inline-style.test.mjs), and cleared on every path rather
+/// than on the happy one: the element keeps whatever the last notice painted.
+function showNotice(chosen) {
+  notice.textContent = chosen ? chosen.text : '';
+  notice.style.color = chosen && chosen.alarm ? 'var(--status-bad)' : '';
+  notice.hidden = !chosen;
+}
+
 async function refresh() {
   try {
+    // BEFORE THE FIRST TILE IS BUILT. Cached after the first call (hzFeatures
+    // in bridge.js), so every later refresh pays nothing — but the shelf must
+    // never render once from an unknown registry and then re-render smaller,
+    // which is a visible flash of connectors this build does not offer.
+    featureSet = await hzFeatures();
     const data = await hzPost('status');
-    if (data.state !== 'ok') {
-      notice.textContent = NOTICES[data.state] || NOTICES.error;
-      notice.hidden = false;
-      return;
+    showNotice(noticeFor(data));
+    if (data.state !== 'ok') return;
+    // THE SETTINGS ROW RIDES THIS FETCH. `linkedinExportReady` is a field on
+    // connect's linkedin-export row, and this is the only call in the panel
+    // that asks for it — so the settings row is told rather than asking again.
+    // Read off `data.sources` and not the visible set: the settings row exists
+    // whether or not the shelf is showing that tile, and the registry can hide
+    // the tile without making the export stop being something the owner is
+    // waiting on. A missing row is null, which is the row's "nothing to say".
+    if (noteLinkedInReady) {
+      const row = (data.sources ?? []).find((s) => s.id === LINKEDIN_EXPORT_ID);
+      noteLinkedInReady(row?.linkedinExportReady ?? null);
     }
-    notice.hidden = true;
     // An OPEN strip survives the refresh. The cookie-paste and token/phone
     // login flows require leaving the popup (to copy cookies, a token, or a
     // code), and coming back fires the focus listener below; renderBridge
@@ -2414,8 +3331,7 @@ async function refresh() {
     grid.replaceChildren(...orderSources(shown)
       .map((s) => card(s, kept && kept.dataset.id === s.id ? kept : null)));
   } catch {
-    notice.textContent = NOTICES.error;
-    notice.hidden = false;
+    showNotice({ text: NOTICES.error, alarm: false });
   }
 }
 

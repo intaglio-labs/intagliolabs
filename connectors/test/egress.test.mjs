@@ -172,6 +172,30 @@ function scannedFiles() {
   return ROOTS.flatMap((root) => walk(join(REPO, root)));
 }
 
+// The ledger's own path, and the reason it needs naming: ROOTS includes 'ops',
+// READ_EXT includes .json and SKIP_FILE holds only package-lock.json -- so
+// ops/EGRESS.json is INSIDE the corpus the stale-entry check searches for
+// evidence that a declared host is still reachable. Every host it declares was
+// therefore trivially "named in source": by the declaration itself. The check
+// could not report an orphan under any circumstances, and it ended in
+// assert.ok(true), so nothing said so. The host-DECLARATION tests still read
+// this file deliberately, through declaredHosts(); only the source corpus
+// excludes it.
+const LEDGER_PATH = join(REPO, 'ops', 'EGRESS.json');
+
+// Kinds whose host NO source in this repo is supposed to name, so their
+// absence from the corpus is the expected state rather than a stale claim.
+// Turning the orphan check on for real surfaced exactly these three and
+// nothing else, which is a fair check on the reasoning:
+//   frontier-client / public-lookup -- the socket is opened by a spawned
+//     provider binary. This repo holds no URL for it by design, which is also
+//     why the whole feature is invisible to the host-literal tripwire and why
+//     the producer-coverage test below exists.
+//   login-webview -- the host lives in a Swift array of BARE host strings (a
+//     fence, not a URL), which the https?:// matcher cannot see. The
+//     2026-08-23 note in the ledger's own _readme records this.
+const KINDS_NOT_IN_SOURCE = new Set(['frontier-client', 'public-lookup', 'login-webview']);
+
 function declaredHosts() {
   const ledger = JSON.parse(readFileSync(join(REPO, 'ops', 'EGRESS.json'), 'utf8'));
   const hosts = new Set();
@@ -289,14 +313,20 @@ test('the ledger has no stale entries', () => {
   // The other direction: a declared host nobody reaches any more is a claim
   // that has outlived its code, and this file exists because claims outliving
   // their code is the failure mode. A WARN, not a FAIL -- deleting a connector
-  // should not turn the suite red -- so it asserts nothing and reports.
-  const { hosts } = declaredHosts();
+  // should not turn the suite red -- so it asserts nothing about the orphans
+  // themselves. What it DOES assert is that the check can still see one.
+  const { hosts, ledger } = declaredHosts();
   const found = foundHosts();
   // Substring search, not the URL matcher: some hosts are configured as bare
   // strings rather than URLs (mail.mjs' DEFAULT_HOST = 'imap.gmail.com'), and
   // flagging those as orphaned would be exactly the kind of confidently-wrong
   // report this file exists to prevent.
-  const corpus = scannedFiles()
+  //
+  // EXCLUDING THE LEDGER ITSELF, which is the whole correction: ops/ is a
+  // scan root and .json is a read extension, so this corpus used to contain
+  // the declarations it was checking against and every host matched itself.
+  const corpusFiles = scannedFiles().filter((f) => f !== LEDGER_PATH);
+  const corpus = corpusFiles
     .map((f) => {
       try {
         return readFileSync(f, 'utf8');
@@ -305,13 +335,117 @@ test('the ledger has no stale entries', () => {
       }
     })
     .join('\n');
-  const orphans = [...hosts].filter(
+
+  // THREE ASSERTIONS THAT THE CHECK IS PLUGGED IN, because excluding the
+  // ledger is otherwise a change nothing verifies -- and an inert check that
+  // looks busy is the exact state this test spent its whole life in.
+  //
+  // (i) the ledger's own path is out of the corpus, said directly.
+  assert.ok(
+    !corpusFiles.includes(LEDGER_PATH),
+    'ops/EGRESS.json is inside the corpus its own declarations are checked against'
+  );
+  // (ii) and it did not arrive under some other path (a copy, a rename, a
+  // second ledger). _the_claim is a key only this file has.
+  assert.ok(
+    !corpus.includes('"_the_claim"'),
+    'something in the scanned corpus contains the ledger\'s own text, so every ' +
+      'declared host matches itself and the orphan check below is inert again'
+  );
+  // (iii) at least one declared host is genuinely unnamed by the corpus.
+  // chatgpt.com is one today (its socket is opened by a spawned binary, so no
+  // file here holds the URL). If this fails, the corpus is self-matching --
+  // which is what (i) and (ii) exist to explain -- or the read collapsed.
+  const canary = 'egress-canary.invalid';
+  const canaryOrphans = [...new Set([...hosts, canary])].filter(
     (h) => !found.has(h) && !/\s/u.test(h) && !corpus.includes(h)
   );
+  assert.ok(canaryOrphans.includes(canary), 'the orphan filter cannot see a host nothing names at all');
+  assert.ok(
+    canaryOrphans.length > 1,
+    'EVERY declared host is named somewhere in the corpus. Either the ledger is ' +
+      'being searched against itself, or the tree really did grow a literal for each ' +
+      'spawned-binary host -- check which before lowering this.'
+  );
+
+  // A host whose ONLY rows are kinds this repo never writes a URL for is not
+  // an orphan; it is a correctly-declared path whose socket something else
+  // opens. Reporting those every run would train a reader to ignore the line,
+  // which is how a real orphan gets missed.
+  const kindsByHost = new Map();
+  for (const entry of ledger.paths) {
+    if (!kindsByHost.has(entry.host)) kindsByHost.set(entry.host, new Set());
+    kindsByHost.get(entry.host).add(entry.kind);
+  }
+  const opensItsOwnSocket = (host) =>
+    [...(kindsByHost.get(host) ?? [])].some((kind) => !KINDS_NOT_IN_SOURCE.has(kind));
+
+  const orphans = canaryOrphans.filter((h) => h !== canary && opensItsOwnSocket(h));
   if (orphans.length > 0) {
     console.warn(`ops/EGRESS.json declares hosts no source names: ${orphans.join(', ')}`);
   }
-  assert.ok(true);
+});
+
+// EVERY PRODUCER THAT SPAWNS THE INSTALLED CLI IS NAMED IN THE LEDGER.
+//
+// The host-literal tripwire above is structurally blind to this whole
+// feature: api.anthropic.com appears as a URL literal in no product file,
+// because the socket is opened by the spawned binary rather than by code in
+// this repo. So the only thing carrying it is the ledger's prose -- and prose
+// drifted exactly as it always does. `grep -c sweep ops/EGRESS.json` was 0
+// while `node ui/scripts/sweep-once.mjs --power full --engine claude-cli`
+// shipped private message text through a row whose decision named only the
+// person-page builder.
+//
+// This is a coverage test, not a host test: for each module that reaches
+// engines.mjs' spawn, the ledger must name that module's path in a
+// `component` or `evidence` field. It is deliberately keyed on the MODULE
+// rather than on a call site, so moving a producer's code inside its own file
+// does not turn the suite red, while adding a new producer does.
+const CLI_PRODUCERS = Object.freeze([
+  'ui/server/relationship/pages.mjs',
+  'ui/server/relationship/sweep.mjs',
+  'ui/server/relationship/draft.mjs',
+  'ui/server/relationship/lookup.mjs',
+]);
+
+test('every producer that spawns the installed claude client is named in the ledger', () => {
+  const { ledger } = declaredHosts();
+  const anthropic = ledger.paths.filter((p) => p.host === 'api.anthropic.com');
+  assert.ok(anthropic.length > 0, 'api.anthropic.com must be declared at all');
+
+  // Only the fields that are meant to say WHERE the invocation lives. A
+  // module named nowhere but in `purpose` prose is not a component record.
+  const named = anthropic
+    .flatMap((p) => [String(p.component ?? ''), String(p.evidence ?? ''), String(p.decision ?? '')])
+    .join('\n');
+
+  const missing = CLI_PRODUCERS.filter((mod) => !named.includes(mod));
+  assert.deepEqual(
+    missing,
+    [],
+    `these modules drive the installed claude client and ops/EGRESS.json's ` +
+      `api.anthropic.com rows do not name them:\n  ${missing.join('\n  ')}\n` +
+      `Add each to that row's \`component\`/\`evidence\` with what it actually sends. ` +
+      `The literal-host tripwire cannot catch this: no product file contains the URL, ` +
+      `so the ledger's own text is the only record.`
+  );
+});
+
+test('every module the ledger names as a CLI producer really exists and really spawns it', () => {
+  // The mirror, so the list above cannot rot into a set of paths that moved:
+  // each producer must be a real file, and must reach engines.mjs.
+  for (const mod of CLI_PRODUCERS) {
+    const full = join(REPO, mod);
+    assert.ok(existsSync(full), `${mod} is in CLI_PRODUCERS but does not exist`);
+    const text = readFileSync(full, 'utf8');
+    assert.match(
+      text,
+      /engine\.complete|engines\.mjs|createLookupEngine/u,
+      `${mod} is listed as a producer that reaches the installed CLI but names no engine seam. ` +
+        `If it stopped being one, drop it from CLI_PRODUCERS and say so in the ledger.`
+    );
+  }
 });
 
 test('every declared path carries a decision and a kind', () => {

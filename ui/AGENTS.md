@@ -63,12 +63,28 @@ undo: **corpus text never rides a cloud request automatically.** Not as a settin
 not as an advanced flag. A toggle is a thing that gets removed when convenience
 wins; not building one is stronger than defaulting one off.
 
-## The cloud lane is not covered by this exemption
+## The reviewed frontier handoff — amended 2026-08-31
 
-The exemption is scoped to "a locally served database of ingested context." It does
-**not** contemplate outbound cloud egress with a stored provider credential and a
-server-side tool loop. `POST /lane/cloud/...` currently answers 501 and the client
-throws rather than falling back, so nothing has been widened yet.
+The exemption is scoped to "a locally served database of ingested context."
+`POST /lane/cloud/...` still answers 501: there is no stored provider credential,
+server-side cloud lane, fallback, or tool loop.
+
+The owner approved a narrower, interactive boundary on 2026-08-31. After Hermes
+returns its bounded local answer, the widget may assemble only the current
+question, that answer, and source labels. It must show the complete assembled
+text in an editable review box. Nothing leaves until the owner presses a button
+named for the provider. Native may then hand exactly that edited text — prefixed
+by one fixed, app-authored instruction telling the model to treat it as untrusted
+reference and use no tools — on stdin to the installed official Codex or Claude
+client, whose existing subscription login is its own responsibility. The app supplies no files, database handle, hidden
+snippets, provider key, tools, approvals or persistent conversation. The sent
+text remains visible as a receipt after approval.
+
+This is not permission to auto-send derived context. The local answer can reveal
+private facts even when it contains no verbatim row, so the review step is the
+privacy boundary, not cosmetic confirmation. Any new field in the wire payload,
+background send, direct provider HTTP client, or tool/file access requires a new
+recorded decision before it ships.
 
 **Get this exemption text updated before the first commit that opens a non-loopback
 socket** — not after. Disagreements get flagged rather than routed around (a
@@ -93,14 +109,12 @@ times, and the widget ended up shipping a string asserting the exact opposite of
 this document. A decision recorded in one prose file cannot propagate to eight
 others, so the enumeration had to stop being prose.
 
-What does NOT move is the claim itself, which is still stated here and stated
-once:
-
-**Intaglio Labs sends no corpus data to a cloud model. All reasoning and narration happen
-locally**, on loopback llama-server instances. That claim is much narrower than
-"nothing leaves the Mac" — which is false, and must not be written anywhere.
-Data leaves on every `api`, `bridge` and `login-webview` path in the ledger.
-What does not leave is corpus text on a model call.
+What does NOT move is the boundary itself, stated here once: answers begin
+locally, and **no raw corpus row, quote, hidden retrieval snippet or automatic
+context package is sent to a cloud model.** An optional frontier handoff sends
+only the exact text the owner reviews, edits and explicitly approves. That text
+can contain private facts derived by the local answer. "Nothing leaves the Mac"
+and "all reasoning is local" are therefore false and must not be written.
 
 The five paths below were the 2026-08-19 set. They are kept **for their
 reasoning, not as an inventory** — the caveats on Granola's upstream summaries
@@ -145,11 +159,34 @@ written down anywhere else. For what is reachable *today*, read the ledger.
    step on every deployed Mac Mini. Google also closed the cheaper door — basic-auth
    CalDAV ended 2025-03-14, so a Gmail app password cannot reach Calendar and OAuth
    is the only remaining mechanism.
+6. **Public lookup's model-side web search** (`api.anthropic.com`, kind
+   `public-lookup` in `ops/EGRESS.json`, added 2026-09-07): a capped
+   `claude -p --allowedTools WebSearch` call, one person at a time, built only
+   from allowlisted public identifiers already in the corpus — display name,
+   firm, a public handle, a public LinkedIn URL — by `buildLookupQuery`, whose
+   own input gate refuses any object carrying any other field. The search
+   executes on Anthropic's side; this repo opens no other socket, stores no
+   fetched page, and every query is logged verbatim — field names, the
+   assembled string, and its hash — in `lookup_log`, on the person's own page.
+
+**Lint (step 5½, `relationship/lint.mjs`) is not a seventh entry here, on
+purpose.** It runs on the Distiller's own schedule immediately after public
+lookup (`runSweep { runLookup { runLint { schedule } } }`, both call sites in
+`widget/src/Distiller.swift`), but it makes **no model call and opens no
+socket at all** — every one of its five checks is SQL against the local
+context store, or SQL plus a pure JS recomputation, so there is nothing for
+it to declare in `ops/EGRESS.json`. If a future change to `lint.mjs` ever
+needs a model or a network call, that is no longer "lint" as this file
+defines it and belongs in its own reviewed egress entry, not folded quietly
+into this one. It also **never auto-fixes**: the only automatic transition a
+finding makes is `'gone'` (the condition itself stopped being true); every
+other resolution is the owner's own click in the review desk's Lint tab.
 
 Recorded rejections: **Sendblue** (would relay message content through a third
 party's Mac farm from a number that isn't the owner's — fails the claim above three
-ways). Cloud LLM calls carrying corpus data remain forbidden in all forms; the
-cloud lane still answers 501.
+ways). Automatic cloud LLM calls carrying rows or hidden context remain
+forbidden; the server cloud lane still answers 501. The only model egress is the
+reviewed widget handoff above.
 
 The connectors track adds a top-level `connectors/` package (its own deps, its own
 daemon). Hermes remains the sole writer *and sole deleter* of the context DB;

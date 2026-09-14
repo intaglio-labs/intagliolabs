@@ -31,6 +31,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runChecks } from './lib/checks.mjs';
+import { defaultDaemonLockPath, processIsAlive } from './lib/daemonLock.mjs';
 import {
   DEFAULT_HERMES_BASE_URL,
   adminCompletePeopleYear,
@@ -47,6 +48,18 @@ import { openStateDb, runCounts } from './lib/state.mjs';
 import { createLogger } from './lib/log.mjs';
 import { safeErrorFingerprint } from './lib/safeError.mjs';
 import { createYearlyBackfill } from './lib/yearlyBackfill.mjs';
+// Moved to a leaf module so connect can read the roster without loading this
+// file's module-scope registry resolution; re-exported because run.mjs, the
+// config validator and three tests already import it from here.
+import { CONNECTOR_NAMES } from './lib/connectorNames.mjs';
+
+export { CONNECTOR_NAMES };
+import {
+  connectorsDisabledBy,
+  enabledFeatureNames,
+  optionalConnectors,
+  readFeatureRegistry,
+} from './lib/features.mjs';
 import {
   retentionPass,
   maintainPass,
@@ -68,40 +81,196 @@ function connectedSocialPlatforms() {
     .map(([id, platform]) => ({ id, label: platform.label }));
 }
 
-// The closed set of connectors this daemon will ever schedule. A sources/
-// module whose name is not here is a typo or an unreviewed data source, and
-// both must fail loudly at startup rather than quietly begin polling.
-export const CONNECTOR_NAMES = Object.freeze([
-  'imessage',
-  'calendar',
-  'mail',
-  'granola',
-  'oura',
-  'photos',
-  'notes',
-  'contacts',
-  'notion',
-  'files',
-  'whatsapp',
-  // The social bridges' DMs, read out of the local Matrix bus. One connector
-  // for seven platforms: the row's `source` comes from which bridge's ghost
-  // sent it (lib/matrixRows.mjs), so messenger and slack land as themselves.
-  'matrix',
-]);
 
 // Settings deliberately keeps these integrations out of the current product
 // surface. A hidden connector must also be inert: scheduling it anyway leaks
 // implementation-in-progress into Activity and can touch data the person
-// cannot enable or control from the app. Keep this in lockstep with
-// widget/ui/connections.js's HIDDEN_CONNECTORS until each integration ships.
-export const DEFAULT_DISABLED_CONNECTORS = Object.freeze([
-  'oura', 'photos', 'files', 'notion', 'notes',
-]);
+// cannot enable or control from the app.
+//
+// ~~Keep this in lockstep with widget/ui/connections.js's HIDDEN_CONNECTORS
+// until each integration ships.~~ That was two hand-maintained lists, in two
+// languages, that had to agree, with nothing checking that they did. Both are
+// DERIVED now, from ops/features.json — see ops/FEATURES.md. The lockstep is a
+// fact rather than an instruction.
+//
+// `matrix` joins the list whenever `bridges` is off, and it is the entry the
+// registry cannot express directly: Matrix is not a source somebody connects,
+// it is the transport the seven bridges share, so it follows the bridges
+// feature rather than a connector key of its own. Omitting it would leave the
+// daemon polling a Synapse that provisioning no longer installs.
+const FEATURE_REGISTRY = readFeatureRegistry({
+  onProblem: (reason) => process.stderr.write(`connectors: ${reason}\n`),
+});
+export const FEATURES = FEATURE_REGISTRY.features;
+// 'ok' | 'missing' | 'invalid'. The last two mean every connector is off,
+// INCLUDING the card's own, which is a total outage that used to be reported
+// only by the stderr line above — outside the structured log the app reads, and
+// indistinguishable downstream from a deliberately quiet install. start() says
+// it again as an event; connect/lib/status.mjs carries it to the shelf.
+export const FEATURES_REGISTRY_STATE = FEATURE_REGISTRY.registryState;
+export const DEFAULT_DISABLED_CONNECTORS = Object.freeze(
+  connectorsDisabledBy(FEATURES, CONNECTOR_NAMES)
+);
+// Offered on the connections page, NOT auto-started here. These stay
+// schedulable on purpose: 'optional' means the owner's own connect action
+// (WhatsApp's .disabled marker, Granola's credential) is the gate, and a source
+// that is never scheduled can never notice that gate opening. Exported so the
+// distinction is visible to a reader and to the tests, not because the
+// scheduler branches on it — the existing per-source gates already do that.
+export const OPTIONAL_CONNECTORS = Object.freeze(
+  optionalConnectors(FEATURES, CONNECTOR_NAMES)
+);
+
+// HOW SOON A SOURCE THAT COULD NOT RUN IS ASKED AGAIN, and why it is not the
+// polling interval.
+//
+// A source whose needs() reports a missing prerequisite returns early and is
+// rescheduled at its FULL interval -- fifteen minutes by default. That is the
+// right cadence for a source that is working and the wrong one for the only
+// moment this state is ever interesting: the owner has just signed in to Google
+// or dropped their LinkedIn export in, and the thing they did is a quarter of an
+// hour away from being noticed. On the second clean-machine onboarding run
+// (2026-09-12) both sources answered "not ready" at 20:51, the owner completed
+// screens 3 and 4, and ten minutes later neither had been asked again. The first
+// clean run only picked them up because reinstalling the app restarted the
+// daemon.
+//
+// So the first re-probe is a minute away, and each further one doubles until it
+// reaches the interval the source would have used anyway. needs() is an
+// existsSync or a token read, so the early probes are nearly free; the doubling
+// means a machine where a connector is simply never going to be connected
+// settles back onto its ordinary interval after a handful of ticks instead of
+// polling a missing file forever.
+//
+// It is the CEILING that matters as much as the floor: below MIN_INTERVAL_S a
+// poller is a busy-loop, and every configured interval is already >= 60 s, so
+// Math.min below can never take this under a minute.
+export const NOT_READY_REPROBE_MS = 60_000;
+
+// THE FIRST-LOAD SPRINT, and the arithmetic that makes it necessary.
+//
+// The reconnect card needs somebody who has gone QUIET: RECONNECT_GATES asks for
+// a person whose last activity is at least 180 days old. On a fresh Mac the
+// forward window reaches about 157 days back and the yearly walk is still inside
+// the current year, so NOBODY in the loaded corpus can qualify until last year's
+// history lands -- and last year's history is paced at HISTORY_BUDGET_MS (20 s)
+// per source per tick, with ticks fifteen minutes apart. Live on 2026-09-12 run
+// two: thirty minutes after a fresh install the pool was empty in every mode,
+// and iMessage's 2026 pass had gained 5.8k rows and then 9.9k rows in two ticks
+// a quarter of an hour apart. The first card was hours away, and nothing on
+// screen said so.
+//
+// So a machine that has not yet finished LAST year walks it hard for half an
+// hour: a longer history budget, and a re-arm measured in seconds rather than
+// the polling interval. Then it stops, permanently, whichever way it ended --
+// this is a first-load phase, not a mode.
+//
+// LOCAL STORES ONLY. mail, granola, matrix and oura are network sources against
+// rate-limited APIs, and the mail connector's own pacer is built around a
+// per-minute budget it shares with nothing; sprinting one of those trades a
+// first card for a 429. The sprint reads sqlite files on the owner's own disk.
+export const SPRINT_MAX_MS = 30 * 60_000;
+export const SPRINT_HISTORY_BUDGET_MS = 60_000;
+// Two re-arms, because the owner already told us which machine they want. A
+// fresh install defaults to less-power (PowerBudget's own default), so the
+// GENTLE one is the default here too.
+//
+// TWENTY SECONDS, NOT SIXTY. ~~A minute, on the reading that less-power means a
+// cool lap.~~ Against a 60 s history budget that is a 25% duty cycle, for at
+// most half an hour, on disk-bound reads of local sqlite files -- and the thing
+// the owner is waiting for is their FIRST CARD. Twenty gives a 75% duty cycle
+// under the same ceiling and the same half hour, and the first evening this is
+// protecting is the one where nothing has appeared yet. PowerBudget's own
+// argument (a hot laptop on somebody's first evening is the impression that
+// sticks) is about the steady state, and this phase ends.
+export const SPRINT_REARM_MS = 10_000;
+export const SPRINT_REARM_GENTLE_MS = 20_000;
+// AND WHAT A FAILURE INSIDE THE WINDOW COSTS. Three attempts backing off, then
+// the ordinary interval: a source that threw once (a full disk, a store locked
+// for a second) is worth a quick retry inside a half-hour window, and one that
+// is genuinely broken is not worth the sprint cadence against whatever broke.
+export const SPRINT_RETRY_LADDER_MS = Object.freeze([20_000, 60_000, 180_000]);
+// How the app tells its child which the owner picked. The same channel that
+// already carries the owner pid at spawn (widget/src/Connectors.swift), not a
+// config key: a second writer for a fact that already has one is how two
+// definitions of the same setting drift apart. Absent means gentle, which is
+// what a standalone `npm run daemon` and a fresh install both are.
+export const PERFORMANCE_ENV = 'INTAGLIO_PERFORMANCE';
+export function defaultSprintRearmMs(env = process.env) {
+  return env[PERFORMANCE_ENV] === 'full' ? SPRINT_REARM_MS : SPRINT_REARM_GENTLE_MS;
+}
+// WHICH CONNECTORS MAY SPRINT. Named rather than derived from `walksHistory`,
+// because the property that matters is not "walks history" but "reads a local
+// file nobody is rate-limiting".
+export const SPRINT_CONNECTORS = Object.freeze(['imessage', 'calendar', 'whatsapp']);
+// WHEN THE SPRINT BEGAN, durably, so a restart inside the window resumes with
+// what is left of it rather than starting a fresh half hour -- and so a machine
+// that has already spent its sprint never takes another.
+export const SPRINT_STARTED_KEY = 'sprint:started-ts';
+// AND HOW LONG BEFORE A MACHINE THAT STILL HAS NOT REACHED LAST YEAR MAY HAVE
+// ANOTHER.
+//
+// ~~One sprint per install, ever.~~ The clock used to start at daemon boot, and
+// the daemon boots when the owner leaves screen 2 -- before the Google sign-in
+// on screen 3 and before the LinkedIn export on screen 4, which is an email the
+// owner may be waiting on for twenty minutes. Full Disk Access is a restart
+// prompt in the middle of that. So the half hour was spent on permission
+// screens, `sprinting()` went false forever, and nothing had been walked: the
+// one-shot rule made the failure permanent, and only the reinstall that this
+// file's own header calls a non-feature could clear it.
+//
+// Two changes, and both are needed. The clock starts when a sprint source is
+// actually READABLE rather than merely scheduled (see `ready`), and a window
+// that is fully spent may be replaced once the machine has had six hours to
+// think about it, for as long as last year is still open. Bounded on both
+// sides: the phase still lasts thirty minutes, and it still stops for good the
+// moment last year lands.
+export const SPRINT_REARM_AFTER_MS = 6 * 60 * 60_000;
+// AND A WINDOW THAT LANDED NOTHING DOES NOT GET REPEATED FOUR TIMES A DAY.
+//
+// `exhausted` is an honest end for a source that can be marked exhausted, and
+// calendar cannot: record() refuses it by name, because calendar's stopping
+// point is the oldest year any other source reaches. So on a Mac with Google
+// Calendar the per-source test collapses to "is the whole walk COMPLETE", which
+// on an install with years of mail is never -- and the six-hour re-arm then runs
+// four thirty-minute windows a day, for ever, each one tripling the history
+// budget and re-arming the local stores at ten seconds on the owner's daily
+// driver.
+//
+// The outcome is the bound the receipts cannot give. A whole window that landed
+// no rows across the entire roster has nothing to show for itself, and repeating
+// it in six hours is a guess against the evidence; a day is. One that DID land
+// rows is worth another, which is the case the re-arm was written for.
+export const SPRINT_BARREN_HOLD_MS = 24 * 60 * 60_000;
+// Rows the current window has landed, so the judgement above has something to
+// read. Reset when a window begins.
+export const SPRINT_GAINED_KEY = 'sprint:gained';
 
 export function sourceRetryDelay(result, intervalMs) {
-  return Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000
-    ? Math.min(60_000, Math.floor(result.nextDelayMs))
-    : intervalMs;
+  if (Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000) {
+    return Math.min(60_000, Math.floor(result.nextDelayMs));
+  }
+  // Deliberately a SECOND field rather than nextDelayMs. That one is a source's
+  // own request for a short retry and is capped at 60 s; this one is the
+  // scheduler's own back-off and has to be able to grow PAST a minute, all the
+  // way back up to the interval.
+  // No 1-second floor here, unlike the branch above. That one guards against a
+  // SOURCE handing back a silly number; this one is the scheduler's own
+  // arithmetic over its own constant, and a floor would quietly swap an
+  // injected test cadence for a fifteen-minute one.
+  if (Number.isFinite(result?.notReadyDelayMs) && result.notReadyDelayMs > 0) {
+    return Math.min(intervalMs, Math.floor(result.notReadyDelayMs));
+  }
+  // THE SPRINT RE-ARM, which is the only delay here allowed to be SHORTER than
+  // the interval without a source asking for it. It comes back through this
+  // function rather than being armed directly so the one-timer-per-source rule
+  // in scheduleSource still holds: a sprint tick replaces the pending timer
+  // exactly as an ordinary one does, and there is never a second pass in flight
+  // over the same cursor.
+  if (Number.isFinite(result?.sprintDelayMs) && result.sprintDelayMs > 0) {
+    return Math.min(intervalMs, Math.floor(result.sprintDelayMs));
+  }
+  return intervalMs;
 }
 
 const PORTAL_JOIN_SAMPLE_KEY = 'matrix:portal-join-rate-sample';
@@ -175,6 +344,11 @@ export const CONNECTOR_HERMES_SOURCE = Object.freeze({
   notion: 'notion',
   files: 'files',
   whatsapp: 'whatsapp',
+  // The file-based export. Same hermes source as the bridge's LinkedIn rows
+  // below (deliberately — every people-graph join that reads `linkedin`
+  // keeps working regardless of which connector wrote a row); the two never
+  // collide because their entity_id namespaces are disjoint.
+  linkedin: 'linkedin',
   // Unlike contacts, Matrix DOES write corpus — one source for every bridge.
   // Keep the full set here because run.mjs --purge uses this mapping too: a
   // null sentinel means "no corpus" and previously made a Matrix purge report
@@ -224,12 +398,39 @@ export function defaultCacheDir(home = homedir()) {
   return join(home, '.hazlie', 'cache');
 }
 
-export function defaultDaemonLockPath(home = homedir()) {
-  return join(home, '.hazlie', 'connectors', 'daemon.lock');
-}
+// Re-exported rather than defined: the path, the JSON shape and the liveness
+// question all live in lib/daemonLock.mjs now, because connect/lib/status.mjs
+// asks the same question about the same file and used to carry its own copy.
+export { defaultDaemonLockPath };
 
 export function defaultActivityPath(home = homedir()) {
   return join(home, '.hazlie', 'connectors', 'activity.json');
+}
+
+// I CAN TAKE A SIGNAL NOW, said by the only process that knows.
+//
+// SIGUSR2's default action is terminate, and this process installs its handler
+// after node has booted and evaluated seventeen static imports. The app used to
+// guess three seconds; a first launch with a cold page cache and a signature
+// check of the bundled node is exactly the case the nudge exists for, and a
+// nudge landing in that window kills the reader with no log line, because the
+// logger does not exist yet. So the handler writes its own pid here once it is
+// armed, and widget/src/Connectors.swift signals nobody else.
+//
+// The pid is the whole content: a marker left by a previous daemon names a
+// process that is gone, and the app compares it against the child it spawned.
+export function defaultNudgeReadyPath(home = homedir()) {
+  return join(home, '.hazlie', 'connectors', 'nudge-ready');
+}
+
+function announceNudgeReady(path = defaultNudgeReadyPath()) {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, `${process.pid}\n`, { mode: 0o600 });
+  } catch {
+    // The nudge is an optimisation over the back-off, not a requirement. A
+    // marker that cannot be written costs the owner a minute, never a reader.
+  }
 }
 
 export function defaultSocialReimportPendingPath(home = homedir()) {
@@ -242,16 +443,6 @@ export function defaultSocialReimportCompletedPath(home = homedir()) {
 
 export function disableMarkerPath(name, home = homedir()) {
   return join(home, '.hazlie', 'connectors', `${name}.disabled`);
-}
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid < 2) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
 }
 
 // One daemon owns the shared cursor database. A forced app stop used to leave
@@ -385,10 +576,11 @@ const TOP_KEYS = Object.freeze([
   'notion',
   'files',
   'matrix',
-  // Accepted and ignored for upgrade compatibility. LinkedIn used to be a
-  // standalone export connector with an empty config section; removing the
-  // key from this closed schema made every existing config carrying
-  // `"linkedin": {}` fail before ANY connector could start.
+  // The export connector's config section. Still empty (LINKEDIN_KEYS === []
+  // below) — it takes no options — but the key has to stay in this closed
+  // schema for the same reason every other connector's does: an existing
+  // config carrying `"linkedin": {}` from before the connector was restored
+  // must not fail before ANY connector could start.
   'linkedin',
   'retention',
   // The Relationship Memory cap. hermes gates the whole reconnect card on
@@ -405,6 +597,8 @@ const MAIL_KEYS = Object.freeze([
   'folders',
   'backfillDays',
   'maxBodyBytes',
+  'getsPerMinute',
+  'historyPagesPerPass',
   'accounts',
 ]);
 // Per-account overrides. No nested `accounts`: one level of mailboxes, not a tree.
@@ -415,6 +609,8 @@ const MAIL_ACCOUNT_KEYS = Object.freeze([
   'folders',
   'backfillDays',
   'maxBodyBytes',
+  'getsPerMinute',
+  'historyPagesPerPass',
 ]);
 const IMESSAGE_KEYS = Object.freeze(['backfillDays']);
 // `backend` selects where occurrences come from: the local macOS store
@@ -426,8 +622,10 @@ const GRANOLA_KEYS = Object.freeze(['includeTranscripts']);
 const OURA_KEYS = Object.freeze(['backfillDays']);
 const PHOTOS_KEYS = Object.freeze(['backfillDays']);
 const NOTION_KEYS = Object.freeze([]);
-// Retired but still validated for upgrade compatibility. The export connector
-// took no config, so only the empty object old installs already carry is valid.
+// The export connector is back (it supplies connection metadata and the
+// message archive the Matrix bridge cannot — see CONNECTOR_NAMES above) and
+// still takes no config of its own: only the empty object is valid, same as
+// before it was retired.
 const LINKEDIN_KEYS = Object.freeze([]);
 // `roots` overrides the discovered cloud folders; `materializeDataless` is the
 // opt-in that lets the walk OPEN online-only files. It defaults false and the
@@ -441,6 +639,56 @@ const FILES_KEYS = Object.freeze(['roots', 'materializeDataless']);
 const MIN_INTERVAL_S = 60;
 export const DEFAULT_INTERVAL_S = 900;
 const FIRST_RUN_STAGGER_MS = 10_000;
+
+// AND THE FORWARD PASS GETS ONE TOO, for the reason the history pass got one.
+//
+// "The forward pass is small" held only while every source had a cursor. Delete
+// one mid-life -- a purge, a hand-run DELETE against state.db, a store that
+// reports a new stream -- and the source falls back to its cold-start floor:
+// for mail that is January 1st of the current year, so the window reopens to
+// months of mail and the pass runs to its own per-account cap (2,000 messages
+// at ~90 API calls a minute, ~22 minutes PER MAILBOX) instead of the couple of
+// seconds an ordinary tick costs.
+//
+// Nothing above noticed. runSource() deletes the source from `nextRuns` for the
+// whole call, so an hour-long pass is an hour in which the source is absent
+// from the activity queue and reads as unscheduled; the history slice below is
+// only reached AFTER the forward pass returns, so its year never starts; and an
+// app restart killed the pass before it had logged anything at all. That was
+// the 2026-09-12 stall: mail "missing from the queue" while it was in fact
+// running the whole time.
+//
+// So the forward pass is bounded like the backwards one. A source that pages is
+// expected to check this between pages and return; one that ignores it behaves
+// exactly as before. Generous next to a healthy tick (seconds) and still well
+// inside the polling interval, so a cold window drains over several passes
+// while the source stays visible, stays classified, and still gets its history
+// slice.
+export const FORWARD_BUDGET_MS = 120_000;
+// HOW MANY CONSECUTIVE needs() THROWS BEFORE A RUNNING SOURCE LEAVES THE
+// YEARLY BARRIER. Three, because the throws this absorbs are momentary -- a
+// token file being rewritten, a store locked by a backup -- while what it
+// prevents is a source dropping out of the activity queue and back in on every
+// flap. Three polling intervals of a stalled backfill is the price.
+//
+// IT IS NO LONGER THE ONLY THING STANDING BETWEEN A FLAP AND A REWOUND WALK
+// (round-4 finding 3). This tolerance used to carry that on its own, and it
+// could not: above three ticks the recovery still read as a re-activation and
+// dragged a multi-year backfill to the current year for every source.
+// yearlyBackfill.classify now rewinds only for a connector the walk has
+// actually left years behind, so a recovery after ANY number of failed ticks
+// costs the ticks it lasted and nothing more.
+//
+// STARTUP DOES NOT USE IT. See the startup probe: with nothing classified yet,
+// classify(name, false) is a first answer rather than a re-classification, and
+// withholding it freezes advance() for every source.
+export const NEEDS_FAILURE_TOLERANCE = 3;
+// TODO: only mail reads ctx.deadline. matrix's forward pass is the other one
+// that can run for many minutes, and while it does it is absent from the
+// activity queue and reads as unscheduled -- the same symptom this budget was
+// added for. It is registry-disabled on every default install, which is why it
+// is a note rather than a change.
+
 
 function configError(message) {
   return new Error(`config.json: ${message}`);
@@ -521,9 +769,10 @@ export function validateConfig(raw) {
     }
   }
   if (raw.intervals !== undefined) {
-    // `intervals.linkedin` belonged to the retired export poller. Accept it as
-    // a no-op so an upgrade keeps booting; Matrix has its own interval now.
-    assertClosedKeys(raw.intervals, [...CONNECTOR_NAMES, 'linkedin'], '"intervals"');
+    // `intervals.linkedin` is the export connector's own poll cadence again,
+    // now that CONNECTOR_NAMES includes it — no longer a special-cased
+    // upgrade no-op.
+    assertClosedKeys(raw.intervals, CONNECTOR_NAMES, '"intervals"');
     for (const [name, seconds] of Object.entries(raw.intervals)) {
       assertPositiveInt(seconds, `intervals.${name} (seconds)`, { min: MIN_INTERVAL_S, max: 86_400 });
     }
@@ -552,6 +801,21 @@ export function validateConfig(raw) {
     if (raw.mail.maxBodyBytes !== undefined) {
       assertPositiveInt(raw.mail.maxBodyBytes, 'mail.maxBodyBytes', { min: 1024 });
     }
+    // MEASURED (2026-09): a clean probe against two Google accounts hit the
+    // per-user "Units per minute" quota after ~102 `messages.get` calls in a
+    // fresh minute, i.e. ~100 gets/minute regardless of what the console
+    // shows. 100 is allowed as an upper bound so an owner who wants to lean
+    // right up against the measured ceiling can, but no config can ask for
+    // more than what was actually measured.
+    if (raw.mail.getsPerMinute !== undefined) {
+      assertPositiveInt(raw.mail.getsPerMinute, 'mail.getsPerMinute', { max: 100 });
+    }
+    // How many API pages one historical pass may drain per account. Pacing
+    // (getsPerMinute) is what protects the quota; this only bounds how long a
+    // single pass runs, so the ceiling is generous but finite.
+    if (raw.mail.historyPagesPerPass !== undefined) {
+      assertPositiveInt(raw.mail.historyPagesPerPass, 'mail.historyPagesPerPass', { max: 50 });
+    }
     // Several mailboxes, because Gmail issues app passwords per account and
     // the owner's mail is split across addresses. The keys outside `accounts`
     // stay as the defaults every account inherits, so the single-account
@@ -579,6 +843,24 @@ export function validateConfig(raw) {
         }
         if (account.backfillDays !== undefined) {
           assertPositiveInt(account.backfillDays, `mail.accounts[${i}].backfillDays`, { max: 3650 });
+        }
+        if (account.getsPerMinute !== undefined) {
+          assertPositiveInt(account.getsPerMinute, `mail.accounts[${i}].getsPerMinute`, { max: 100 });
+        }
+        // RANGE-CHECKED, same bounds as their top-level twins above. These
+        // two were in MAIL_ACCOUNT_KEYS -- so assertClosedKeys accepted them
+        // -- and then nothing looked at the VALUE: accountSettings reads the
+        // per-account entry in preference to the top-level one, so
+        // `historyPagesPerPass: 1000000` booted fine and asked mail.mjs's
+        // history loop for a million pages, and `{}` (or a string) made
+        // `page < NaN` false on the first comparison, which silently stopped
+        // that one account's history from ever advancing again. An allowlist
+        // that admits a key it does not bound is not a validator for it.
+        if (account.maxBodyBytes !== undefined) {
+          assertPositiveInt(account.maxBodyBytes, `mail.accounts[${i}].maxBodyBytes`, { min: 1024 });
+        }
+        if (account.historyPagesPerPass !== undefined) {
+          assertPositiveInt(account.historyPagesPerPass, `mail.accounts[${i}].historyPagesPerPass`, { max: 50 });
         }
         if (account.folders !== undefined) {
           if (
@@ -774,6 +1056,21 @@ export function createDaemon({
   activityPath = defaultActivityPath(),
   now = Date.now,
   completePeopleYear = adminCompletePeopleYear,
+  // The first re-probe delay for a source whose prerequisites are missing;
+  // it doubles from here up to that source's interval. Injectable for the same
+  // reason activityPath is: a test cannot wait a real minute to prove that the
+  // wait ends without a restart.
+  reprobeFloorMs = NOT_READY_REPROBE_MS,
+  // Injectable for the same reason reprobeFloorMs is: a test cannot wait out a
+  // ten-second re-arm, let alone a thirty-minute sprint.
+  sprintRearmMs = defaultSprintRearmMs(),
+  sprintMaxMs = SPRINT_MAX_MS,
+  sprintHistoryBudgetMs = SPRINT_HISTORY_BUDGET_MS,
+  sprintRetryLadderMs = SPRINT_RETRY_LADDER_MS,
+  // Injectable for the same reason the sprint knobs are: several behaviours only
+  // appear when two sources tick inside one window, and ten seconds apart makes
+  // that a ten-second test. Production always takes the constant.
+  firstRunStaggerMs = FIRST_RUN_STAGGER_MS,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
@@ -790,11 +1087,244 @@ export function createDaemon({
   // different from "ready": an unevaluated source is shown rather than hidden, so
   // a needs() that is slow or throws can never silently empty the queue.
   const notReady = new Map();
+  // HOW LONG THE LAST NOT-READY ANSWER BOUGHT, per source, so the next one can
+  // double it. Cleared the moment a source becomes ready, is disabled, or its
+  // needs() starts throwing -- a back-off is about one specific kind of wait,
+  // and carrying it across a different one would silence a source that just
+  // recovered. See NOT_READY_REPROBE_MS.
+  const notReadyDelays = new Map();
+  // THE LIVE TIMER PER SOURCE, so one can be REPLACED rather than added to.
+  //
+  // `timers` is a flat set for stop(); it cannot answer "is this source already
+  // armed?". Nothing needed that while the only thing that scheduled a source
+  // was its own completion -- but probeNotReady() schedules one out of band, and
+  // without this it would arm a SECOND timer beside the one already pending.
+  // Two timers for one source is exactly the overlap the module header's
+  // setTimeout-not-setInterval rule exists to make structurally impossible:
+  // both passes read the same store and each moves a cursor the other reads.
+  const sourceTimers = new Map();
+  // SOURCES WHOSE needs() HAS ACTUALLY ANSWERED "[]".
+  //
+  // Not the inverse of `notReady`: absent from that map means NOT EVALUATED,
+  // which is deliberately different from ready. The sprint needs the positive
+  // fact, because "scheduled" is what it used to ask and on a clean Mac every
+  // local store is scheduled and none of them is readable -- no Full Disk
+  // Access yet -- so the phase began, and spent itself, before anything could
+  // read a single row.
+  const ready = new Set();
+  // Consecutive failures inside the sprint window, per source. See
+  // SPRINT_RETRY_LADDER_MS; cleared by any pass that completes.
+  const sprintFailures = new Map();
+  // CONSECUTIVE needs() THROWS PER SOURCE, and the reason there is a count at
+  // all rather than a verdict.
+  //
+  // A throwing needs() cannot be classified as "inactive" on the spot. It is
+  // the same call classify(name, true) later reads as a RE-ACTIVATION, and
+  // that rewinds the shared yearly walk: wasInactive deletes COMPLETE, sets
+  // the year back to the CURRENT one and reopens its barriers, for every
+  // source. So a token file being rewritten under a walk at 2015 -- a throw
+  // that lasts one tick -- would reset everybody to 2026, every time it
+  // happened, and the backfill would never reach the older years. Trading a
+  // stall for an oscillation is the worse trade: an oscillation is permanent.
+  //
+  // A source that FLAPS therefore keeps its place: below the tolerance the
+  // barrier is untouched, exactly as it was before the classification existed,
+  // and the walk simply waits. Only a source that fails NEEDS_FAILURE_TOLERANCE
+  // ticks in a row is genuinely unavailable, and only then does it leave the
+  // barrier so advance() can move the year without it -- which is the deadlock
+  // the classification was added to break. The cost of the tolerance is at
+  // most three polling intervals of a stalled backfill; the cost of getting it
+  // wrong in the other direction is a backfill that never finishes.
+  //
+  // What the tolerance does NOT have to buy any more is the walk's position:
+  // classify() rewinds only for a connector that has actually been left behind
+  // (connectors/lib/yearlyBackfill.mjs, missedYears). A source that goes
+  // unavailable for an hour and recovers keeps the year it was on.
+  const needsFailures = new Map();
   let stopped = false;
   const peopleBarrierEnabled = typeof completePeopleYear === 'function'
     && typeof ingestOpts?.tokenFile === 'string';
-  const historyRoster = sources.filter((source) => source.walksHistory === true)
+  // THE ROSTER IS THE SCHEDULE, not the catalogue.
+  //
+  // Every member of this roster has to be classified before advance() will move
+  // the year, and classify() is only ever reached from a source the scheduler
+  // actually runs. Built from `sources`, it therefore included history sources
+  // the registry had switched off — `matrix` on every default install, because
+  // bridges are off — and the barrier then waited for a classification that
+  // could never arrive. The yearly backfill deadlocked at the current year for
+  // ALL the others. Filter by the same list start() schedules from.
+  const historyRoster = sources
+    .filter((source) => source.walksHistory === true
+      && !DEFAULT_DISABLED_CONNECTORS.includes(source.name))
     .map((source) => source.name);
+  // The same roster start() schedules from, by name, because probeNotReady()
+  // has a connector name in hand and needs the source object back.
+  const scheduledByName = new Map(
+    sources
+      .filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name))
+      .map((source) => [source.name, source])
+  );
+  // THE SPRINT: is this machine still inside its first-load half hour, and is
+  // there still a reason for one?
+  //
+  // BOTH HALVES, on every ask. The clock alone would keep sprinting a machine
+  // with nothing left to read; the work alone would sprint for ever.
+  //
+  // READABLE, not merely scheduled. `whatsapp` is in SPRINT_CONNECTORS and on a
+  // Mac that has never had WhatsApp it is scheduled and can answer nothing, so a
+  // roster built from the schedule alone had a member that could never finish
+  // and no natural end but its own clock.
+  const sprintRoster = () => SPRINT_CONNECTORS
+    .filter((connector) => scheduledByName.has(connector) && ready.has(connector));
+  // IS THERE STILL ANYTHING FOR THE PHASE TO WALK?
+  //
+  // ~~Last year is not done yet.~~ That is not what the sprint is for. Its job is
+  // the FIRST CARD, and the card wants somebody quiet -- which on run four meant
+  // the walk had to reach about 2021 before a single investor qualified, five
+  // years below the year the old condition stopped at. Live at 23:20, twenty-three
+  // minutes in: the phase ended because last year had landed, with the owner's
+  // mode pool still empty and thirty-seven people in the pool overall. The window
+  // is the budget; last year was never the goal.
+  //
+  // So it runs its half hour while there is history left to walk. EXHAUSTED is
+  // what says there is not: record() sets it when a connector reports nothing
+  // older exists, and task() answers null for every year below that -- so a
+  // roster of exhausted sources has nothing this phase can do, however much
+  // window is left. That is also what keeps the six-hour re-arm from becoming
+  // four sprints a day for ever on a Mac where every store begins this year.
+  const sprintWorkOutstanding = () => {
+    if (state.getCursor('yearly-backfill:complete') === '1') return false;
+    return sprintRoster().some(
+      (connector) => state.getCursor(`yearly-backfill:connector:${connector}:exhausted`) !== '1'
+    );
+  };
+  // Epoch ms, or null where this machine has never begun one. Read from the
+  // cursor store rather than a field, so a restart inside the window resumes
+  // with what is left of it and a machine that has spent its sprint takes no
+  // second one.
+  const sprintStartedTs = () => {
+    const parsed = Number(state.getCursor(SPRINT_STARTED_KEY));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+  const sprinting = () => {
+    const started = sprintStartedTs();
+    if (started === null) return false;
+    const elapsed = now() - started;
+    // A NEGATIVE ELAPSED IS NOT "PLENTY OF TIME LEFT". A Mac whose RTC reads a
+    // date in the future at first boot stamps the start from that clock; NTP
+    // corrects it minutes later and every comparison below is then against a
+    // timestamp from next week. `elapsed < sprintMaxMs` alone answers true for
+    // days, running the local stores at a ten-second re-arm on a laptop the
+    // PowerBudget default was chosen to keep cool. A start in the future is a
+    // start nobody can have made: treat it as never having sprinted.
+    if (elapsed < 0 || elapsed >= sprintMaxMs) return false;
+    return sprintWorkOutstanding();
+  };
+  /// Begin one if this machine is owed one.
+  ///
+  /// Idempotent inside a window, and re-armable outside one: a spent half hour
+  /// may be replaced after SPRINT_REARM_AFTER_MS, for as long as last year is
+  /// still open. See that constant -- a one-shot window is a window the owner's
+  /// permission prompts can burn, permanently.
+  const windowGained = () => {
+    const parsed = Number(state.getCursor(SPRINT_GAINED_KEY));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  };
+  /// Rows this window has landed. Called from a completed pass of a sprint
+  /// source; see SPRINT_BARREN_HOLD_MS for what reads it.
+  const recordSprintGain = (rows) => {
+    if (!(rows > 0) || !sprinting()) return;
+    state.setCursor(SPRINT_GAINED_KEY, String(windowGained() + rows));
+  };
+  const beginSprint = (trigger) => {
+    if (sprintRoster().length === 0 || !sprintWorkOutstanding()) return false;
+    const started = sprintStartedTs();
+    if (started !== null) {
+      const age = now() - started;
+      // Inside the window, or inside the cooling-off period after it. A start in
+      // the future (see sprinting()) is neither, and is replaced on the spot.
+      if (age >= 0 && age < SPRINT_REARM_AFTER_MS) return false;
+      // AND A BARREN ONE WAITS A DAY, not six hours. See SPRINT_BARREN_HOLD_MS:
+      // the receipts cannot end the phase on a Mac with calendar in the roster,
+      // and a window that landed nothing is the evidence that says so.
+      if (age >= 0 && windowGained() === 0 && age < SPRINT_BARREN_HOLD_MS) return false;
+    }
+    state.setCursor(SPRINT_STARTED_KEY, String(now()));
+    state.deleteCursor(SPRINT_GAINED_KEY);
+    // A NEW WINDOW STARTS THE LADDER OVER. The retry ladder is per window, and
+    // leaving the count behind made it single-use per install: a source that
+    // spent all three attempts on a Time Machine pass six hours ago got no fast
+    // retry at all inside this window, for an unrelated transient.
+    sprintFailures.clear();
+    log.info('sprint_started', {
+      trigger,
+      sources: sprintRoster(),
+      maxMs: sprintMaxMs,
+      rearmMs: sprintRearmMs,
+      rearmed: started !== null,
+    });
+    return true;
+  };
+  // THE WALK MOVED, SO THE SOURCES WAITING ON IT SHOULD LOOK NOW.
+  //
+  // A sprint source caught up to the walk year deliberately does not re-arm: it
+  // has nothing to do until the year decrements, and polling to discover that is
+  // what had calendar re-reading the same rows every twenty seconds. This is the
+  // other half -- the event. Whoever moves the year says so, and the sources that
+  // were waiting are pulled forward to the sprint cadence instead of their
+  // interval.
+  //
+  // Never a source that is mid-run (absent from nextRuns), for the same reason
+  // probeNotReady skips those: arming beside a pass in flight is two passes over
+  // one cursor. And never one that is already due sooner than the re-arm, which
+  // would push it back rather than forward.
+  const wakeSprintSources = () => {
+    if (stopped || !sprinting()) return;
+    for (const connector of sprintRoster()) {
+      if (!nextRuns.has(connector) || notReady.has(connector)) continue;
+      // Nothing left for this one to walk: dragging it to a ten-second tick buys
+      // a forward pass that finds task() null and goes back to sleep, which is
+      // the waste the movedSomething gate was added to stop.
+      if (!yearlyBackfill.outstanding(connector)) continue;
+      const source = scheduledByName.get(connector);
+      if (source === undefined) continue;
+      if ((nextRuns.get(connector) ?? 0) - now() <= sprintRearmMs) continue;
+      scheduleSource(source, sprintRearmMs);
+    }
+  };
+
+  /// ANYTHING THAT CAN MOVE THE YEAR, plus the wake-up that move earns.
+  ///
+  /// ~~advanceWalk() around advance().~~ advance() is not the only door: classify()
+  /// rewinds on a re-activation, reopen() rewinds outright, and reconcile() loops
+  /// advance() across several years at once. Each of those leaves real work in
+  /// front of sources that are parked at their full interval, and each was
+  /// reached without the wake -- so the owner finishing a Google sign-in ten
+  /// minutes into the window moved the walk and nothing looked at it for fifteen
+  /// minutes. Comparing the year around the call catches every one of them,
+  /// including the ones nobody has written yet.
+  const afterWalkMoves = (fn) => {
+    const before = yearlyBackfill.snapshot().year;
+    const result = fn();
+    if (yearlyBackfill.snapshot().year !== before) wakeSprintSources();
+    return result;
+  };
+  const advanceWalk = () => afterWalkMoves(() => yearlyBackfill.advance());
+
+  const sprintSnapshot = () => {
+    const started = sprintStartedTs();
+    if (started === null || !sprinting()) return null;
+    return {
+      since: started,
+      until: started + sprintMaxMs,
+      sources: sprintRoster(),
+      // WHICH YEAR IT IS ON. The phase no longer stops at last year, so a screen
+      // saying "reading last year" would be wrong for most of the window --
+      // right at the start and stale from then on. The walk's own position is
+      // the only thing that can say it truthfully.
+      year: yearlyBackfill.snapshot().year,
+    };
+  };
   // Install the product-level barrier once. Existing connector year receipts
   // remain useful, so an upgrade rewinds to the current year without re-fetching
   // it: only People profiles run before the older connector walk
@@ -812,6 +1342,10 @@ export function createDaemon({
     connectors: historyRoster,
     barriers: peopleBarrierEnabled ? ['people'] : [],
     now,
+    // WHO MAY HOLD THE YEAR DURING THE SPRINT. Asked per call rather than set
+    // once, so the barrier widens back out the moment the phase ends without
+    // anything having to remember to say so.
+    sprintingRoster: () => (sprinting() ? sprintRoster() : null),
   });
   let peopleGateTimer = null;
   let peopleGateRunning = false;
@@ -836,6 +1370,26 @@ export function createDaemon({
       }));
     })
     .sort((a, b) => a.nextTs - b.nextTs);
+  // WHAT IS CONNECTED-BUT-NOT-YET-READABLE, in the file the app already reads.
+  //
+  // These are deliberately NOT in `queue`. scheduledQueue() filters them out
+  // because listing them as pending work is what put granola in the owner's
+  // Activity menu for an account they had never connected, and that filter is
+  // still right: a source that cannot work is not work. But "not pending" is
+  // not the same as "say nothing", and saying nothing is how a sign-in that has
+  // landed and a sign-in that never happened became indistinguishable from
+  // outside this process. So they get their own key: a name, when the re-probe
+  // is due, and HOW MANY prerequisites are missing.
+  //
+  // COUNT, NEVER THE STRINGS, for the same reason source_not_ready logs a
+  // count: needs() messages embed absolute local paths.
+  const waitingQueue = () => [...notReady.entries()]
+    .map(([connector, missing]) => ({
+      connector,
+      missing: missing.length,
+      ...(nextRuns.has(connector) ? { nextTs: nextRuns.get(connector) } : {}),
+    }))
+    .sort((a, b) => a.connector.localeCompare(b.connector));
   const intervalMsFor = (connector) =>
     (config.intervals?.[connector] ?? DEFAULT_INTERVAL_S) * 1000;
   // HOW LONG THE OUTSTANDING WORK TAKES -- backfill only, and null when there is
@@ -956,18 +1510,43 @@ export function createDaemon({
   };
   const publishActivity = (activity) => {
     const total = totalWorkEstimate();
-    writeActivity({ ...activity, queue: scheduledQueue(), ...(total ?? {}) }, activityPath);
+    // WHICH REGISTRY THIS PROCESS IS RUNNING ON, in the file the app already
+    // reads. FEATURE_REGISTRY is resolved once at module scope while connect
+    // re-reads it per request, so a registry repaired under a running daemon
+    // clears the shelf's red line while this process is still holding ALL_OFF
+    // and scheduling nothing. One word costs nothing and makes the disagreement
+    // legible; connect/lib/status.mjs carries it back to the shelf.
+    const waiting = waitingQueue();
+    // A SIBLING KEY, like `waiting`, and absent once the phase ends. The panel
+    // and screen 6 both draw a sentence off it, and a phase that is over has to
+    // stop claiming the machine is racing.
+    const sprint = sprintSnapshot();
+    writeActivity(
+      {
+        ...activity,
+        queue: scheduledQueue(),
+        ...(waiting.length > 0 ? { waiting } : {}),
+        ...(sprint === null ? {} : { sprint }),
+        registryState: FEATURES_REGISTRY_STATE,
+        ...(total ?? {}),
+      },
+      activityPath
+    );
   };
   const publishWaiting = () => {
     const next = scheduledQueue()[0];
     if (next) publishActivity({ phase: 'waiting', ...next });
   };
 
+  // `blocking`, not `pending`: a trailing source is walking its own backlog above
+  // the shared year and holds nobody. Gating the People year on it would put the
+  // sprint's stall back one level down -- advance() waits on the People barrier,
+  // and the People barrier would be waiting on mail.
   const peopleGateReady = () => {
     const snapshot = yearlyBackfill.snapshot();
     return !snapshot.complete
-      && snapshot.pending.length === 1
-      && snapshot.pending[0] === 'people';
+      && snapshot.blocking.length === 1
+      && snapshot.blocking[0] === 'people';
   };
 
   function schedulePeopleGate(delayMs = 0) {
@@ -983,7 +1562,7 @@ export function createDaemon({
         const result = await completePeopleYear({ year }, ingestOpts);
         if (result.complete === true) {
           yearlyBackfill.recordBarrier('people', year);
-          yearlyBackfill.advance();
+          advanceWalk();
         }
         publishWaiting();
         if (result.complete !== true) {
@@ -1058,7 +1637,7 @@ function matrixHistoryRooms(value) {
   }
 }
 
-const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
+const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}) => ({
     state,
     ingest: (rows) => ingest(rows, ingestOpts),
     admin,
@@ -1070,6 +1649,15 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     history,
     historyComplete: yearlyBackfill.snapshot().complete,
     ...(historyWindow ? { historyWindow } : {}),
+    // The history time budget, handed TO the source rather than only checked
+    // between its invocations. HISTORY_BUDGET_MS was enforced by the
+    // while-loop below, which can only notice the budget is spent once
+    // source.run() has returned -- and a source that drains several API pages
+    // per invocation now runs for minutes inside one call (mail at the
+    // default 5 pages x 100 messages x ~667ms pacing is ~5.6 minutes per
+    // account, 17x the 20s budget). A source that walks pages is expected to
+    // check this between them; one that ignores it behaves exactly as before.
+    ...(deadline === null ? {} : { deadline }),
   });
 
   async function runSource(source) {
@@ -1078,8 +1666,11 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     // `run.mjs <name> --disable` takes effect at the next tick without
     // bouncing the daemon.
     if (existsSync(disableMarkerPath(source.name))) {
+      needsFailures.delete(source.name);
+      notReadyDelays.delete(source.name);
+      ready.delete(source.name);
       yearlyBackfill.classify(source.name, false);
-      yearlyBackfill.advance();
+      advanceWalk();
       schedulePeopleGate();
       log.info('source_disabled', { connector: source.name });
       return;
@@ -1087,28 +1678,140 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     // Config reaches needs() because a source's prerequisites can depend on
     // it: calendar's Google backend requires OAuth tokens that the local
     // backend has no use for. Sources that ignore the argument are unaffected.
-    const missing = await source.needs({ config });
+    //
+    // A THROW HERE IS AN ANSWER, NOT AN ESCAPE -- EVENTUALLY. This call sat
+    // outside every try in the process: a needs() that threw (an unreadable
+    // store, a token file mid-rewrite) rejected straight past runSource into
+    // schedule()'s catch, which logs and reschedules -- and never classifies.
+    // classify() is reached only from a scheduled source's path, so a roster
+    // member whose needs() keeps throwing is a member nothing will EVER
+    // classify, and advance() waits on it forever: the year never moves for
+    // anybody.
+    //
+    // But answering on the FIRST throw is the other bug. classify(name, false)
+    // followed by a working tick's classify(name, true) drops the source out of
+    // the activity queue and back in on every flap, and -- until round-4
+    // finding 3 -- rewound the shared yearly walk with it. One flaky tick must
+    // not cost the backfill its progress, so the answer is given only after the
+    // tolerance; until then this is the stall it always was, and the source
+    // keeps its place in the walk either way.
+    //
+    // `notReady` is CLEARED either way, and deliberately not set: absent from
+    // that map is "not evaluated", which is shown in the activity queue rather
+    // than hidden. Leaving the last answer standing was worse than both -- a
+    // source that was unprovisioned last tick stayed filtered out of the queue
+    // on the strength of a check that no longer runs.
+    let missing;
+    try {
+      missing = await source.needs({ config });
+    } catch (error) {
+      const failures = (needsFailures.get(source.name) ?? 0) + 1;
+      needsFailures.set(source.name, failures);
+      notReady.delete(source.name);
+      notReadyDelays.delete(source.name);
+      // A THROW SAYS NOTHING ABOUT READINESS -- AND ONE THROW SAYS NOTHING AT ALL.
+      //
+      // Dropping it on the FIRST throw narrowed sprintRoster() on the spot, and
+      // an advance() landing in that window added the source to the durable
+      // trailing set: iMessage's needs() throwing once on a Time Machine pass
+      // left it permanently outside the barrier. The three-strike tolerance
+      // exists precisely so one throw does not move anything, and `ready` was
+      // routing around it.
+      if (failures >= NEEDS_FAILURE_TOLERANCE) ready.delete(source.name);
+      if (failures >= NEEDS_FAILURE_TOLERANCE) {
+        yearlyBackfill.classify(source.name, false);
+        advanceWalk();
+        schedulePeopleGate();
+      }
+      // AND IT COUNTS AS A RUN THAT FAILED. Without this the run log's last
+      // entry for the source stays its last SUCCESS, so "why has this source
+      // not produced anything since Tuesday" has no answer anywhere the owner
+      // can reach -- the same reason the run.mjs catch below records one.
+      state.recordRun({
+        connector: source.name,
+        startedTs: now(),
+        finishedTs: now(),
+        ok: false,
+        error: safeErrorFingerprint(error),
+      });
+      log.warn('source_needs_failed', {
+        connector: source.name,
+        failures,
+        // The word the barrier acted on, so the log says whether this throw
+        // moved anything or was absorbed.
+        barrier: failures >= NEEDS_FAILURE_TOLERANCE ? 'unavailable' : 'waiting',
+        error: safeErrorFingerprint(error),
+      });
+      publishWaiting();
+      return;
+    }
+    needsFailures.delete(source.name);
     if (Array.isArray(missing) && missing.length > 0) {
       yearlyBackfill.classify(source.name, false);
-      yearlyBackfill.advance();
+      advanceWalk();
       schedulePeopleGate();
       // Not a failure: an unprovisioned source waits, loudly, and is
       // re-checked next cycle. recordRun stays clean of noise runs.
+      ready.delete(source.name);
       notReady.set(source.name, missing);
       // COUNT, NOT THE STRINGS. Those messages embed absolute local paths --
       // whatsapp's needs() returns "...missing at /Users/<name>/Library/Group
       // Containers/..." -- and this line runs every tick.
-      log.warn('source_not_ready', { connector: source.name, missing: missing.length });
+      // AND IT IS ASKED AGAIN SOON, not in fifteen minutes. The previous wait
+      // doubles until it reaches the interval this source would have used
+      // anyway; a source that becomes ready clears it below. See
+      // NOT_READY_REPROBE_MS.
+      const waited = notReadyDelays.get(source.name);
+      const reprobeMs = Math.min(
+        Number.isFinite(waited) ? waited * 2 : reprobeFloorMs,
+        intervalMsFor(source.name)
+      );
+      notReadyDelays.set(source.name, reprobeMs);
+      log.warn('source_not_ready', {
+        connector: source.name,
+        missing: missing.length,
+        reprobeMs,
+      });
       publishWaiting();
-      return;
+      return { notReadyDelayMs: reprobeMs };
     }
     notReady.delete(source.name);
+    notReadyDelays.delete(source.name);
+    // READY MEANS ITS PREREQUISITES ARE PRESENT. It does NOT yet mean the source
+    // can read: a Google token file whose refresh has been revoked answers
+    // needs() with [] and then throws on every run. The sprint clock therefore
+    // starts further down, after a pass has actually completed -- see the
+    // beginSprint('worked') call at the end of the try. Otherwise half an hour
+    // is spent on a credential that is present and useless, which is exactly the
+    // state the six-hour re-arm exists to survive rather than to cause.
+    ready.add(source.name);
     const startedTs = now();
     const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
-    yearlyBackfill.classify(
+    // WAS THIS SOURCE'S STANDING A GUESS? If startup could not ask it, the
+    // restart reconciliation ran against an incomplete answer and stopped: it
+    // is called ONCE, and the year it could have crossed has no task left in it
+    // to call advance() again. So the first real answer re-runs it.
+    const wasProvisional = yearlyBackfill.snapshot().provisional.includes(source.name);
+    // Through afterWalkMoves: classify() rewinds the year for a source that has
+    // come back, and the sources parked on the old one have to hear about it.
+    afterWalkMoves(() => yearlyBackfill.classify(
       source.name,
       source.walksHistory === true && (source.name !== 'matrix' || socialPlatforms.length > 0)
-    );
+    ));
+    if (wasProvisional) {
+      const recovery = afterWalkMoves(() => yearlyBackfill.reconcile());
+      if (recovery.advanced > 0 || recovery.repaired) {
+        log.info('history_reconciled_after_guess', {
+          connector: source.name,
+          fromYear: recovery.fromYear,
+          toYear: recovery.year,
+          barriers: recovery.advanced,
+          repaired: recovery.repaired,
+          complete: recovery.complete,
+        });
+      }
+      schedulePeopleGate();
+    }
     publishActivity({
       phase: 'syncing',
       connector: source.name,
@@ -1116,10 +1819,55 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       startedTs,
     });
     let nextDelayMs = null;
+    let sprintDelayMs = null;
+    // WHERE THE WALK WAS WHEN THIS TICK LOOKED.
+    //
+    // wakeSprintSources deliberately skips a source that is mid-run -- arming
+    // beside a pass in flight is two passes over one cursor -- and that source
+    // then re-armed from the historyWindow it captured BEFORE the year moved.
+    // With sources on independent timers at a ten-second cadence, overlaps are
+    // the common case: iMessage finishes a year, the walk drops, calendar is in
+    // flight with a null window from the year that just ended, and goes back to
+    // its interval with a fresh year waiting. The skip is right; the missing half
+    // is looking again on the way out.
+    const walkYearSeen = yearlyBackfill.snapshot().year;
+    // THE ONE STOP THAT MUST NOT COME STRAIGHT BACK. A pass that read nothing is
+    // a source with nothing to give, and asking it again in ten seconds is a
+    // busy-loop. Every other ending is work in progress.
+    //
+    // DECLARED OUT HERE because the case that stalled the live run never entered
+    // the history block at all: iMessage finished 2026, task() answered null
+    // while the barrier had not advanced yet, and a re-arm keyed off `slices > 0`
+    // saw zero and went back to sleep for nine hundred seconds. Waiting on a
+    // barrier the sprint is actively clearing is the state that most needs to
+    // come back soon, and it is the one that looks emptiest from inside the loop.
+    let stoppedOnNothing = false;
+    // WHAT "THIS PASS DID WORK" ACTUALLY MEANS, and why it is not the run counts.
+    //
+    // Live on run four: calendar re-ran every twenty-two seconds for minutes,
+    // logging `ingested 0, updated 0, unchanged 153` every time. It had finished
+    // the walk year, so task() answered null, the history block never ran, and a
+    // re-arm keyed off "the pass did not read NOTHING" saw a hundred and fifty
+    // three unchanged rows and came straight back. On a Google-calendar install
+    // that is an API call every twenty seconds for the whole half hour, to
+    // re-read the same rows.
+    //
+    // `unchanged` is rows EXAMINED, not rows gained. The sprint exists to move
+    // the walk, so the things that count are rows that landed and a history slice
+    // that moved: anything else is the source telling us it has nothing to do.
+    let historyGained = 0;
+    let historyMoved = false;
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
-      const forward = (await source.run(makeCtx())) ?? {};
+      const forward = (await source.run(makeCtx({ deadline: now() + FORWARD_BUDGET_MS }))) ?? {};
+      // A PASS THAT COMPLETED, which is the first moment anything is known to be
+      // READABLE rather than merely credentialed -- and therefore the moment the
+      // half hour is worth starting. Here rather than at the end of the tick,
+      // because the history budget just below and the re-arm at the end both ask
+      // whether a sprint is on, and a clock started after them would miss its own
+      // first pass.
+      beginSprint('worked');
       if (source.name === 'matrix' && Number.isInteger(forward.historyDiscoveryPending)) {
         observePortalJoinRate(
           state,
@@ -1137,7 +1885,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       if (Number.isFinite(forward.retryAfterMs) && forward.retryAfterMs >= 1_000) {
         nextDelayMs = Math.min(60_000, Math.floor(forward.retryAfterMs));
       }
-      if (forward.historyReopened === true) yearlyBackfill.reopen(source.name);
+      if (forward.historyReopened === true) afterWalkMoves(() => yearlyBackfill.reopen(source.name));
       const counts = runCounts(forward);
 
       // Then ONE slice of history, if this source walks backwards and has not
@@ -1168,12 +1916,20 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
         // enough that the owner never notices (this is their daily driver, and
         // the forward pass has already run), and it self-tunes -- a fast Mac
         // simply gets through more history per cycle.
-        const deadline = now() + HISTORY_BUDGET_MS;
+        // AND THE SPRINT SPENDS A BIGGER ONE. Same shape, same self-tuning, three
+        // times the slice -- and paired with the re-arm below, which is what
+        // actually moves the needle: the budget decides how much one tick walks,
+        // the re-arm decides how soon the next tick comes.
+        // Asked now, not before the forward pass: that pass may have been the one
+        // that started the phase.
+        const inSprint = sprinting() && SPRINT_CONNECTORS.includes(source.name);
+        const deadline = now() + (inSprint ? sprintHistoryBudgetMs : HISTORY_BUDGET_MS);
         let slices = 0;
         let gained = 0;
+        historyMoved = false;
         try {
           while (now() < deadline) {
-            const rawBack = (await source.run(makeCtx({ history: true, historyWindow }))) ?? {};
+            const rawBack = (await source.run(makeCtx({ history: true, historyWindow, deadline }))) ?? {};
             const back = runCounts(rawBack);
             slices += 1;
             // `ingested`, not `inserted`: runCounts NORMALISES a source's
@@ -1182,11 +1938,15 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
             // logged as null, which is how it went unnoticed -- and the all-zero
             // guard below could never fire through its first condition.
             gained += back.ingested + back.updated;
+            if (rawBack.historyProgressed === true) historyMoved = true;
             // Nothing read means the walk reached the beginning of the store.
             // The source records that itself; stop asking.
             if (rawBack.historyDone === true) {
-              yearlyBackfill.record(source.name, rawBack);
-              yearlyBackfill.advance();
+              historyMoved = true;
+              // The year this pass was HANDED, which for a trailing connector is
+              // above the shared one. See yearlyBackfill.record.
+              yearlyBackfill.record(source.name, rawBack, historyWindow.year);
+              advanceWalk();
               schedulePeopleGate();
               break;
             }
@@ -1197,12 +1957,16 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
             if (
               back.ingested === 0 && back.updated === 0 && back.unchanged === 0
               && rawBack.historyProgressed !== true
-            ) break;
+            ) {
+              stoppedOnNothing = true;
+              break;
+            }
           }
           if (slices > 0) {
             // A short rolling measurement is enough for the activity panel to
             // turn a known number of remaining history slices into elapsed
             // wall-clock time. It is private cursor state, never corpus.
+            historyGained += gained;
             state.setCursor(HISTORY_RATE_KEY(source.name), String(slices));
             log.info('history_pass', {
               connector: source.name,
@@ -1219,6 +1983,45 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
           });
         }
       }
+      // COME STRAIGHT BACK, BUT ONLY IF THIS PASS MOVED SOMETHING.
+      //
+      // ~~Anything but a pass that read nothing.~~ That let a source with a year
+      // already finished re-arm for ever: task() answers null, the history block
+      // never runs, and `unchanged` rows from the forward pass are not "work".
+      // See historyGained / historyMoved above -- and `historyWindow !== null`,
+      // which is the other half: a source caught up to the walk year has nothing
+      // to sprint at until the walk MOVES, and nothing it does in the meantime
+      // will move it.
+      //
+      // What wakes it when the walk does move is wakeSprintSources(), called
+      // wherever the year advances. That is an event rather than a poll, so the
+      // stall this replaced stays fixed without anybody re-reading a store every
+      // twenty seconds to find out.
+      //
+      // `sprinting()` is re-asked rather than reusing `sprintingNow`, because a
+      // pass that just recorded last year has ENDED the phase and must not be
+      // the thing that extends it.
+      const movedSomething = (counts.ingested ?? 0) + (counts.updated ?? 0) > 0
+        || historyGained > 0
+        || historyMoved;
+      // A year that moved WHILE this pass ran is work that arrived after the
+      // window was captured, so it counts even though this tick's own window was
+      // null and it moved nothing of its own.
+      const walkMovedUnderUs = yearlyBackfill.snapshot().year !== walkYearSeen;
+      if (
+        !stoppedOnNothing
+        && (walkMovedUnderUs || (movedSomething && historyWindow !== null))
+        && sprinting()
+        && SPRINT_CONNECTORS.includes(source.name)
+        && yearlyBackfill.outstanding(source.name)
+      ) {
+        sprintDelayMs = sprintRearmMs;
+      }
+      // What this pass landed, for the barren-window judgement in beginSprint.
+      if (SPRINT_CONNECTORS.includes(source.name)) {
+        recordSprintGain((counts.ingested ?? 0) + (counts.updated ?? 0) + historyGained);
+      }
+      sprintFailures.delete(source.name);
       state.recordRun({
         connector: source.name,
         startedTs,
@@ -1230,6 +2033,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
         connector: source.name,
         durationMs: now() - startedTs,
         ...counts,
+        ...(sprintDelayMs === null ? {} : { sprintRearmMs: sprintDelayMs }),
       });
     } catch (error) {
       // One source failing must never take the others down: the error is
@@ -1241,11 +2045,37 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
         ok: false,
         error: safeErrorFingerprint(error),
       });
-      log.error('source_failed', { connector: source.name, error: safeErrorFingerprint(error) });
+      // A FAILURE DURING THE SPRINT IS NOT A REASON TO LEAVE THE PHASE.
+      //
+      // Live on run four: imessage threw once at 22:58:20 -- the disk filled --
+      // and was rescheduled at its full interval while the sprint window ticked
+      // away without it. The thing that failed was a moment, and the window is
+      // half an hour; waiting fifteen minutes inside it spends most of what is
+      // left on one ENOSPC.
+      //
+      // A SHORT LADDER, NOT THE SPRINT CADENCE. A source that is failing must
+      // not be retried every twenty seconds -- that is a hot loop against
+      // whatever is broken. Three attempts backing off, and then the ordinary
+      // interval, which is where a genuinely broken source belongs.
+      if (sprinting() && SPRINT_CONNECTORS.includes(source.name)) {
+        const attempt = sprintFailures.get(source.name) ?? 0;
+        if (attempt < sprintRetryLadderMs.length) {
+          sprintFailures.set(source.name, attempt + 1);
+          sprintDelayMs = sprintRetryLadderMs[attempt];
+        }
+      }
+      log.error('source_failed', {
+        connector: source.name,
+        error: safeErrorFingerprint(error),
+        ...(sprintDelayMs === null ? {} : { sprintRetryMs: sprintDelayMs }),
+      });
     } finally {
       publishActivity({ phase: 'idle', connector: source.name, finishedTs: now() });
     }
-    return { nextDelayMs };
+    // nextDelayMs first: a source that asked for a short retry of its own (a
+    // rate-limited portal join) is answering about work the sprint knows nothing
+    // about. sourceRetryDelay reads them in that order too.
+    return { nextDelayMs, sprintDelayMs };
   }
 
   function schedule(fn, delayMs, reschedule) {
@@ -1279,13 +2109,24 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       if (!stopped) reschedule(result);
     }, delayMs);
     timers.add(timer);
+    return timer;
   }
 
+  // ONE TIMER PER SOURCE, ALWAYS -- see sourceTimers. Arming replaces whatever
+  // was already armed for this source, so probeNotReady() can pull a waiting
+  // source forward without leaving its old fifteen-minute timer behind to fire
+  // a second, overlapping pass.
   function scheduleSource(source, delayMs) {
-    const intervalMs = (config.intervals?.[source.name] ?? DEFAULT_INTERVAL_S) * 1000;
+    const intervalMs = intervalMsFor(source.name);
+    const armed = sourceTimers.get(source.name);
+    if (armed !== undefined) {
+      clearTimeout(armed);
+      timers.delete(armed);
+      sourceTimers.delete(source.name);
+    }
     nextRuns.set(source.name, now() + delayMs);
     publishWaiting();
-    schedule(
+    const timer = schedule(
       () => runSource(source),
       delayMs,
       (result) => scheduleSource(
@@ -1293,6 +2134,77 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
         sourceRetryDelay(result, intervalMs)
       )
     );
+    if (timer !== undefined) sourceTimers.set(source.name, timer);
+  }
+
+  // ASK EVERY WAITING SOURCE AGAIN, RIGHT NOW.
+  //
+  // The back-off above shortens the wait; this removes it. The app is the
+  // daemon's parent process and it is the process that KNOWS when the owner
+  // finished signing in to Google or dropped their LinkedIn export in, so it
+  // says so (SIGUSR2) rather than leaving the daemon to find out on a timer.
+  // Onboarding then costs seconds instead of a minute, and a reinstall stops
+  // being the thing that makes a first run work.
+  //
+  // ONLY SOURCES IN `notReady`, and only ones currently ARMED. A source absent
+  // from nextRuns is mid-run -- runSource deletes it for the whole call -- and
+  // its own tick is already the probe; re-arming it there would start a second
+  // pass beside the one in flight. A needs() that THROWS is left exactly as it
+  // was: the three-strike tolerance in runSource owns that state, and answering
+  // it from here would hand the yearly walk a re-classification out of band.
+  async function probeNotReady(trigger) {
+    if (stopped) return { probed: 0, ready: [] };
+    const pending = [...notReady.keys()];
+    const readyNow = [];
+    for (const connector of pending) {
+      if (stopped) break;
+      const source = scheduledByName.get(connector);
+      if (source === undefined) continue;
+      // Re-read rather than trusting the snapshot: this loop awaits, and another
+      // source's tick can land inside it. A connector that answered for itself
+      // while we were waiting has already been rescheduled, and pulling it
+      // forward again would run it twice for one nudge.
+      if (!notReady.has(connector)) continue;
+      if (!nextRuns.has(connector)) continue;
+      if (existsSync(disableMarkerPath(connector))) continue;
+      let missing;
+      try {
+        missing = await source.needs({ config });
+      } catch {
+        continue;
+      }
+      // AND ASKED AGAIN, BECAUSE THE AWAIT ABOVE YIELDS. The guards at the top of
+      // this iteration were true when the loop reached it and say nothing about
+      // now: this loop awaits every source in turn, and matrix's and mail's
+      // needs() are not an existsSync. A back-off timer firing inside that window
+      // starts runSource, which deletes the source from nextRuns -- and arming a
+      // 0 ms timer beside a pass already in flight is precisely the two-passes-
+      // over-one-cursor overlap sourceTimers exists to make impossible.
+      if (!notReady.has(connector) || !nextRuns.has(connector)) continue;
+      if (Array.isArray(missing) && missing.length > 0) {
+        ready.delete(connector);
+        notReady.set(connector, missing);
+        continue;
+      }
+      notReady.delete(connector);
+      notReadyDelays.delete(connector);
+      // NOT `ready.add`. This source has not run yet; readiness is recorded by
+      // the tick that actually asks and then works, so the sprint clock starts
+      // against a source that has genuinely read something.
+      readyNow.push(connector);
+      scheduleSource(source, 0);
+    }
+    // THE NUDGE DOES NOT START THE CLOCK. It starts a RUN -- scheduleSource above
+    // -- and the pass that run completes is what starts the window. See
+    // beginSprint('worked'): readiness is credential presence, and a credential
+    // that is present and unusable would otherwise spend the half hour.
+    log.info('sources_reprobed', {
+      trigger,
+      waiting: pending.length,
+      ready: readyNow.length,
+    });
+    publishWaiting();
+    return { probed: pending.length, ready: readyNow };
   }
 
   // Retention + physical maintenance, once per day in the configured idle
@@ -1343,14 +2255,39 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     );
   }
 
+  // Resolves once start()'s readiness probe has classified every source. Nothing
+  // in the daemon waits on it; the CLI's remembered-nudge path does, because a
+  // probe run against an unclassified roster is a no-op wearing a trigger name.
+  let settled = null;
   return {
+    probeNotReady,
+    sprintSnapshot,
+    whenSettled: () => settled ?? Promise.resolve(),
     start() {
       const scheduledSources = sources.filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name));
       sources.forEach((source) => {
         if (DEFAULT_DISABLED_CONNECTORS.includes(source.name)) {
           log.info('source_hidden', { connector: source.name });
+          // Belt and braces for the deadlock above: historyRoster is built from
+          // the same filter, so this is a no-op today. It stops being one the
+          // moment the two lists are computed in different places again.
+          yearlyBackfill.withdraw(source.name);
         }
       });
+      // THE OUTAGE SAYS SO, in the log the app reads.
+      //
+      // An unreadable registry is ALL_OFF including imessage, mail, calendar
+      // and contacts — the card's own sources — so this daemon is scheduling
+      // nothing and the connections page is drawing an empty shelf. Counts and
+      // the state name only, which is all a diagnosis needs.
+      if (FEATURES_REGISTRY_STATE !== 'ok') {
+        log.error('features_registry_unreadable', {
+          registryState: FEATURES_REGISTRY_STATE,
+          detail: 'every feature and connector is off until the registry is readable — reinstall',
+          scheduled: scheduledSources.length,
+          hidden: DEFAULT_DISABLED_CONNECTORS.length,
+        });
+      }
       // ASK WHAT CANNOT RUN BEFORE PUBLISHING A QUEUE, not after.
       //
       // notReady is populated inside runSource, so it is EMPTY at startup — and
@@ -1365,7 +2302,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       // of it being re-checked before every run is that it is safe to call. So
       // call it once up front. Failures leave the source ABSENT from the map,
       // which shows it: unknown must never read as unprovisioned.
-      Promise.allSettled(scheduledSources.map(async (source) => {
+      const settledChain = Promise.allSettled(scheduledSources.map(async (source) => {
         // Match runSource's first gate. A manually disabled history source is
         // unavailable for the barrier even if all of its ordinary credentials
         // remain present.
@@ -1373,12 +2310,62 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
           yearlyBackfill.classify(source.name, false);
           return;
         }
-        const missing = await source.needs({ config });
+        // Same reasoning as runSource's gate for notReady -- a throwing needs()
+        // leaves the source ABSENT from that map, because unknown must not read
+        // as unprovisioned.
+        //
+        // BUT NOT THE TOLERANCE (round-4 finding 14). The three-strike rule
+        // exists to stop a flaky tick from turning into a RE-activation, and a
+        // re-activation is what rewinds the shared walk. At startup nothing has
+        // been classified yet, so classify(name, false) here is the source's
+        // FIRST answer rather than a re-classification, and it costs the walk
+        // nothing. Withholding it costs plenty: advance() waits on
+        // unclassified(), so one throwing needs() froze the year for every
+        // source until the tolerance was spent -- up to 30 minutes at default
+        // intervals -- and reconcile() below, which runs once and only here,
+        // gave up immediately on an unclassified roster and left a restart's
+        // already-complete barriers uncrossed.
+        //
+        // AND IT IS SAID OUT LOUD. This path runs BEFORE any tick, so it is
+        // the one that answers "why was this source unavailable at startup",
+        // and it used to swallow the error whole: the single diagnostic for
+        // that question did not exist on the path that reaches it first.
+        let missing;
+        try {
+          missing = await source.needs({ config });
+        } catch (error) {
+          // The count carries into the running daemon's own gate, so a source
+          // that is broken rather than briefly locked reaches the tolerance
+          // one tick sooner than if startup had said nothing.
+          const failures = (needsFailures.get(source.name) ?? 0) + 1;
+          needsFailures.set(source.name, failures);
+          // CLASSIFIED, AND MARKED AS A GUESS. The classification still has to
+          // happen -- advance() waits on unclassified(), and reconcile() below
+          // gives up on an unclassified roster -- but a throw is "we could not
+          // ask", and the walk must not advance a year on the strength of it.
+          // A Photos library locked for twenty seconds across a restart was
+          // enough to advance 2026 past a source that had 2026 work, and the
+          // recovering tick then rewound the whole walk to fetch it again.
+          // See yearlyBackfill's `provisional`; the wait ends at this source's
+          // first real tick, one stagger away.
+          yearlyBackfill.classify(source.name, false, { unanswered: true });
+          log.warn('source_needs_failed', {
+            connector: source.name,
+            failures,
+            barrier: 'unavailable',
+            at: 'startup',
+            error: safeErrorFingerprint(error),
+          });
+          return;
+        }
+        needsFailures.delete(source.name);
         if (Array.isArray(missing) && missing.length > 0) {
+          ready.delete(source.name);
           notReady.set(source.name, missing);
           yearlyBackfill.classify(source.name, false);
           return;
         }
+        ready.add(source.name);
         const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
         yearlyBackfill.classify(
           source.name,
@@ -1386,34 +2373,57 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
             && (source.name !== 'matrix' || socialPlatforms.length > 0)
         );
       })).then(() => {
-        const recovery = yearlyBackfill.reconcile();
-        if (recovery.advanced > 0) {
+        const recovery = afterWalkMoves(() => yearlyBackfill.reconcile());
+        if (recovery.advanced > 0 || recovery.repaired) {
           log.info('history_restart_reconciled', {
             fromYear: recovery.fromYear,
             toYear: recovery.year,
             barriers: recovery.advanced,
+            // A COMPLETE mark that nothing could have written honestly, cleared.
+            // It is the one line that explains why a machine that reported its
+            // history finished has started walking again.
+            repaired: recovery.repaired,
             complete: recovery.complete,
           });
         }
         schedulePeopleGate();
+        // NO beginSprint HERE EITHER. The startup probe establishes readiness,
+        // which is credential presence and not the ability to read; the first
+        // pass that actually completes is what claims the window.
         publishWaiting();
       });
+      // The chain, not the raw allSettled: a caller that waits on this must wait
+      // for the classification AND the reconcile and sprint decision that read it.
+      settled = settledChain;
 
-      scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
+      scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * firstRunStaggerMs));
       scheduleMaintenance();
       log.info('daemon_started', {
         sources: scheduledSources.map((s) => s.name),
         hidden: DEFAULT_DISABLED_CONNECTORS,
+        // NAMES ONLY — the logger refuses row content and this is the same
+        // discipline: what is on, never the file and never a count that could
+        // be read as owner data. It is also the line that answers "why did this
+        // source never run" without anyone opening the bundle.
+        features: enabledFeatureNames(FEATURES),
+        optional: OPTIONAL_CONNECTORS,
         maintainHour: config.retention?.maintainHour ?? '03:30',
       });
       if (scheduledSources.length === 0) {
         log.warn('no_sources', { detail: 'connectors/sources/ is empty; every source is disabled or missing' });
+        // AND SAY SO ON DISK. publishWaiting only writes when there is a next
+        // task, so the state an unreadable registry produces — nothing
+        // scheduled, ever — was also the state in which this daemon never wrote
+        // an activity file at all. The one outage the owner cannot diagnose is
+        // not the one to stay silent about.
+        publishActivity({ phase: 'waiting' });
       }
     },
     stop() {
       stopped = true;
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
+      sourceTimers.clear();
       peopleGateTimer = null;
     },
   };
@@ -1423,8 +2433,56 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
+// THE NUDGE, AND WHY ITS HANDLER IS INSTALLED BEFORE THERE IS A DAEMON TO NUDGE.
+//
+// This process is a child of the app (widget/src/Connectors.swift), and the app
+// is what knows the moment the owner finished signing in to Google or dropped
+// their LinkedIn export in. A signal is the channel that already exists between
+// a parent and its child: no listener, no file to watch, nothing added to the
+// network posture at the top of this file. The back-off in NOT_READY_REPROBE_MS
+// is what covers a daemon nobody nudged.
+//
+// SIGUSR2 rather than SIGUSR1, which node reserves for its own debugger.
+//
+// AND THE DEFAULT ACTION FOR SIGUSR2 IS TERMINATE. Between exec and the line
+// that handles it, a nudge KILLS this process — and the startup this races is
+// exactly the one the app is nudging, because both are triggered by the same
+// launch. So the handler goes in as early as there is a logger to report
+// through, and a nudge that arrives before the daemon exists is REMEMBERED
+// rather than dropped: the startup probe answers the same question, but only
+// for the readiness that existed when it ran.
+let nudgeTarget = null;
+let nudgePending = false;
+
+function runNudge(daemon, log, trigger) {
+  daemon.probeNotReady(trigger).catch((error) => {
+    log.warn('reprobe_failed', { error: safeErrorFingerprint(error) });
+  });
+}
+
+function armNudge(daemon, log) {
+  nudgeTarget = daemon;
+  announceNudgeReady();
+  if (!nudgePending) return;
+  nudgePending = false;
+  // AFTER THE STARTUP READINESS PROBE, not beside it. start()'s probe is an
+  // unresolved promise at this point, so a remembered signal reached
+  // probeNotReady with `notReady` still empty -- nothing to re-probe, a no-op,
+  // and a log line naming the nudge for a sprint decision the nudge had nothing
+  // to do with. `whenSettled` resolves once that probe has classified
+  // everything, which is the same order start() already uses for its own call.
+  daemon.whenSettled().then(() => runNudge(daemon, log, 'SIGUSR2-during-startup'));
+}
+
 if (isMain) {
   const log = createLogger();
+  process.on('SIGUSR2', () => {
+    if (nudgeTarget === null) {
+      nudgePending = true;
+      return;
+    }
+    runNudge(nudgeTarget, log, 'SIGUSR2');
+  });
   let releaseLock = null;
   let ownerWatch = null;
   try {
@@ -1517,6 +2575,20 @@ if (isMain) {
 
     const shutdown = (signal) => {
       log.info('daemon_stopping', { signal });
+      // The marker says "this pid can take a signal". Left behind, a recycled
+      // pid lets the app send SIGUSR2 to a child that has not installed its
+      // handler yet -- the silent kill the marker exists to prevent, arriving
+      // through the marker itself.
+      // ONLY IF IT IS STILL OURS. The marker is one shared path holding a pid,
+      // and a relaunch can have the incoming daemon write it before the outgoing
+      // one finishes closing its database -- a large WAL checkpoint against a
+      // cold node start is enough. Unlinking blindly there deletes the new
+      // daemon's marker, announceNudgeReady runs once so it never comes back,
+      // and every nudge is silently dropped for that daemon's whole life.
+      try {
+        const path = defaultNudgeReadyPath();
+        if (Number(readFileSync(path, 'utf8').trim()) === process.pid) unlinkSync(path);
+      } catch {}
       if (ownerWatch) clearInterval(ownerWatch);
       daemon.stop();
       state.close();
@@ -1526,6 +2598,7 @@ if (isMain) {
     };
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+    armNudge(daemon, log);
     const ownerPid = Number(process.env.INTAGLIO_CONNECTOR_OWNER_PID);
     if (Number.isInteger(ownerPid) && ownerPid > 1) {
       ownerWatch = setInterval(() => {

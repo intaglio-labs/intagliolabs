@@ -9,22 +9,24 @@
 </head>
 <body class="people">
   <div class="win">
-    <!-- Clicking a tile opens that connector's own flow as a SIDE PANEL on the
-         left (same as settings) — the popup grows leftward to make room. Shared
-         with settings via connector-tile.js. Hidden until a tile is clicked. -->
+    <!-- The "read specs" details and (formerly) a connector's own login flow
+         both use this as a SIDE PANEL / pop-over. Hidden until something
+         opens it. -->
     <div class="hint-host" id="phint"></div>
     <div class="people-main" id="pmain">
-      <div class="eyebrow">your people</div>
-      <!-- The ring: the same connector tiles as settings, with Messages fixed
-           at twelve o'clock and Contacts + Calendar clockwise beside it; the
-           remaining disconnected sources lead the rest. Populated by people.js
-           from /api/status, which also sets the --i/--n custom properties each
-           tile's position reads. -->
-      <div class="p-ring" id="pring">
-        <div class="list" id="pconn"></div>
-        <div class="p-ring-center">
-          <h1 class="p-title">unify your<br>circles</h1>
-        </div>
+      <!-- The compact header (owner, 2026-09-07): this page's actual job is
+           identity review -- initSearch finds candidate duplicate-person
+           pairs, and review mode asks "is this the same person?" -- named
+           directly, replacing the ring of connector icons around "unify your
+           circles" that said nothing about what the popup does. -->
+      <div class="p-head">
+        <h1 class="p-h-title">Same person?</h1>
+        <p class="p-h-sub">Pairs that might be the same person across your sources. You decide; nothing merges without you.</p>
+        <!-- Filled by people.js from the same /api/status data the old ring
+             read: "N of M sources connected", plus how many review pairs are
+             already waiting when that is cheaply known (a batch left over
+             from an earlier run this session) -- never a guessed number. -->
+        <div class="p-status" id="pstatus"></div>
       </div>
       <!-- Deep search: a timeframe selector, the kickoff button, and a "read
            specs" link that opens the full details as the side panel. -->
@@ -38,9 +40,14 @@
           <option value="1825">5 yr</option>
           <option value="0" selected>max</option>
         </select>
-        <button class="p-init" id="pinit">search</button>
+        <button class="p-init" id="pinit">find pairs</button>
       </div>
+      <p class="p-caption" id="pcaption"></p>
       <a href="#" class="p-specs" id="pspecs">read specs ↗</a>
+      <!-- Opens the reconnect card directly (L5 step 10). Demoted to a small
+           text link (owner, 2026-09-07): the widget bar now carries its own
+           direct reconnect button, so this is a secondary door, not primary. -->
+      <a href="#" class="p-reconnect" id="preconnect">reconnect</a>
     </div>
     <!-- Review mode: after "initialize search", the setup column above is
          hidden and this takes its place — one "is this the same person?" card
@@ -52,7 +59,6 @@
     <button class="close" id="close" title="Close">×</button>
   </div>
   <script src="bridge.js"></script>
-  <script src="connector-tile.js"></script>
   <script src="people.js"></script>
 </body>
 </html>

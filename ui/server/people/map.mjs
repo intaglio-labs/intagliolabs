@@ -348,13 +348,21 @@ function ownerRoleStamp(owner, { years = true } = {}) {
   const lifetime = [...(owner?.roles ?? new Map()).entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, role]) => `${key}:${role}`);
-  if (!years) return [...identity, ...lifetime].join('|');
+  // Same reasoning as `lifetime` above, for the sub-role override map
+  // (config.personSubRoles, /people/sub-roles): without this term, a person
+  // whose sub-roles the owner just corrected keeps whatever tag this memo
+  // last computed, because nothing else in this stamp changed and the
+  // yearCore cache below never re-derives it.
+  const subRoleStamp = [...(owner?.subRoles ?? new Map()).entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, roles]) => `${key}:${[...roles].sort().join(',')}`);
+  if (!years) return [...identity, ...lifetime, ...subRoleStamp].join('|');
   const perYear = [...(owner?.rolesByYear ?? new Map()).entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([year, roles]) => [...roles.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, role]) => `${year}:${key}:${role}`));
-  return [...identity, ...lifetime, ...perYear].join('|');
+  return [...identity, ...lifetime, ...subRoleStamp, ...perYear].join('|');
 }
 
 export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = false }) {
@@ -444,6 +452,20 @@ export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner
   return out;
 }
 
+// A bare phone number as a display name: optional leading +, then digits,
+// spaces, dashes, parens, dots, with at least 7 digits total. This is the
+// shape an automated ticketing/SMS service's contact card renders as (no
+// name in any address book, just the number itself) -- distinct from the
+// email check below, and from "name equals the key", because the number can
+// be formatted differently than however it appears in the key.
+const PHONE_LIKE_RE = /^\+?[0-9 ()\-.]+$/u;
+
+function isBarePhoneNumber(name) {
+  if (!PHONE_LIKE_RE.test(name)) return false;
+  const digitCount = (name.match(/[0-9]/gu) ?? []).length;
+  return digitCount >= 7;
+}
+
 /**
  * Does this person have a name, or only an address?
  *
@@ -454,12 +476,19 @@ export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner
  *
  * A key used as a name counts as anonymous: the projection falls back to the key
  * when it has nothing better, so `id:someone@example.com` renders as an address
- * just as surely as a bare one does.
+ * just as surely as a bare one does. The same fallback also happens with the
+ * `id:` prefix stripped (LinkedIn- and phone-keyed contacts render that way), so
+ * a name equal to either form of the key is anonymous too.
  */
 export function isAnonymousContact(person) {
   const name = String(person?.name ?? '').trim();
   if (!name) return true;
-  if (person?.key !== undefined && name === person.key) return true;
+  if (person?.key !== undefined) {
+    const key = String(person.key);
+    if (name === key) return true;
+    if (key.startsWith('id:') && name === key.slice('id:'.length)) return true;
+  }
+  if (isBarePhoneNumber(name)) return true;
   // Deliberately not a strict email regex: the question is "does this render as
   // an address to somebody reading the list", and anything with an @ and no
   // spaces does.
@@ -577,6 +606,9 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         // to the lifetime role here: that is how an early romantic period used
         // to paint every later year romantic too.
         role: e.p.rolesByYear?.[year] ?? 'friend',
+        // Investor/founder/operator filter tags -- relationship-level, like
+        // roomOnly above, since a LinkedIn title is not scoped to one year.
+        subRoles: e.p.subRoles ?? [],
         // Five chips, not three (owner, 2026-08-25) — and no separate
         // taxonomy or specifics fields: the chips ARE the topic surface, and
         // the expanded row's only extra is the model-written summary.
@@ -641,6 +673,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
         engagement,
         roomOnly: p.roomOnly === true,
         role: p.rolesByYear?.[y] ?? 'friend',
+        subRoles: p.subRoles ?? [],
         // Each person-year doc is touched once across the whole loop, so this
         // is one pass over the docs rather than one per year.
         topics: topTopics(topics.docs.get(`${p.key}|${y}`), topics.docFreq, topics.totalDocs, { limit: 5 }),
@@ -788,6 +821,7 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       // measurable from the payload rather than only from the graph behind it.
       roomOnly: p.roomOnly === true,
       role: p.role,
+      subRoles: p.subRoles ?? [],
       // The room count travels with the flag, because a consumer deciding
       // whether to draw somebody needs to tell "no contact" from "not there at
       // all" -- and `messages` alone can no longer make that distinction.

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'">
+<link rel="stylesheet" href="palette.css">
+<link rel="stylesheet" href="reconnect.css">
+</head>
+<!-- THE OFFER, WHERE THE OWNER WILL ACTUALLY MEET IT.
+
+     The Downloads watcher used to say "found your export" with a system
+     notification and nothing else, and on the Mac this was walked on that
+     produced nothing at all: three archives found, three offers recorded, no
+     banner, and nothing in the system log to explain it. A feature whose only
+     output is a notification has no output on a Mac that does not deliver one.
+
+     So this panel is the offer. It borrows reconnect.css because it is the same
+     shape of thing -- one small card, a fact, and a decision -- and because a
+     second panel style would be a new idea where there is no new idea.
+
+     It names the file, the folder and the date, because the owner has to be
+     able to recognise their own download before saying yes: a year-old archive
+     in Downloads imports just as readily as this morning's, and the connector
+     would take a year-old graph as current. Every value lands via textContent;
+     a filename off the disk never passes through markup. -->
+<body class="reconnect">
+  <div class="win">
+    <div class="rc-head">
+      <span class="rc-title">linkedin export</span>
+      <button class="rc-close" id="exClose" title="Close">✕</button>
+    </div>
+    <div class="ex-body">
+      <p class="ex-lead" id="exLead">found your linkedin export</p>
+      <p class="ex-file" id="exFile"></p>
+      <p class="ex-where" id="exWhere"></p>
+      <p class="ex-note" id="exNote" hidden></p>
+    </div>
+    <div class="rc-actions ex-actions">
+      <button id="exTake">import it</button>
+      <button id="exSkip">not this one</button>
+    </div>
+  </div>
+  <script src="bridge.js"></script>
+  <script src="export.js"></script>
+</body>
+</html>

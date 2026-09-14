@@ -29,8 +29,14 @@ import { secretResponse } from './lib/secretApi.mjs';
 import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } from './lib/bridge.mjs';
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
-import { readStatus } from './lib/status.mjs';
-import { listGoogleClients } from '../connectors/lib/googleClients.mjs';
+import { featureSetFor, readStatus, visibleStatusRows } from './lib/status.mjs';
+// The rule for how much of a spawned helper's stderr may be shown to the owner
+// lives beside the rule's reasoning, and is unit-tested there.
+import { helperDiagnostic } from './lib/helperSays.mjs';
+import {
+  defaultGoogleClient, listGoogleClients, unusableClientMessage,
+} from '../connectors/lib/googleClients.mjs';
+import { googleProbe } from './lib/googleProbe.mjs';
 import { sameOrigin } from './lib/origin.mjs';
 import { bearerAuthorized, statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
@@ -236,6 +242,7 @@ const server = createServer(async (req, res) => {
   }
 });
 
+
 async function handleRequest(req, res) {
   if (!ALLOWED_HOSTS.has(req.headers.host ?? '')) {
     send(res, 403, 'Forbidden host.', 'text/plain; charset=utf-8');
@@ -324,10 +331,37 @@ async function handleRequest(req, res) {
       // argument, and an unregistered name would reach the helper as one.
       // Names are [a-z0-9-] by construction there, but checking membership is
       // the guarantee, not the character class.
-      const asked = typeof body.client === 'string' ? body.client : 'default';
-      const known = listGoogleClients().some((c) => c.name === asked);
-      if (!known && asked !== 'default') {
+      //
+      // "default" IS NOT A CLIENT NAME HERE, it is "whichever one this
+      // install should use". On a machine that predates named clients it
+      // still means the legacy pair; on a fresh install whose only credential
+      // is the one widget/build.sh staged into the bundle it means that one.
+      // Resolving it BEFORE the membership check is what stops the button
+      // from spawning a helper that exits without printing — the 502 below is
+      // honest, but it is the answer to a question nobody had to ask.
+      let asked = typeof body.client === 'string' && body.client ? body.client : 'default';
+      if (asked === 'default') {
+        const picked = defaultGoogleClient();
+        if (picked) asked = picked.name;
+      }
+      const row = listGoogleClients().find((c) => c.name === asked);
+      if (row === undefined && asked !== 'default') {
         send(res, 400, JSON.stringify({ error: `no OAuth client named "${asked}"` }),
+          'application/json; charset=utf-8');
+        return;
+      }
+      // AND A CLIENT THE READER REFUSES IS REFUSED HERE, WITH THE REASON
+      // (round-6 finding 4).
+      //
+      // `unusable` is the sentence googleClients.mjs composes for a credential
+      // it will not read -- the mode, the file, and the fix. Without this the
+      // name passed the membership test, the helper was spawned, it printed
+      // that sentence on a stderr this server discards, exited, and the owner
+      // was told "check that the Google client credential is installed" about a
+      // credential that IS installed and merely 0644. The opposite of the
+      // message the machine had already written.
+      if (row?.unusable) {
+        send(res, 400, JSON.stringify({ error: unusableClientMessage(asked, row.unusable) }),
           'application/json; charset=utf-8');
         return;
       }
@@ -362,10 +396,22 @@ async function handleRequest(req, res) {
     // helper logs "waiting for approval" first, and pinning a line number
     // would break the moment anyone adds a line above it.
     try {
+      // STDERR IS READ, NOT DISCARDED (round-6 finding 4). Everything the
+      // helper refuses to start for -- an unusable credential, a half-present
+      // legacy pair, no client on the machine at all -- it says through fail(),
+      // which prints one `gcal-auth: ` line on stderr and exits. Ignoring that
+      // stream left this server guessing, and its guess named the one cause
+      // that was ruled out by the owner having a credential at all.
       const child = spawn(process.execPath, [scriptPath, '--print-url', '--client', client], {
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: process.env,
       });
+      let said = '';
+      child.stderr.setEncoding('utf8');
+      // Kept draining for the life of the child, and bounded: an unread pipe
+      // fills and blocks the helper mid-sign-in, and an unbounded buffer is a
+      // process that talks its way into this server's memory.
+      child.stderr.on('data', (d) => { if (said.length < 4_096) said += d; });
       const url = await new Promise((resolve) => {
         let buf = '';
         // If the helper cannot start — a missing client credential is the
@@ -384,7 +430,8 @@ async function handleRequest(req, res) {
       child.unref();
       if (!url) {
         send(res, 502, JSON.stringify({
-          error: 'the authorization helper did not start; check that the Google client credential is installed',
+          error: helperDiagnostic(said)
+            ?? 'the authorization helper did not start; check that the Google client credential is installed',
         }), 'application/json; charset=utf-8');
         return;
       }
@@ -393,6 +440,49 @@ async function handleRequest(req, res) {
       send(res, 500, JSON.stringify({ error: 'could not start the authorization helper' }),
         'application/json; charset=utf-8');
     }
+    return;
+  }
+
+  // /api/google-probe — DID THE GRANT ACTUALLY BUY A READ?
+  //
+  // A token file on disk is not the question. Consent can complete and the
+  // read still fail: the project can be over its restricted-scope user cap,
+  // gmail.readonly can be unticked on the consent screen while calendar stays
+  // on, or the grant can be revoked afterwards. In every one of those the
+  // token exists, /api/status says `connected`, and the mail connector then
+  // reads nothing — which is the shape onboarding's "your mail and calendar"
+  // screen exists to catch BEFORE the owner walks away believing it worked.
+  //
+  // So this does the smallest real read there is: one messages.list with
+  // maxResults=1, per live account, and reports what Google said.
+  //
+  // COUNTS AND STATUSES ONLY. No account address, no message id, no header,
+  // no snippet, nothing from the mailbox. The failure `reason` is lifted from
+  // Google's own error body through a strict allowlist pattern and bounded —
+  // it is a machine token like insufficientPermissions, and the whole point of
+  // extracting it rather than passing the message through is that the message
+  // carries the account's email address.
+  //
+  // Native-only, like every other /api route here: Origin-less and bearer.
+  // The egress is already declared — ops/EGRESS.json's www.googleapis.com row
+  // names reading the owner's mailbox under gmail.readonly, and this reaches
+  // that host with the same client, the same scope and strictly less data than
+  // connectors/sources/mail.mjs already fetches.
+  if (url.pathname === '/api/google-probe') {
+    if (req.headers.origin !== undefined) {
+      send(res, 403, JSON.stringify({ error: 'browser channel refused' }),
+        'application/json; charset=utf-8');
+      return;
+    }
+    if (!bearerAuthorized(req.headers.authorization)) {
+      send(res, 401, JSON.stringify({ error: 'unauthorized' }), 'application/json; charset=utf-8');
+      return;
+    }
+    if (req.method !== 'GET') {
+      send(res, 405, JSON.stringify({ error: 'GET only' }), 'application/json; charset=utf-8');
+      return;
+    }
+    send(res, 200, JSON.stringify(await googleProbe()), 'application/json; charset=utf-8');
     return;
   }
 
@@ -703,7 +793,11 @@ async function handleRequest(req, res) {
     return;
   }
 
-  send(res, 200, renderConnectPage(readStatus(), { token }));
+  // THE SAME SHELF THE WIDGET DRAWS. This page used to render readStatus() raw,
+  // so a build that installs no bridge still offered seven bridge logins here
+  // and LinkedIn appeared twice under one name. visibleStatusRows is the one
+  // place those rules live; see connect/lib/status.mjs.
+  send(res, 200, renderConnectPage(visibleStatusRows(readStatus(), featureSetFor()), { token }));
 }
 
 server.listen(PORT, '127.0.0.1', () => {

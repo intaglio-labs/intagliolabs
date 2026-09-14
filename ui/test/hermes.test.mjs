@@ -29,6 +29,15 @@ import {
 } from '../server/hermes.mjs';
 import { refreshPeopleProjection } from '../server/people/projection.mjs';
 
+// HERMETIC /stats. hermes resolves ~/.hazlie/features.json at request time, so
+// the feature assertions below were assertions about the DEVELOPER's override:
+// `{"bridges":true}` there — the escape hatch the registry deliberately offers —
+// turned them red on that machine and nowhere else. 'none' means the shipped
+// ops/features.json and nothing merged over it. It is set at module scope, not
+// inside the test, because the registry sits behind a short TTL cache that an
+// earlier /stats call in this file has already warmed.
+process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
+
 const TEST_LLAMA_KEY = 'a'.repeat(64);
 const TEST_BEARER_TOKEN = 'c'.repeat(64);
 const ALLOWED_ORIGIN = 'http://localhost:8081';
@@ -67,6 +76,13 @@ before(async () => {
     llamaApiKey: TEST_LLAMA_KEY,
     bearerToken: TEST_BEARER_TOKEN,
     allowedOrigins: ALLOWED_ORIGIN,
+    // The lifecycle tests below assert people/person_event_links are empty in
+    // the instant after /admin/people/clear, /admin/retain, /admin/purge and
+    // /admin/delete-entities respond -- an assertion the eager background
+    // rebuild (schedulePeopleRebuild) makes racy by design, since it runs on
+    // setImmediate rather than waiting for anyone to ask. Those tests opt out
+    // of the new default here; the feature itself has its own dedicated tests.
+    peopleProjectionAutoRebuild: false,
   });
   adminBase = `http://127.0.0.1:${admin.port}`;
 });
@@ -111,7 +127,8 @@ test('stats requires authentication and reports the row count', async () => {
   assert.equal((await fetch(`${base}/stats`)).status, 401);
   const res = await authedGet('/stats');
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), {
+  const body = await res.json();
+  assert.deepEqual({ rows: body.rows, memory: body.memory }, {
     rows: 0,
     // Ingesting rows and being able to ANSWER about them are different things,
     // and reporting only the first is what made a half-built memory look
@@ -129,6 +146,16 @@ test('stats requires authentication and reports the row count', async () => {
       runs: 0, done: 0, pending: 0, total: 0, running: false, state: 'idle',
     },
   });
+  // peopleProjection is a live read of people_projection_state plus the
+  // in-process rebuild flag (see schedulePeopleRebuild). An empty context db
+  // has nobody to project, so peopleCount stays 0 whether or not the
+  // post-boot rebuild has run by the time this fetch lands.
+  assert.ok(body.peopleProjection && typeof body.peopleProjection === 'object');
+  assert.equal(body.peopleProjection.peopleCount, 0);
+  assert.equal(typeof body.peopleProjection.projectedRevision, 'number');
+  assert.equal(typeof body.peopleProjection.sourceRevision, 'number');
+  assert.equal(typeof body.peopleProjection.rebuilding, 'boolean');
+  assert.equal(body.peopleProjection.lastRebuildError, null);
 });
 
 test('stats reports work still to do as "reading", not as an empty memory', async () => {
@@ -170,6 +197,76 @@ test('stats reports work still to do as "reading", not as an empty memory', asyn
   }
 });
 
+const pollStats = async (port, predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) => {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  for (;;) {
+    const res = await fetch(`http://127.0.0.1:${port}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    });
+    last = await res.json();
+    if (predicate(last)) return last;
+    if (Date.now() >= deadline) {
+      throw new Error(`peopleProjection never satisfied the predicate: ${JSON.stringify(last.peopleProjection)}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+};
+
+test('a fresh people projection rebuilds itself after hermes starts, with nobody opening the People page', async () => {
+  // Its OWN store and server, same reasoning as the test above: this one
+  // needs real imessage rows dirtying source_revision, seeded before boot.
+  const rebuildDb = join(dir, 'rebuild-boot.db');
+  const seed = openDb(rebuildDb);
+  insertRows(seed, [
+    { ts: Date.now(), source: 'imessage', entity_id: 'i:1', text: 'hi',
+      meta: { chat_handle: '+15550100', is_from_me: false } },
+  ]);
+  seed.close();
+
+  const srv = await start({
+    port: 0, dbPath: rebuildDb, llamaApiKey: TEST_LLAMA_KEY, bearerToken: TEST_BEARER_TOKEN,
+  });
+  try {
+    const stats = await pollStats(srv.port, (s) => s.peopleProjection?.peopleCount > 0);
+    assert.ok(stats.peopleProjection.projectedRevision >= 0);
+    assert.equal(stats.peopleProjection.lastRebuildError, null);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('/admin/people/clear triggers an eager rebuild, not a wait for the People page', async () => {
+  const rebuildDb = join(dir, 'rebuild-clear.db');
+  const seed = openDb(rebuildDb);
+  insertRows(seed, [
+    { ts: Date.now(), source: 'imessage', entity_id: 'i:1', text: 'hi',
+      meta: { chat_handle: '+15550100', is_from_me: false } },
+  ]);
+  seed.close();
+
+  const srv = await start({
+    port: 0, dbPath: rebuildDb, llamaApiKey: TEST_LLAMA_KEY, bearerToken: TEST_BEARER_TOKEN,
+  });
+  try {
+    // Let the post-boot rebuild land first, so the clear below is measured
+    // against a known-populated projection rather than racing the boot one.
+    await pollStats(srv.port, (s) => s.peopleProjection?.peopleCount > 0);
+
+    const cleared = await fetch(`http://127.0.0.1:${srv.port}/admin/people/clear`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(cleared.status, 200);
+
+    const stats = await pollStats(srv.port, (s) => s.peopleProjection?.peopleCount > 0);
+    assert.ok(stats.peopleProjection.projectedRevision >= 0, 'rebuilt without anyone opening the People page');
+  } finally {
+    await srv.close();
+  }
+});
+
 // --- the new authorization rule -------------------------------------------
 // No test named the old absent-Origin rule; four tests silently DEPENDED on it,
 // which is how the hole survived. These four name it.
@@ -187,6 +284,46 @@ test('an Origin-less request with no token is rejected', async () => {
 test('an Origin-less request with a valid bearer token is accepted', async () => {
   const res = await authedGet('/stats');
   assert.equal(res.status, 200);
+});
+
+// WHAT THIS INSTALL BELIEVES IS ON, asked rather than inspected. Three processes
+// read ops/features.json, and the owner override at ~/.hazlie/features.json
+// means the shipped file is not the answer — so /stats is where the retest gets
+// to ask. Live rather than a source scan: the point is that the loader really
+// runs inside hermes' process and reaches the wire.
+test('/stats echoes the effective feature set', async () => {
+  const body = await (await authedGet('/stats')).json();
+  assert.ok(body.features, '/stats must carry the feature set');
+  // Pinned against the shipped registry, so this fails if a non-card surface is
+  // switched on and nobody notices it got as far as the API.
+  assert.equal(body.features.chat, false);
+  assert.equal(body.features.bridges, false);
+  assert.equal(body.features.voice, false);
+  assert.equal(body.features.distiller, false);
+  // The three states survive the JSON round trip. Flattening 'optional' here
+  // would make an offered source indistinguishable from a dormant one.
+  assert.equal(body.features.connectors.imessage, true);
+  assert.equal(body.features.connectors.whatsapp, 'optional');
+  assert.equal(body.features.connectors.photos, false);
+
+  // WHOSE VIEW IT IS, on the wire. hermes re-reads the registry on a TTL; the
+  // app caches it for its process lifetime and the daemon at module load, so a
+  // flag flipped since they started is one nothing else is acting on yet. A
+  // retest reading this endpoint from outside the box cannot see that from the
+  // flags alone, and used to be left to assume it.
+  assert.equal(typeof body.features.readAt, 'number', 'the feature set must say when it was read');
+  assert.ok(body.features.readAt <= Date.now());
+  assert.match(body.features.note, /app and daemon apply flags at their next restart/u);
+  // And the note must not claim a read discipline hermes does not have.
+  assert.match(body.features.note, /TTL/u);
+  assert.equal(body.features.computedAt, undefined, 'readAt is the one name for that clock');
+
+  // And the registry comes from the same short-TTL cache as the heavy blocks,
+  // so a polled /stats does not re-read two files from disk every time. Equal
+  // readAt across two calls is the whole claim; a per-request read would move
+  // it.
+  const again = await (await authedGet('/stats')).json();
+  assert.equal(again.features.readAt, body.features.readAt, 'the registry was re-read inside the TTL');
 });
 
 test('an Origin-less request with a wrong bearer token is rejected', async () => {
@@ -288,7 +425,7 @@ test('storage is hardened so deleted text does not survive in the free list', ()
       String(db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(),
       'delete'
     );
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 11);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 14);
   } finally {
     db.close();
     rmSync(sandbox, { recursive: true, force: true });
@@ -302,7 +439,7 @@ test('in-memory databases are hardened too, minus what SQLite will not allow', (
   const db = openDb(':memory:');
   try {
     assert.equal(Number(db.prepare('PRAGMA secure_delete').get().secure_delete), 1);
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 11);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 14);
   } finally {
     db.close();
   }
@@ -964,7 +1101,7 @@ test('a v1 database migrates in place to the current version with its rows prese
 
     const db = openDb(dbPath);
     try {
-      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 11);
+      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 14);
       const columns = db
         .prepare("SELECT name FROM pragma_table_info('context')")
         .all()
@@ -1507,4 +1644,142 @@ test('force rebuilds even when the corpus has not moved', async () => {
   await adminPost('/admin/episodes/rebuild', {});
   const forced = await (await adminPost('/admin/episodes/rebuild', { force: true })).json();
   assert.equal(forced.skipped, undefined);
+});
+
+// --- GET /stats' memoised status blocks ---------------------------------------
+//
+// The incident these encode: four consecutive GET /stats on the live machine
+// took 15.9s, 9.1s, 6.1s and 1.0s while hermes was at 98% CPU warming the
+// people core after an install, and the connectors daemon -- whose startup
+// probe gave /stats 4s and treats a FAIL as fatal -- exited and stopped all
+// ingestion. sweepStatus (795ms) and lookupStatus (637ms) were the cost; both
+// walk every person in the house, on every request, on a route that is polled.
+//
+// The probes below stand in for those two walks. They BLOCK, using Atomics.wait
+// rather than a promise, because that is what the real ones are: synchronous
+// node:sqlite reads on the one thread this process has. A test that awaited a
+// timer instead would pass against an implementation that still recomputed per
+// request.
+const blockFor = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+const statsServer = async (opts) => {
+  const statsDir = mkdtempSync(join(tmpdir(), 'hermes-stats-'));
+  const srv = await start({
+    port: 0,
+    dbPath: join(statsDir, 'context.db'),
+    llamaApiKey: TEST_LLAMA_KEY,
+    bearerToken: TEST_BEARER_TOKEN,
+    ...opts,
+  });
+  const read = async () => {
+    const started = Date.now();
+    const body = await (await fetch(`http://127.0.0.1:${srv.port}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    })).json();
+    return { body, ms: Date.now() - started };
+  };
+  const close = async () => {
+    await srv.close();
+    rmSync(statsDir, { recursive: true, force: true });
+  };
+  return { read, close };
+};
+
+test('/stats serves the expensive blocks from cache inside the TTL', async () => {
+  const SLOW_MS = 2000;
+  let sweepCalls = 0;
+  let lookupCalls = 0;
+  const s = await statsServer({
+    statusProbes: {
+      sweep: () => { sweepCalls += 1; blockFor(SLOW_MS); return { scope: 7 }; },
+      lookup: () => { lookupCalls += 1; return { scope: 9 }; },
+    },
+  });
+  try {
+    const first = await s.read();
+    const second = await s.read();
+
+    assert.equal(sweepCalls, 1, 'the second /stats recomputed the sweep walk');
+    assert.equal(lookupCalls, 1, 'the second /stats recomputed the lookup walk');
+    assert.ok(
+      first.ms >= SLOW_MS - 100,
+      `the first /stats must actually pay the walk; it took ${first.ms}ms`
+    );
+    assert.ok(
+      second.ms < 50,
+      `the second /stats took ${second.ms}ms — the cache is not being served`
+    );
+
+    assert.equal(first.body.sweep.scope, 7);
+    assert.equal(second.body.sweep.scope, 7);
+    assert.equal(second.body.lookup.scope, 9);
+    assert.equal(typeof first.body.sweep.computedAt, 'number', 'each cached block carries computedAt');
+    assert.equal(
+      second.body.sweep.computedAt, first.body.sweep.computedAt,
+      'computedAt moved, so the block was recomputed'
+    );
+    assert.equal(second.body.sweep.staleMs, undefined, 'a block inside its TTL is not stale');
+
+    // The live blocks stay live: they are counts and state reads, and features
+    // is read per request on purpose.
+    assert.equal(typeof second.body.rows, 'number');
+    assert.ok(second.body.features, 'the effective feature set is still echoed live');
+  } finally {
+    await s.close();
+  }
+});
+
+test('/stats past the TTL answers from the stale block and refreshes behind it', async () => {
+  const SLOW_MS = 300;
+  let sweepCalls = 0;
+  const s = await statsServer({
+    statsCacheTtlMs: 50,
+    statusProbes: {
+      sweep: () => { sweepCalls += 1; blockFor(SLOW_MS); return { scope: sweepCalls }; },
+    },
+  });
+  try {
+    const first = await s.read();
+    await new Promise((r) => setTimeout(r, 80));
+    const stale = await s.read();
+
+    assert.ok(
+      stale.ms < 50,
+      `an expired block must not be recomputed in the request; it took ${stale.ms}ms`
+    );
+    assert.equal(stale.body.sweep.scope, 1, 'the last value is what gets served');
+    assert.equal(stale.body.sweep.computedAt, first.body.sweep.computedAt);
+    assert.ok(stale.body.sweep.staleMs >= 50, 'and it says how old it is');
+
+    // The refresh it scheduled lands on its own, behind the answered request.
+    const deadline = Date.now() + 5000;
+    while (sweepCalls < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sweepCalls, 2, 'the expired block was never refreshed');
+
+    const fresh = await s.read();
+    assert.equal(fresh.body.sweep.scope, 2);
+    assert.ok(fresh.body.sweep.computedAt > first.body.sweep.computedAt);
+    assert.equal(fresh.body.sweep.staleMs, undefined);
+  } finally {
+    await s.close();
+  }
+});
+
+test('a status block that throws nulls itself and is not retried every request', async () => {
+  let calls = 0;
+  const s = await statsServer({
+    statusProbes: {
+      sweep: () => { calls += 1; throw new Error('no such table: person_sweep_cursor'); },
+    },
+  });
+  try {
+    const first = await s.read();
+    const second = await s.read();
+    assert.equal(first.body.sweep, null, 'a pre-migration table must never take /stats down');
+    assert.equal(second.body.sweep, null);
+    assert.equal(calls, 1, 'a throwing status must not be re-thrown on every request');
+    assert.equal(typeof second.body.rows, 'number', 'and the rest of /stats still answers');
+  } finally {
+    await s.close();
+  }
 });

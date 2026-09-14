@@ -319,6 +319,26 @@ const HELP = {
   // ~~linkedin: request the export, unzip Connections.csv into
   // ~/.hazlie/imports/linkedin.~~ Gone with the export (owner, 2026-08-25):
   // LinkedIn logs in through the bridge now, like every other social source.
+  //
+  // BACK, under the EXPORT row's id, and not as a reversal of that call. The
+  // bridge tile belongs to the `bridges` feature; this belongs to
+  // `connectors.linkedin`, which is true whatever bridges is doing — so
+  // connectors/sources/linkedin.mjs is scheduled and polling the import folder
+  // on every install, and its row's Connect button pointed at a topic that did
+  // not exist ("No help for that.", a 404). The folder is the whole
+  // instruction: nothing else on this page asks for a file by hand.
+  'linkedin-export': {
+    title: 'Import your LinkedIn export',
+    body: [
+      'LinkedIn will not let anything read your connections for you, so this one is a file you fetch once. On LinkedIn: <em>Settings</em> → <em>Data privacy</em> → <em>Get a copy of your data</em> → tick <em>Connections</em>, then <em>Request archive</em>.',
+      'It arrives by email, usually within a few hours. Unzip it and put <em>Connections.csv</em> in this folder:',
+    ],
+    code: '~/.hazlie/imports/linkedin',
+    after: [
+      'That is the whole import. <em>messages.csv</em> from the same archive is read too if you put it there, and skipped without complaint if you do not.',
+      'Nothing is uploaded and nothing is requested from LinkedIn — the file you already downloaded is the only source this reads.',
+    ],
+  },
   files: {
     title: 'Your cloud folders',
     body: [

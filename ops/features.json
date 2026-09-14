@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "features": {
+    "chat": false,
+    "voice": false,
+    "bridges": false,
+    "timeline": false,
+    "constellation": false,
+    "distiller": false,
+    "frontierHandoff": false,
+    "search": false,
+    "connectors": {
+      "imessage": true,
+      "mail": true,
+      "calendar": true,
+      "contacts": true,
+      "linkedin": true,
+      "whatsapp": "optional",
+      "granola": "optional",
+      "notes": false,
+      "files": false,
+      "photos": false,
+      "notion": false,
+      "oura": false,
+      "health": false
+    }
+  }
+}

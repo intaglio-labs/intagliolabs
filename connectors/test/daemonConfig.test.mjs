@@ -1,17 +1,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
+// THIS FILE PINS POLICY, SO IT MUST NOT READ THE DEVELOPER'S MACHINE.
+//
+// daemon.mjs resolves the feature registry at MODULE SCOPE, and the owner
+// override is ~/.hazlie/features.json — so the assertions below on
+// DEFAULT_DISABLED_CONNECTORS and OPTIONAL_CONNECTORS were a function of $HOME.
+// A developer with `{"bridges":true}` in their override saw this file go red
+// for something they had deliberately switched on for an afternoon, and a
+// developer with `{"connectors":{"notes":true}}` saw the dormancy loop fail.
+// 'none' means the shipped ops/features.json and nothing else.
+//
+// Set before the import and therefore before daemon.mjs runs, which is what the
+// dynamic import below is for: a static import is hoisted above this line.
+process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
+const {
   CONNECTOR_HERMES_SOURCE,
   CONNECTOR_NAMES,
   DEFAULT_DISABLED_CONNECTORS,
   observePortalJoinRate,
+  OPTIONAL_CONNECTORS,
   portalJoinMsPerRoom,
   RETENTION_SOURCES,
   sourceRetryDelay,
   validateConfig,
-} from '../daemon.mjs';
-import { msUntilIdleWindow } from '../retain.mjs';
-import { parseArgs, purgeHermesSources } from '../run.mjs';
+} = await import('../daemon.mjs');
+// Dynamic for the same reason, and not only for tidiness: both of these import
+// daemon.mjs themselves, so a static import here would evaluate it — registry
+// and all — before the line above ran.
+const { msUntilIdleWindow } = await import('../retain.mjs');
+const { holdDaemonLockForPurge, parseArgs, purgeHermesSources } = await import('../run.mjs');
 
 test('an empty config is valid — every section is optional until its source lands', () => {
   assert.deepEqual(validateConfig({}), {});
@@ -95,9 +112,34 @@ test('the connector roster and its hermes-source mapping stay in lockstep', () =
   }
 });
 
+// ~~assert.deepEqual(DEFAULT_DISABLED_CONNECTORS, ['oura', 'photos', 'files',
+// 'notion', 'notes'])~~ — the list is DERIVED from ops/features.json now (see
+// ops/FEATURES.md), so this pins the RULE rather than a transcription of the
+// answer. connectors/test/features.test.mjs pins the registry's own defaults;
+// what matters here is that the daemon honours all three connector states, and
+// that `matrix` follows the bridges feature, which no connector key expresses.
 test('hidden Settings integrations are inert in the daemon by default', () => {
-  assert.deepEqual(DEFAULT_DISABLED_CONNECTORS, ['oura', 'photos', 'files', 'notion', 'notes']);
+  for (const name of ['oura', 'photos', 'files', 'notion', 'notes']) {
+    assert.ok(DEFAULT_DISABLED_CONNECTORS.includes(name),
+      `${name} is dormant in the registry and must never be scheduled`);
+  }
+  // Matrix is the transport the seven bridges share, not a source anyone
+  // connects. With `bridges` off, scheduling it means polling a Synapse that
+  // provisioning no longer installs.
+  assert.ok(DEFAULT_DISABLED_CONNECTORS.includes('matrix'));
+  // THE DISCRIMINATING HALF: 'optional' is not `false`. Collapsing the two would
+  // disable WhatsApp and Granola permanently, leaving the owner's Connect press
+  // with nothing to turn on.
+  for (const name of ['whatsapp', 'granola']) {
+    assert.ok(!DEFAULT_DISABLED_CONNECTORS.includes(name), `${name} is offered, not disabled`);
+    assert.ok(OPTIONAL_CONNECTORS.includes(name));
+  }
+  for (const name of ['imessage', 'mail', 'calendar', 'contacts', 'linkedin']) {
+    assert.ok(!DEFAULT_DISABLED_CONNECTORS.includes(name),
+      `${name} is what the reconnection card is built from`);
+  }
   for (const name of DEFAULT_DISABLED_CONNECTORS) assert.ok(CONNECTOR_NAMES.includes(name));
+  for (const name of OPTIONAL_CONNECTORS) assert.ok(CONNECTOR_NAMES.includes(name));
 });
 
 test('a source can request a bounded urgent retry without changing its normal interval', () => {
@@ -144,6 +186,32 @@ test('a Contacts purge clears Hermes derived People state despite having no corp
   assert.deepEqual(result, { deleted: 0, maintained: false });
 });
 
+// A PURGE THAT RACES THE SCHEDULER LOOKS LIKE A PURGE THAT WORKED. On
+// 2026-09-12 the mail purge emptied hermes and the cursors went with it; what
+// came back pointed past a corpus that was gone. Whether the daemon rewrote
+// them or they were never deleted, the same interlock answers both: a live
+// daemon's lock refuses the run, and holding it for the duration stops one
+// starting halfway through.
+test('a purge refuses to run while the daemon owns the cursor database', () => {
+  assert.throws(
+    () => holdDaemonLockForPurge({ acquire: () => null, lockPath: () => '/tmp/daemon.lock' }),
+    (error) => {
+      assert.match(error.message, /\/tmp\/daemon\.lock/u, 'say which lock, so it can be looked at');
+      assert.match(error.message, /stop it before purging/u, 'and what to do about it');
+      return true;
+    }
+  );
+});
+
+test('and holds that lock itself for the length of the purge', () => {
+  let released = 0;
+  const release = holdDaemonLockForPurge({ acquire: () => () => { released += 1; } });
+  assert.equal(typeof release, 'function',
+    'the caller must be handed the release, or the lock outlives the run');
+  release();
+  assert.equal(released, 1);
+});
+
 test('msUntilIdleWindow lands on the next local occurrence, always in the future', () => {
   const now = new Date(2026, 7, 19, 10, 0, 0).getTime(); // 10:00 local
   assert.equal(msUntilIdleWindow('11:30', now), 90 * 60_000); // later today
@@ -161,4 +229,50 @@ test('run.mjs argument parsing is a closed set: sources, flags, exclusivity', ()
   assert.throws(() => parseArgs([]), /usage/);
   assert.throws(() => parseArgs(['mail', '--force']), /unknown flag/);
   assert.throws(() => parseArgs(['mail', '--purge', '--backfill']), /mutually exclusive/);
+});
+
+test('mail.historyPagesPerPass is a recognised key, bounded, and inheritable per account', () => {
+  // The daemon refused to start on a real machine after this key was set in
+  // config before it was on the allowlist -- a strict allowlist is right, and
+  // this pins that the key the mail source reads is also the key the daemon
+  // accepts.
+  const ok = { mail: { historyPagesPerPass: 12, accounts: [{ user: 'a@example.com', historyPagesPerPass: 3 }] } };
+  assert.deepEqual(validateConfig(ok), ok);
+  assert.throws(() => validateConfig({ mail: { historyPagesPerPass: 0 } }), /historyPagesPerPass/u);
+  assert.throws(() => validateConfig({ mail: { historyPagesPerPass: 51 } }), /historyPagesPerPass/u);
+});
+
+test('per-account mail overrides are range-checked, not merely allowlisted', () => {
+  // MAIL_ACCOUNT_KEYS admitted historyPagesPerPass and maxBodyBytes and then
+  // nothing checked the VALUE, while accountSettings prefers the per-account
+  // entry over the top-level one -- so a per-account override could ask for a
+  // million pages (a pass that never ends) or be a non-number (page < NaN is
+  // false, so that account's history silently stops advancing forever), on a
+  // config the daemon accepted at boot. A bounded top-level key whose
+  // per-account twin is unbounded is not a bounded key.
+  const okAccounts = {
+    mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: 3, maxBodyBytes: 65_536 }] },
+  };
+  assert.deepEqual(validateConfig(okAccounts), okAccounts);
+
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: 1_000_000 }] } }),
+    /accounts\[0\]\.historyPagesPerPass/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: 0 }] } }),
+    /accounts\[0\]\.historyPagesPerPass/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: {} }] } }),
+    /accounts\[0\]\.historyPagesPerPass/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', maxBodyBytes: 12 }] } }),
+    /accounts\[0\]\.maxBodyBytes/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', maxBodyBytes: '65536' }] } }),
+    /accounts\[0\]\.maxBodyBytes/u
+  );
 });

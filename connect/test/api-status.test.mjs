@@ -185,3 +185,54 @@ test('the route is reachable above the /c/ gate and end-to-end correct', async (
     assert.deepEqual(cors, [], 'no CORS header may ever appear on this channel');
   }
 });
+
+// THE ONE ACTIONABLE SENTENCE ON THE MACHINE HAS TO REACH THE OWNER
+// (round-6 finding 4).
+//
+// connectors/lib/googleClients.mjs composes a refusal naming the file, its mode
+// and the fix -- and every route to a person ran through a pipe this server
+// discarded. ops/gcal-auth.mjs printed it on stderr and exited; the spawn here
+// was `stdio: ['ignore','pipe','ignore']`; the owner got "check that the Google
+// client credential is installed" about a credential that is installed and
+// merely 0644. The opposite of what the machine knew.
+//
+// Two ways it reaches them now, and this is the first: a client the reader
+// refuses is refused HERE, before anything is spawned, with the reason.
+test('a credential the reader refuses is refused with its own reason, not a generic 502', async (t) => {
+  const home = fakeHome(t);
+  const secrets = join(home, '.hazlie', 'secrets');
+  // The failing input from the finding: the owner's own client, left
+  // world-readable by a restore or an rsync under umask 022.
+  const clientPath = join(secrets, 'google-client-work.json');
+  writeFileSync(
+    clientPath,
+    JSON.stringify({ client_id: 'WORK-ID', client_secret: 'WORK-SECRET' }),
+    { mode: 0o644 }
+  );
+  chmodSync(clientPath, 0o644);
+  await startServer(t, home);
+
+  // No client named in the body, so the route resolves "default" through the
+  // registry -- and `work` is the only client this machine has.
+  const out = await startGoogleAuth({ headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(out.status, 400, `expected a refusal, got ${out.status}: ${out.body}`);
+  const { error } = JSON.parse(out.body);
+  assert.match(error, /google-client-work\.json/u, 'the file the owner has to fix');
+  assert.match(error, /group or other users/u, 'and what is wrong with it');
+  assert.match(error, /0600/u, 'and the fix');
+  assert.doesNotMatch(error, /WORK-SECRET|WORK-ID/u, 'and never the credential itself');
+});
+
+test('a helper that will not start says why, in the body the page paints', async (t) => {
+  // The second way: nothing on this machine to sign in with at all. The helper
+  // is spawned, fails, and prints its own sentence -- which is more specific
+  // than the generic one this route used to answer with, and names what to do.
+  const home = fakeHome(t);
+  await startServer(t, home);
+  const out = await startGoogleAuth({ headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(out.status, 502, `expected the helper to fail, got ${out.status}: ${out.body}`);
+  const { error } = JSON.parse(out.body);
+  assert.match(error, /no Google OAuth client is installed/u,
+    'the helper said this on a stderr the server used to discard');
+  assert.doesNotMatch(error, /^gcal-auth: /u, 'the process prefix is not a sentence for an owner');
+});

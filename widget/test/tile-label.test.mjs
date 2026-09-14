@@ -95,15 +95,15 @@ test('a bridge press starts the login without a card', () => {
   );
 });
 
-test('the People ring shows the wait on the tile, as Settings does', () => {
-  const peopleSrc = readFileSync(join(WIDGET, 'ui/people.js'), 'utf8');
-  assert.match(peopleSrc, /onBusy: \(on\) => row\.classList\.toggle\('logging-in', on\)/u);
-  // The spinner rule is unscoped in palette.css, which people.html also loads —
-  // so the ring gets the same look without a second copy of it.
+// ~~the People ring shows the wait on the tile, as Settings does~~ — retired
+// 2026-09-07 with the ring landing itself (owner: "wtf is this image? fix
+// this"). The People popup no longer renders any connector tile — that
+// interaction moved entirely to the Connections popup — so there is no ring
+// tile left to carry a login spinner. The rule below stays unscoped in
+// palette.css for Settings' own tile.
+test('the shared per-tile login spinner rule stays unscoped for Settings', () => {
   const palette = readFileSync(join(WIDGET, 'ui/palette.css'), 'utf8');
-  assert.match(palette, /^\.row\.logging-in \.dot \{/mu, 'the rule must stay unscoped, or the ring loses it');
-  const html = readFileSync(join(WIDGET, 'ui/people.html'), 'utf8');
-  assert.match(html, /palette\.css/u, 'people.html must keep loading palette.css');
+  assert.match(palette, /^\.row\.logging-in \.dot \{/mu, 'the rule must stay unscoped');
 });
 
 test('the waiting ring survives the login-window focus refresh until connected status renders', () => {

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb } from '../server/hermes.mjs';
-import { createControls, timeBand, DISMISS_REASONS } from '../server/relationship/controls.mjs';
+import { createControls, timeBand, DISMISS_REASONS, NOT_THIS_KIND_MUTE_DAYS, cardStats } from '../server/relationship/controls.mjs';
 import { createRelationshipMemory } from '../server/relationship/service.mjs';
 
 const NOW = Date.now();
@@ -81,6 +81,33 @@ test('dismissal reasons are the five on the card, and never-this-person suppress
   ]);
 });
 
+// 'not-this-kind' is the analogous one-tap control to 'never-this-person',
+// scoped to a person+kind pair rather than the whole person: a card the
+// owner says is the wrong KIND of thing to be shown for them mutes that
+// kind, for them, for NOT_THIS_KIND_MUTE_DAYS -- never a global kind mute
+// (that is a settings-surface decision) and never every kind for them
+// (that would be 'never-this-person').
+test("'not-this-kind' mutes this person for this kind, and only this kind", () => {
+  const db = openDb(':memory:');
+  const c = ctl(db);
+  c.dismiss({ personKey: 'name:e', kind: 'owe', reason: 'not-this-kind', ruleVersion: 'owe-v1', now: NOW });
+  assert.equal(c.isMuted({ personKey: 'name:e', kind: 'owe', now: NOW }), true, 'owe is muted for this person');
+  assert.equal(c.isMuted({ personKey: 'name:e', kind: 'reconnect', now: NOW }), false,
+    'a different kind, same person, is untouched');
+  assert.equal(c.isSuppressed('name:e'), false, 'not-this-kind never suppresses the person outright');
+
+  const mute = db.prepare('SELECT person_key, kind, until_at FROM rm_mute').get();
+  assert.equal(mute.person_key, 'name:e');
+  assert.equal(mute.kind, 'owe');
+  assert.equal(mute.until_at, NOW + NOT_THIS_KIND_MUTE_DAYS * 86_400_000);
+
+  // Just past the mute window: no longer muted.
+  assert.equal(
+    c.isMuted({ personKey: 'name:e', kind: 'owe', now: NOW + (NOT_THIS_KIND_MUTE_DAYS + 1) * 86_400_000 }),
+    false
+  );
+});
+
 test('the global cap counts every kind together, and an unconfigured cap shows nothing', () => {
   const c = ctl(openDb(':memory:'));
   const shown = (kind, at) => c.recordEvent({ personKey: 'name:x', kind, event: 'shown', ruleVersion: 'v2', now: at });
@@ -129,4 +156,71 @@ test('the service wires the controls through the shared resolutions store', () =
   // seam, must widen the suppression with no other plumbing.
   svc.identity.decide('name:jon smith', 'name:jonathan smith', 'same', NOW);
   assert.equal(svc.controls.isSuppressed('name:jonathan smith'), true);
+});
+
+// cardStats (/stats.cards): counted facts off rm_card_event alone, split per
+// kind, windowed and all-time. No verdict, no threshold -- these tests check
+// the numbers, not a pass/fail line (there is none to check).
+function insertCardEvent(db, { kind, event, reason = null, snapshotId = null, ruleVersion = 'v1', createdAt }) {
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    "VALUES ('name:whoever', ?, ?, ?, ?, NULL, ?, 'morning', ?)"
+  ).run(kind, snapshotId, event, reason, ruleVersion, createdAt);
+}
+
+test('cardStats: per-kind split, acceptRate null on zero shown, reason shares off dismissals, distinct local days', () => {
+  const db = openDb(':memory:');
+  const DAY = 86_400_000;
+  const now = Date.parse('2026-06-01T12:00:00Z');
+
+  // owe: 4 shown across 3 distinct days (two on the same day), 2 accepted,
+  // 2 dismissed (one 'never-this-person', one with no reason), all within
+  // the default 56-day window.
+  insertCardEvent(db, { kind: 'owe', event: 'shown', createdAt: now - 1 * DAY });
+  insertCardEvent(db, { kind: 'owe', event: 'shown', createdAt: now - 1 * DAY + 3_600_000 }); // same local day as above
+  insertCardEvent(db, { kind: 'owe', event: 'shown', createdAt: now - 2 * DAY });
+  insertCardEvent(db, { kind: 'owe', event: 'shown', createdAt: now - 3 * DAY });
+  insertCardEvent(db, { kind: 'owe', event: 'accepted', createdAt: now - 3 * DAY });
+  insertCardEvent(db, { kind: 'owe', event: 'accepted', createdAt: now - 2 * DAY });
+  insertCardEvent(db, { kind: 'owe', event: 'dismissed', reason: 'never-this-person', createdAt: now - 1 * DAY });
+  insertCardEvent(db, { kind: 'owe', event: 'dismissed', reason: null, createdAt: now - 1 * DAY });
+  insertCardEvent(db, { kind: 'owe', event: 'opened', createdAt: now - 1 * DAY });
+
+  // A shown event well OUTSIDE the 56-day window: counts in allTime, not in
+  // the windowed perKind.
+  insertCardEvent(db, { kind: 'owe', event: 'shown', createdAt: now - 200 * DAY });
+
+  // reconnect: never shown at all.
+  const stats = cardStats(db, { now, windowDays: 56 });
+
+  assert.equal(stats.windowDays, 56);
+  assert.equal(stats.since, now - 56 * DAY);
+
+  const owe = stats.perKind.owe;
+  assert.equal(owe.shown, 4);
+  assert.equal(owe.opened, 1);
+  assert.equal(owe.accepted, 2);
+  assert.equal(owe.dismissed, 2);
+  assert.equal(owe.daysServed, 3, 'three distinct local calendar dates, not four rows');
+  assert.equal(owe.acceptRate, 0.5);
+  assert.equal(owe.openRate, 0.25);
+  assert.deepEqual(owe.dismissReasons, {
+    'wrong-person': 0, 'wrong-time': 0, 'never-this-person': 1, 'not-this-kind': 0, 'not-useful': 0, none: 1,
+  });
+  assert.equal(owe.neverThisPersonShare, 0.5, 'share of DISMISSALS (2), not of shown (4)');
+  assert.equal(owe.notUsefulShare, 0);
+
+  const reconnect = stats.perKind.reconnect;
+  assert.equal(reconnect.shown, 0);
+  assert.equal(reconnect.acceptRate, null, 'null, never a bare 0, when nothing was shown');
+  assert.equal(reconnect.openRate, null);
+  assert.equal(reconnect.neverThisPersonShare, null, 'null, never a bare 0, when nothing was dismissed');
+  assert.equal(reconnect.notUsefulShare, null);
+
+  // allTime includes the row from 200 days ago; the windowed perKind does not.
+  assert.equal(stats.allTime.owe.shown, 5);
+  assert.equal(stats.perKind.owe.shown, 4);
+
+  assert.equal(stats.perKind.verdict, undefined, 'no verdict field anywhere in the shape');
+  assert.equal(owe.verdict, undefined);
 });

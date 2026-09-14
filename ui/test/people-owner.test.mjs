@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { loadOwner, markOwnerPerson, markPersonRole, ownerConfigPath } from '../server/people/owner.mjs';
+import { googleTokensPath } from '../../connectors/lib/googleAccounts.mjs';
 
 test('loadOwner exposes configured high schools for shared-affiliation search', () => {
   const home = mkdtempSync(join(tmpdir(), 'hazlie-school-'));
@@ -86,5 +87,192 @@ test('markPersonRole stores independent corrections for each year', () => {
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// WHO "ME" IS ON AN OAUTH INSTALL.
+//
+// `mail.accounts[]` stopped deciding which mailboxes exist when the connector
+// moved to OAuth (connect/lib/status.mjs: "an AUTHORIZED account is a
+// configured one"). Nothing writes that array any more, and `ownerEmails` is
+// empty until the owner marks somebody — so on an ordinary install the owner's
+// own Gmail address was in NEITHER, and graph.mjs minted them as a calendar
+// person off their own invitations.
+//
+// The fixture is heterogeneous on purpose: a grant, a legacy config account,
+// a hand-listed alias, and a genuine third party. "Take everything" and "take
+// nothing" both fail it.
+test('every authorized Google account is an owner address', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-grants-'));
+  try {
+    mkdirSync(join(home, '.hazlie', 'secrets'), { recursive: true, mode: 0o700 });
+    for (const email of ['owner@example.test', 'Owner.Work@Example.Test']) {
+      writeFileSync(
+        googleTokensPath(email, home),
+        JSON.stringify({
+          account_email: email,
+          access_token: 'a',
+          refresh_token: 'r',
+          scope: 'https://www.googleapis.com/auth/gmail.readonly',
+        }),
+        { mode: 0o600 }
+      );
+    }
+    const configPath = ownerConfigPath(home);
+    mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mail: { accounts: [{ user: 'legacy@example.test' }] },
+        ownerEmails: ['owner@old-co.test'],
+      }),
+      { mode: 0o600 }
+    );
+
+    const owner = loadOwner({ configPath });
+    assert.equal(owner.addresses.has('owner@example.test'), true, 'the grant this Mac holds');
+    assert.equal(owner.addresses.has('owner.work@example.test'), true,
+      'and the second one, lowercased the way every caller compares them');
+    assert.equal(owner.addresses.has('legacy@example.test'), true,
+      'the pre-OAuth config array still counts');
+    assert.equal(owner.addresses.has('owner@old-co.test'), true,
+      'and the aliases the owner listed by hand');
+    assert.equal(owner.addresses.has('dana@example.test'), false,
+      'a third party is not the owner because they were on an invitation');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// There is no separate calendar account list to miss: calendar reads the same
+// Google grants (connectors/sources/calendar.mjs via accountsForScope), and
+// the config's "calendar" section carries `backend` and nothing else
+// (connectors/daemon.mjs CALENDAR_KEYS). This pins that, because the day it
+// grows an account list is the day this set silently stops covering it.
+test('the calendar config has no account list of its own to miss', async () => {
+  const daemon = await import('../../connectors/daemon.mjs');
+  const source = readFileSync(
+    new URL('../../connectors/daemon.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /const CALENDAR_KEYS = Object\.freeze\(\['backend'\]\);/u,
+    'a calendar account list would need adding to loadOwner');
+  assert.equal(typeof daemon.DEFAULT_INTERVAL_S, 'number');
+});
+
+// ---------------------------------------------------------------------------
+// WHICH INSTALL'S GRANTS (round-4 finding 11).
+//
+// The grants live at <home>/.hazlie/secrets, so loadOwner has to know which
+// home a config file belongs to. It worked that out with three unconditional
+// dirname hops off configPath -- correct for exactly one path shape, and
+// silently wrong for every other one a caller can hand it.
+
+function grantAt(home, email) {
+  mkdirSync(join(home, '.hazlie', 'secrets'), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    googleTokensPath(email, home),
+    JSON.stringify({ account_email: email, access_token: 'a', refresh_token: 'r', scope: '' }),
+    { mode: 0o600 }
+  );
+}
+
+test('an explicit home names the install, whatever the config file is called', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-home-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hazlie-owner-cfg-'));
+  try {
+    grantAt(home, 'owner@example.test');
+    // A config that is NOT <home>/.hazlie/connectors/config.json: the dirname
+    // hops resolve this to the tmpdir's grandparent, which holds no grants and
+    // is not an install at all.
+    const configPath = join(elsewhere, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ ownerEmails: ['alias@example.test'] }), { mode: 0o600 });
+
+    const owner = loadOwner({ home, configPath });
+    assert.equal(owner.addresses.has('owner@example.test'), true,
+      'the install was named outright, so its grants count');
+    assert.equal(owner.addresses.has('alias@example.test'), true,
+      'and the named config file is still the one that was read');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('a config path that names no install reads no grants, never the running machine\'s', () => {
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hazlie-owner-nameless-'));
+  try {
+    const configPath = join(elsewhere, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ selfName: 'Owner' }), { mode: 0o600 });
+    const owner = loadOwner({ configPath });
+    assert.deepEqual([...owner.addresses], [],
+      'an install we cannot name contributes nothing; the alternative is this Mac');
+    assert.deepEqual(owner.names, ['Owner'], 'the config itself is still read');
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('the canonical shape still carries its own install, so existing callers are unchanged', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-canon-'));
+  try {
+    grantAt(home, 'owner@example.test');
+    mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true, mode: 0o700 });
+    const configPath = ownerConfigPath(home);
+    writeFileSync(configPath, '{}', { mode: 0o600 });
+    assert.equal(loadOwner({ configPath }).addresses.has('owner@example.test'), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// A PATH IS A PLACE, NOT A STRING (round-5 finding 17).
+//
+// The test above compares the install rebuilt from the config path against the
+// config path -- and both the rebuilding and the comparison used to be done on
+// the raw string. Every spelling below names exactly the canonical file and
+// failed one or both, and the failure is silent: zero Google grants, which is
+// to say none of the owner's own addresses, on an install the caller named
+// correctly.
+test('a canonical-but-differently-spelled config path still names its install', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-spelling-'));
+  try {
+    grantAt(home, 'owner@example.test');
+    mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true, mode: 0o700 });
+    writeFileSync(ownerConfigPath(home), '{}', { mode: 0o600 });
+
+    // Built by hand rather than with join(), which would normalise them away
+    // before loadOwner ever saw them. Each is what some caller actually
+    // produces: a concatenated prefix, a `./` from a relative resolve, a `..`
+    // from walking up out of a sibling directory.
+    const spellings = [
+      `${home}/.hazlie/connectors//config.json`,
+      `${home}/.hazlie/connectors/./config.json`,
+      `${home}/.hazlie/connectors/../connectors/config.json`,
+      `${home}/./.hazlie/connectors/config.json`,
+      `${home}//.hazlie/connectors/config.json`,
+    ];
+    for (const configPath of spellings) {
+      assert.equal(loadOwner({ configPath }).addresses.has('owner@example.test'), true,
+        `${configPath} is the canonical config file, so its install's grants count`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a path that names no install is still refused after normalisation', () => {
+  // The counterweight: normalising must not turn "we cannot tell which install
+  // this is" into a yes. A bare tmpdir config still contributes nothing --
+  // never the running machine's grants.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hazlie-owner-nameless-2-'));
+  try {
+    const configPath = `${elsewhere}/./config.json`;
+    writeFileSync(join(elsewhere, 'config.json'), JSON.stringify({ selfName: 'Owner' }), { mode: 0o600 });
+    const owner = loadOwner({ configPath });
+    assert.deepEqual([...owner.addresses], []);
+    assert.deepEqual(owner.names, ['Owner']);
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
   }
 });
