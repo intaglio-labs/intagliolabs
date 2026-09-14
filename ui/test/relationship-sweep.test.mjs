@@ -15,7 +15,7 @@ import { ownerConfigPath, markPersonSubRoles } from '../server/people/owner.mjs'
 import {
   groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass, applySweepDecision,
   sweepCallCap, sweepStatus, SWEEP_DAILY_CALL_CAP_DEFAULT,
-  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
+  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, SWEEP_PAUSE_MS, sweepPause, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
 // A context row from a non-message source (e.g. an imported LinkedIn
@@ -1366,4 +1366,62 @@ test('a model call already made is counted even when the cursor write fails', as
   assert.equal(Number(run.swept), 1);
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_sweep_cursor').get().n), 0,
     'and the cursor did NOT move -- those rows are offered again next pass');
+});
+
+// ---------------------------------------------------------------------------
+// THE PAUSE BETWEEN PEOPLE MUST HOLD THE EVENT LOOP OPEN.
+//
+// sweepPause used to unref its timer, which means a pass only ever resumed
+// after its first pause if something ELSE was keeping the loop alive. In the
+// server that is the HTTP listener, so nobody noticed; under `node --test`
+// there is nothing, and on Node 22 this whole file died at the first
+// two-candidate pass -- test 16 onward cancelled with "Promise resolution is
+// still pending but the event loop has already resolved". Node 24's test
+// runner happens to hold a ref'd handle, so the identical code passed there,
+// which is why the difference looked like a Node bug rather than ours.
+//
+// process.getActiveResourcesInfo() lists ONLY the resources that are keeping
+// the event loop alive, so an unref'd timer does not appear in it at all.
+// That makes this assertion fail on the old code under BOTH majors rather
+// than reproducing a drained loop, which a test cannot do from inside one.
+test('the pause between people keeps the event loop alive until it fires', async () => {
+  const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+
+  const before = timers();
+  const startedAt = Date.now();
+  const pause = sweepPause(25);
+  assert.equal(timers(), before + 1,
+    'an unref\'d pause does not hold the loop open, so a pass mid-flight never resumes');
+
+  await pause;
+  assert.ok(Date.now() - startedAt >= 20, 'and it really did wait rather than resolving immediately');
+});
+
+// The symptom itself, at the level it actually broke: a pass over two
+// candidates crosses one pause, and its promise must settle on every
+// supported Node. This is the assertion that was cancelled rather than
+// failed under 22 -- a cancelled test reports no reason, so the explicit
+// pause test above is the one that names the cause.
+test('a two-candidate pass settles, having actually paused between the two people', async () => {
+  const db = openDb(':memory:');
+  const first = 'name:pause one';
+  const second = 'name:pause two';
+  insertPerson(db, { key: first, name: 'Pause One', role: 'business', sent: 10, received: 10 });
+  insertThread(db, first, { ts: NOW - 1 * DAY, them: 'first person says something new', me: 'ok' });
+  insertPerson(db, { key: second, name: 'Pause Two', role: 'business', sent: 10, received: 10 });
+  insertThread(db, second, { ts: NOW - 1 * DAY, them: 'second person says something new', me: 'ok' });
+
+  const engine = fakeSweepEngine(() => JSON.stringify({ tags: [], firm: null, page_lines: [] }));
+  const startedAt = Date.now();
+  const pass = await runSweepPass(db, engine, {}, { powerMode: 'trickle', budget: 2, now: NOW });
+
+  assert.equal(pass.status, 'complete', 'the pass ran to its terminal UPDATE');
+  assert.equal(Number(pass.swept), 2, 'both candidates were swept, not just the one before the pause');
+  assert.equal(engine.counters.calls, 2);
+  assert.ok(Date.now() - startedAt >= SWEEP_PAUSE_MS,
+    'and the pass really waited out the pause rather than skipping it');
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM person_sweep_cursor').get().n), 2,
+    'both cursors were written'
+  );
 });
