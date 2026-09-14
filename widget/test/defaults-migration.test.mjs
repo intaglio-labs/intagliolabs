@@ -156,11 +156,21 @@ test('the gate is a parameter, and the probe is the legacy install\'s own file',
   assert.match(code(run[2]), /carried \+ \(dataHomePresent \? carriedWithDataHome : \[\]\)/u,
     'one loop over one list, chosen by the gate; two loops drift apart');
   // ~/.hazlie is path-based rather than bundle-keyed, so the pre-rename
-  // install's home and this one's are the same directory — and the config file
-  // is the thing that install produced.
-  assert.match(code(migration), /static var legacyDataHomePresent: Bool/u);
-  assert.match(code(migration), /\.hazlie\/connectors\/config\.json/u,
-    'the probe must be the file the old install wrote, not a guess at the home');
+  // install's home and this one's are the same directory.
+  //
+  // THE CORPUS, NOT THE CONFIG ALONE (round-1 review). This app writes
+  // ~/.hazlie/connectors/config.json itself at launch, so a probe that only
+  // looked there was one moved line away from always answering yes — and a
+  // pre-rename install that never finished screen 2 never had one, so a real
+  // owner with a full corpus could be told their setup state was not theirs.
+  const probe = /static var legacyDataHomePresent: Bool \{\n([\s\S]*?)\n  \}/u
+    .exec(migration)?.[1] ?? '';
+  assert.ok(probe, 'legacyDataHomePresent not found');
+  assert.match(code(probe), /\.hazlie\/context\/context\.db/u,
+    'the database hermes migrates and opens IS the data home; nothing in a launch\n' +
+    'creates it before this runs');
+  assert.match(code(probe), /\.hazlie\/connectors\/config\.json/u,
+    'kept beside it: an install can have settings before it has rows');
   // Once is still once. An owner who re-runs onboarding must not have the old
   // answers pushed back over their new ones on the next launch.
   assert.match(code(run[2]), /destination\.set\(sourceName, forKey: migratedKey\)/u);

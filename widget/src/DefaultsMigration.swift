@@ -148,10 +148,25 @@ enum DefaultsMigration {
   ///
   /// Read once, at the call site, rather than inside the pure function below --
   /// so the decision is testable and the timing is visible where it matters.
+  ///
+  /// ~~The connectors config alone.~~ Round-1 review: that file is a poor proxy
+  /// for the home in BOTH directions. This app writes it itself at launch
+  /// (Provision.ensureConnectorDefaults, `{}`), so the only thing keeping the
+  /// probe honest was call ordering -- one moved line away from always answering
+  /// yes. And a pre-rename install that never finished screen 2 never had one,
+  /// so a genuine long-standing owner with a full corpus could be told their
+  /// setup state was not theirs.
+  ///
+  /// The corpus is the data home. `~/.hazlie/context/context.db` is what hermes
+  /// migrates and opens, it is what "the corpus lives in ~/.hazlie and is
+  /// path-based, so it is untouched" was ever about, and nothing in a launch
+  /// creates it before this runs. Either file answers yes; the config stays in
+  /// the test because an install can have settings before it has rows.
   static var legacyDataHomePresent: Bool {
-    let config = FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent(".hazlie/connectors/config.json")
-    return FileManager.default.fileExists(atPath: config.path)
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+    return [".hazlie/context/context.db", ".hazlie/connectors/config.json"]
+      .contains { fm.fileExists(atPath: home.appendingPathComponent($0).path) }
   }
 
   /// Copy the previous bundle's settings in, once, if this bundle has none of
@@ -185,10 +200,26 @@ enum DefaultsMigration {
     // Stamped even when nothing moved, so a fresh install does not re-check the
     // old domain on every launch for the rest of its life.
     //
-    // AND STAMPED ON THE NO-DATA-HOME PATH TOO. Once is once: the owner is about
-    // to go through onboarding and write these keys for themselves, and a
-    // migration that came back on the next launch would put the old answers over
-    // the new ones -- which is the thing migratedKey has always existed to stop.
+    // AND STAMPED ON THE NO-DATA-HOME PATH TOO, WHICH DROPS THOSE KEYS FOR GOOD.
+    // Asked directly in the round-1 review, so the answer is here rather than
+    // implied: nothing is lost, because the flow this decision opens is the thing
+    // that writes every one of them.
+    //
+    //   HazlieOnboarded + HazlieOnboardingRevision   completeOnboarding()
+    //   HazlieOnboardingStep                         the page, as each scene opens
+    //   HazlieConnectorsIntro                        the first settings open
+    //   the three card/mode pending keys             recordCardDefaults(), on the
+    //                                                press on screen 1
+    //
+    // The one key with no such writer is HazlieUnstampedImports, and it describes
+    // a file that lived in the home that is gone — so there is nothing on this
+    // Mac it could still be true about.
+    //
+    // Leaving it unstamped is the worse option, not the safer one. The migration
+    // would run again on the NEXT launch, by which time the owner may be halfway
+    // through the flow — and it would drop a stale "you are onboarded" on top of
+    // a setup in progress. That is precisely the overwrite migratedKey has always
+    // existed to stop; the only difference here is which launch it lands on.
     destination.set(sourceName, forKey: migratedKey)
     return moved
   }
