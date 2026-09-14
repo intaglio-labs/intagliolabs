@@ -44,8 +44,10 @@ function bodyOf(source, name) {
 }
 
 /// A Swift method body, matched on the `  }` at its own indentation.
+/// `static` joins the modifiers it will skip, the way the same helper in
+/// linkedin-drop-and-watch.test.mjs already does.
 function swiftBody(source, signature) {
-  const re = new RegExp(`\\n  (?:private )?func ${signature} \\{\\n([\\s\\S]*?)\\n  \\}\\n`, 'u');
+  const re = new RegExp(`\\n  (?:private |static )*func ${signature} \\{\\n([\\s\\S]*?)\\n  \\}\\n`, 'u');
   const m = re.exec(source);
   assert.ok(m, `${signature} not found`);
   return code(m[1]);
@@ -688,23 +690,71 @@ const launchBody = () => {
 test('a first run does not start the reader from the launch sequence', () => {
   const body = launchBody();
   const startAt = body.indexOf('Connectors.shared.start()');
-  assert.ok(startAt > 0, 'the launch sequence must still be the place an onboarded owner starts');
+  assert.ok(startAt > 0, 'the launch sequence must still be the place a consenting owner starts');
   const retireAt = body.indexOf('Provision.retireConnectorsAgent()');
-  const guardAt = body.indexOf('guard Bridge.onboarded else');
+  const guardAt = body.indexOf('guard Connectors.shared.mayStartAtLaunch else');
   assert.ok(retireAt > 0, 'a leftover launchd agent is still retired at launch');
   assert.ok(guardAt > 0 && guardAt < startAt,
-    'the launch-time start must be gated on Bridge.onboarded; without it the daemon\n' +
-    'opens EventKit and Contacts while onboarding screen 1 is up');
+    'the launch-time start must be gated; without it the daemon opens EventKit and\n' +
+    'Contacts while onboarding screen 1 is up');
   assert.ok(retireAt < guardAt,
     'the retirement is NOT behind the gate: an agent left running by an older install\n' +
     'reads the sources whatever this app decides, which is the one way past the gate');
+});
+
+// ROUND-1 REVIEW, FINDING 4. The gate was `guard Bridge.onboarded`, and that
+// flag is "the welcome flow is finished", not "somebody has been asked":
+// openOnboarding sets it back to FALSE to replay the flow, on the owner's own
+// rule that a replay behaves like a first run. So an established owner who
+// opened "run setup again" from the gear and escaped had their reader switched
+// off at every launch afterwards, until they walked back to screen 2 or 6.
+//
+// The predicate is exercised here over every shape the config arrives in, not
+// just matched: it takes bytes, so it is a pure function of two arguments.
+const launchStartAllowed = (onboarded, ownerConfigJson) => {
+  if (onboarded) return true;
+  if (ownerConfigJson === null) return false;
+  let root;
+  try { root = JSON.parse(ownerConfigJson); } catch { return false; }
+  if (root === null || typeof root !== 'object' || Array.isArray(root)) return false;
+  const section = root.relationshipMemory;
+  return typeof section === 'object' && section !== null && !Array.isArray(section);
+};
+
+test('the launch gate asks whether anybody has been asked, not whether the flow is closed', () => {
+  const body = swiftBody(connectors, 'launchStartAllowed\\(onboarded: Bool, ownerConfig: Data\\?\\) -> Bool');
+  assert.match(body, /if onboarded \{ return true \}/u);
+  assert.match(body, /JSONSerialization\.jsonObject\(with: ownerConfig\)/u);
+  assert.match(body, /root\["relationshipMemory"\] is \[String: Any\]/u,
+    'hermes reads the owner\'s settings from that same file (ownerConfigPath) and\n' +
+    'POST /admin/config/card is the only writer of the section');
+  // No filesystem inside the decision; the caller supplies the bytes.
+  assert.doesNotMatch(body, /FileManager|contentsOf|fileExists/u);
+
+  // An owner past the flow, whatever the config says.
+  assert.equal(launchStartAllowed(true, null), true);
+  assert.equal(launchStartAllowed(true, '{}'), true);
+  // THE REGRESSION: replayed the flow, escaped, settings still on disk.
+  assert.equal(launchStartAllowed(false, '{"relationshipMemory":{"capPerDay":1}}'), true);
+  // A genuine first run. `{}` is what ensureConnectorDefaults writes every launch.
+  assert.equal(launchStartAllowed(false, '{}'), false);
+  assert.equal(launchStartAllowed(false, null), false);
+  // Nothing else in the file counts, and a section that is not an object is not
+  // the owner's settings.
+  assert.equal(launchStartAllowed(false, '{"mail":{"account":"x"}}'), false);
+  assert.equal(launchStartAllowed(false, '{"relationshipMemory":null}'), false);
+  assert.equal(launchStartAllowed(false, '{"relationshipMemory":true}'), false);
+  // Unparseable answers no: a wrong no costs the press on screen 2's "next", a
+  // wrong yes costs a Calendar dialog over a screen that never mentioned one.
+  assert.equal(launchStartAllowed(false, 'not json'), false);
+  assert.equal(launchStartAllowed(false, '[]'), false);
 });
 
 test('the distiller is left armed, because it opens nothing that prompts', () => {
   const body = launchBody();
   const distillAt = body.indexOf('Distiller.shared.start()');
   assert.ok(distillAt > 0, 'the distiller must still be started at launch');
-  const gatesBefore = body.slice(0, distillAt).match(/guard Bridge\.onboarded else/gu) ?? [];
+  const gatesBefore = body.slice(0, distillAt).match(/guard Connectors\.shared\.mayStartAtLaunch else/gu) ?? [];
   assert.equal(gatesBefore.length, 1,
     'exactly one launch gate, and it is the reader\'s. The distiller reads\n' +
     '~/.hazlie/context/context.db and nothing else — no EventKit, no Contacts, no\n' +

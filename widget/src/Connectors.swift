@@ -431,6 +431,53 @@ final class Connectors {
     var isUp: Bool { self == .started || self == .alreadyRunning || self == .queued }
   }
 
+  /// HAS ANYBODY ON THIS MAC EVER BEEN ASKED? The question the launch sequence
+  /// and the Full Disk Access watcher both have to answer before starting a
+  /// reader that opens EventKit and Contacts.
+  ///
+  /// Pure, and takes the config as BYTES rather than reading it, so every shape
+  /// the file arrives in can be put through it.
+  ///
+  /// ~~Bridge.onboarded on its own.~~ Round-1 review, finding 4: that flag does
+  /// not mean "this owner has consented", it means "the welcome flow is
+  /// finished" — and openOnboarding sets it back to FALSE on purpose, because
+  /// the owner's own rule is that a replay behaves like a first run. So an
+  /// established owner who opened "run setup again" from the gear and then
+  /// escaped had their reader switched off at EVERY launch from then on, until
+  /// they walked as far as screen 2 or 6 again. What had actually gone wrong on
+  /// a first run was that nobody had ever been asked, and the flag cannot say
+  /// that.
+  ///
+  /// `relationshipMemory` in ~/.hazlie/connectors/config.json can. That file is
+  /// hermes' owner config (`ownerConfigPath`, ui/server/people/owner.mjs), the
+  /// only writer of the section is `POST /admin/config/card`, and the only
+  /// caller of that route is Bridge.recordCardDefaults — which fires on the
+  /// press on screen 1. A file carrying the section is a machine where somebody
+  /// has been through the flow; `{}`, which Provision.ensureConnectorDefaults
+  /// writes on every launch, is a machine where nobody has.
+  ///
+  /// UNREADABLE OR UNPARSEABLE ANSWERS NO, and the asymmetry is deliberate. The
+  /// cost of a wrong no is that the reader waits for the press on screen 2's
+  /// "next", seconds away. The cost of a wrong yes is a Calendar dialog over a
+  /// screen that has never mentioned a calendar. (The one owner a wrong no can
+  /// strand — onboarded, replayed, escaped, AND hermes never took their card
+  /// settings — is picked up by resumeCardDefaultsIfPending at the next launch,
+  /// which posts them and writes the section.)
+  static func launchStartAllowed(onboarded: Bool, ownerConfig: Data?) -> Bool {
+    if onboarded { return true }
+    guard let ownerConfig,
+          let root = try? JSONSerialization.jsonObject(with: ownerConfig) as? [String: Any]
+    else { return false }
+    return root["relationshipMemory"] is [String: Any]
+  }
+
+  /// The same question, asked of this Mac.
+  var mayStartAtLaunch: Bool {
+    let config = home.appendingPathComponent(".hazlie/connectors/config.json")
+    return Connectors.launchStartAllowed(
+      onboarded: Bridge.onboarded, ownerConfig: try? Data(contentsOf: config))
+  }
+
   /// Start the daemon if it is not already up and its config exists. Safe to
   /// call repeatedly — onboarding calls it the moment it writes the config.
   @discardableResult

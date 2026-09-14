@@ -330,20 +330,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     //
     // A first-run owner gets the reader from the flow instead, by every route
     // that already exists: screen 2's "next", screen 6's entry and the LinkedIn
-    // import all reach Bridge.startReadingSources(); a grant on screen 2 reaches
-    // Connectors.start() through the `requestPermission` verb; and a Full Disk
-    // Access grant reaches Connectors.restart() through FullDiskWatch, which
-    // starts the daemon when none is running. FullDiskWatch cannot fire before
-    // that anyway — it acts on a denied→granted EDGE off a baseline taken at
-    // launch, so only an actual grant moves it. For an owner past the flow
-    // nothing here changes.
+    // import all reach Bridge.startReadingSources(), and a grant on screen 2
+    // reaches Connectors.start() through the `requestPermission` verb.
+    //
+    // ~~`guard Bridge.onboarded`.~~ Round-1 review, finding 4: that flag is
+    // "the welcome flow is finished", not "somebody has been asked", and
+    // openOnboarding sets it back to FALSE to replay the flow — so an
+    // established owner who opened "run setup again" and escaped had their
+    // reader off at every launch afterwards. The question is asked of the
+    // owner's own settings now; see Connectors.launchStartAllowed.
     DispatchQueue.global(qos: .utility).async {
       Provision.retireConnectorsAgent()
       DispatchQueue.main.async {
-        guard Bridge.onboarded else {
-          NSLog("Intaglio Labs: first run — the reader starts from onboarding, "
-                + "so the Calendar and Contacts dialogs arrive on the screen "
-                + "that asks for them")
+        guard Connectors.shared.mayStartAtLaunch else {
+          NSLog("Intaglio Labs: nobody has been through setup here — the reader "
+                + "starts from onboarding, so the Calendar and Contacts dialogs "
+                + "arrive on the screen that asks for them")
           return
         }
         Connectors.shared.start()
