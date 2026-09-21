@@ -419,6 +419,10 @@ const JEV_PRODUCERS = Object.freeze([
   'ui/server/relationship/jev.mjs',
   // The card's judgment pass: personState.mjs builds what leaves, this asks.
   'ui/server/relationship/judgments.mjs',
+  // The distiller's yes/no prefilter over episode lines.
+  'ui/server/relationship/prefilter.mjs',
+  // The by-hand eval that replays judged cards; numbers only, run by the owner.
+  'ui/scripts/eval-jev.mjs',
 ]);
 
 test('every module that asks the judgment model is named in the ledger', () => {

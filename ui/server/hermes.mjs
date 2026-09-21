@@ -109,7 +109,8 @@ import {
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
-import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
+import { rebuildEpisodes, EPISODE_SOURCES, episodeLines } from './memory/episodeStore.mjs';
+import { prefilterEpisodes } from './relationship/prefilter.mjs';
 import {
   isUnreachable,
   unreachableError,
@@ -2518,6 +2519,7 @@ const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 // itself thinks of the same number as the pass's budget (SWEEP_BUDGET).
 const RELATIONSHIP_SWEEP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'engine', 'limit']);
 const RELATIONSHIP_JUDGE_FIELDS = Object.freeze(['limit']);
+const MEMORY_PREFILTER_FIELDS = Object.freeze(['episode_ids', 'power']);
 const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'critical']);
 // Same field set and validation as the sweep route above (power/budget/
 // battery/onAc/thermal/limit); public lookup has no per-request engine
@@ -5983,6 +5985,39 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (url.pathname === '/admin/memory/apply') {
       const body = await readJson(req);
       send(res, 200, applyMemoryBatch(db, body), cors);
+      return;
+    }
+
+    // THE DISTILLER'S PREFILTER (relationship/prefilter.mjs; owner decision
+    // 2026-09-20). The script posts episode IDS ONLY -- it opens the store
+    // read-only and cannot hold a budget or the credential -- and hermes reads
+    // the lines. Answers {distill, skip, reason}; every failure and every
+    // doubt is "distill", which is the behaviour the script had before this
+    // route existed. `power: 'trickle'` raises the threshold, because trickle
+    // wants less local work.
+    if (url.pathname === '/admin/memory/prefilter') {
+      const body = await readJson(req);
+      assertClosedFields(body, MEMORY_PREFILTER_FIELDS);
+      if (!Array.isArray(body.episode_ids) || body.episode_ids.length > 500
+          || !body.episode_ids.every((id) => Number.isInteger(id) && id > 0)) {
+        throw badRequest('"episode_ids" must be an array of at most 500 positive integers');
+      }
+      if (body.power !== undefined && body.power !== 'full' && body.power !== 'trickle') {
+        throw badRequest('"power" must be "full" or "trickle"');
+      }
+      const rel = relationshipState(db, policy);
+      rel.prefilterLock ??= { active: false };
+      const cfg = readOwnerConfig(policy)?.relationshipMemory?.jev ?? {};
+      const enabled = cfg.judgments?.distill !== false;
+      const out = enabled
+        ? await prefilterEpisodes(db, relationshipJev(policy), body.episode_ids, {
+          readLines: (id) => episodeLines(db, id),
+          threshold: body.power === 'trickle' ? 0.5 : undefined,
+          dailyTokenBudget: Number.isInteger(cfg.dailyTokenBudget) ? cfg.dailyTokenBudget : undefined,
+          lock: rel.prefilterLock,
+        })
+        : { distill: body.episode_ids, skip: [], reason: 'disabled', asked: 0, inputTokens: 0 };
+      send(res, 200, out, cors);
       return;
     }
 

@@ -307,6 +307,41 @@ function configEngine(cfg) {
   return cfg.engine === 'claude-cli' ? 'claude-cli' : 'local';
 }
 
+// THE JUDGMENTS ROW (owner decision 2026-09-20). One line: which engine judges
+// the card, how many calls today, what they cost. It rides the SAME cardConfig
+// promise as the two rows above it -- three rows, one request -- and says
+// nothing until the reader answers. States the route can report, in words the
+// owner can act on: `off` (no key on this Mac), `key rejected`, `paused`
+// (the engine backed off after failures), and the live line
+// `jev · 312 today · $0.01`. The hover carries the sentence.
+const JUDGMENTS_HELP = 'what to quote, how it ended, how close, worth a reminder — judged by jev, on while a key is present.';
+function judgmentsRow(configPromise) {
+  const el = document.createElement('div');
+  el.className = 'setting';
+  el.title = JUDGMENTS_HELP;
+  const label = document.createElement('span');
+  label.className = 'setting-name';
+  label.textContent = 'judgments';
+  const said = document.createElement('span');
+  said.className = 'setting-said';
+  said.textContent = '';
+  el.append(label, said);
+  configPromise.then((cfg) => {
+    const j = cfg?.jev;
+    if (!j || typeof j.state !== 'string') { said.textContent = '—'; fitConnections(); return; }
+    if (j.state === 'unconfigured') said.textContent = 'off';
+    else if (j.state === 'rejected') { said.textContent = 'key rejected'; said.classList.add('setting-warn'); }
+    else if (j.state === 'paused') { said.textContent = 'paused'; said.classList.add('setting-warn'); }
+    else {
+      const calls = Number.isInteger(j.callsToday) ? j.callsToday : 0;
+      const cost = Number.isFinite(j.costUsdToday) ? j.costUsdToday : 0;
+      said.textContent = `jev · ${calls} today · $${cost < 0.01 && cost > 0 ? '<0.01' : cost.toFixed(2)}`;
+    }
+    fitConnections();
+  });
+  return el;
+}
+
 function cardConfigRow(configPromise) {
   const el = document.createElement('div');
   el.className = 'setting';
@@ -1135,6 +1170,7 @@ async function renderSettings() {
     .catch(() => null);
   rows.push(engineRow(cardConfig));
   rows.push(cardConfigRow(cardConfig));
+  rows.push(judgmentsRow(cardConfig));
   // The motion row only appears when the system setting it overrides is
   // actually on. With Reduce Motion off it would do nothing, and a control
   // that does nothing is worse than no control.

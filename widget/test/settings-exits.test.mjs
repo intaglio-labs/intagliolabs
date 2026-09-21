@@ -504,6 +504,9 @@ test('no row can wrap at the width this panel actually is', () => {
     // The failure marker shares the row WITH the switch, plus the slot's gap.
     ['claude reads & drafts', warn('unsaved') + 8 + SWITCH],
     ['daily card', said('investor · 100 a day')],
+    // The judgments row (2026-09-20): its widest live line and its warn state.
+    ['judgments', said('jev · 12345 today · $12.34')],
+    ['judgments', warn('key rejected')],
     ['animations', SWITCH],
     ['sounds', SWITCH],
     ['keep mac awake', SWITCH],

@@ -179,8 +179,59 @@ try {
     process.exit(0);
   }
 
+  // THE PREFILTER (2026-09-20, ui/server/relationship/prefilter.mjs). Ask
+  // hermes which of these episodes plausibly carry an owner commitment or an
+  // unanswered ask; only those go to the local model. Ids only leave this
+  // process -- hermes reads the lines. A skipped episode is recorded through
+  // the SAME apply route as "read, found nothing" under this prompt sha and
+  // model, so a prompt or model change re-opens it, and no new skip table
+  // exists to drift. Any failure to reach the route distills everything,
+  // which is what this script did before the route existed.
+  let toDistill = pending;
+  let skipped = [];
+  try {
+    const res = await fetch(`${hermesBase}/admin/memory/prefilter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${hermesToken}` },
+      body: JSON.stringify({ episode_ids: pending.map((e) => e.id), power: value('--power', 'trickle') }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    if (res.ok) {
+      const verdict = await res.json();
+      const skip = new Set(Array.isArray(verdict?.skip) ? verdict.skip : []);
+      if (skip.size > 0) {
+        toDistill = pending.filter((e) => !skip.has(e.id));
+        skipped = pending.filter((e) => skip.has(e.id));
+      }
+    }
+  } catch {
+    toDistill = pending;
+    skipped = [];
+  }
+  for (const episode of skipped) {
+    try {
+      await fetch(`${hermesBase}/admin/memory/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${hermesToken}` },
+        body: JSON.stringify({
+          run: {
+            model, prompt_path: 'prompts/distill_claims.md', prompt_sha: sha,
+            params: { temperature: 0, max_tokens: 512, constrained: true, episode: true, prefilter: 'jev' },
+            rows_in: episode.row_count, episode_hash: episode.member_hash,
+            episode_context: withContext ? 'on' : 'off',
+          },
+          claims: [],
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (error) {
+      console.error(`episode ${episode.id}: skip not recorded (${error?.name ?? 'Error'})`);
+    }
+  }
+
   const stats = {
     episodes_in: pending.length,
+    prefiltered_out: skipped.length,
     from_cache: 0,
     parse_failures: 0,
     model_errors: 0,
@@ -194,7 +245,7 @@ try {
   // through the episode named on the run, so a batch mixing two episodes could
   // not be resolved -- and this way a single bad episode fails alone.
   const applied = [];
-  for (const episode of pending) {
+  for (const episode of toDistill) {
     const lines = episodeLines(db, episode.id);
     if (lines.length === 0) continue;
 
