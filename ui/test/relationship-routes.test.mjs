@@ -1586,8 +1586,11 @@ test('GET /admin/config/card reports the owner\'s own four keys, and null for th
   });
   try {
     // A fresh install: no config file at all.
+    // The judgment engine's block rides along (2026-09-20): with no key in
+    // this install it is `unconfigured`, and a read makes no call.
+    const NO_JEV = { state: 'unconfigured', enabled: false, callsToday: 0, inputTokensToday: 0, costUsdToday: 0 };
     assert.deepEqual(await (await call('GET', '/admin/config/card')).json(),
-      { mode: null, capPerDay: null, producer: null, engine: null },
+      { mode: null, capPerDay: null, producer: null, engine: null, jev: NO_JEV },
       'nobody has chosen -- which is a different row from having chosen zero');
 
     // Now the owner chooses, through the three routes that own those writes.
@@ -1596,7 +1599,7 @@ test('GET /admin/config/card reports the owner\'s own four keys, and null for th
     await call('POST', '/admin/config/engine', { engine: 'claude-cli' });
 
     assert.deepEqual(await (await call('GET', '/admin/config/card')).json(),
-      { mode: 'founder', capPerDay: 3, producer: 'eligibility', engine: 'claude-cli' },
+      { mode: 'founder', capPerDay: 3, producer: 'eligibility', engine: 'claude-cli', jev: NO_JEV },
       'read back through the same seam the writes went through');
 
     // 'local' DELETES relationshipMemory.engine rather than writing a string
@@ -1604,7 +1607,7 @@ test('GET /admin/config/card reports the owner\'s own four keys, and null for th
     // answer null for it and leave the other three standing.
     await call('POST', '/admin/config/engine', { engine: 'local' });
     assert.deepEqual(await (await call('GET', '/admin/config/card')).json(),
-      { mode: 'founder', capPerDay: 3, producer: 'eligibility', engine: null });
+      { mode: 'founder', capPerDay: 3, producer: 'eligibility', engine: null, jev: NO_JEV });
 
     // A read and only a read: no batch, no snapshot, no cap bookkeeping.
     await call('GET', '/admin/config/card');
@@ -1636,6 +1639,7 @@ test('GET /admin/config/card answers null for a malformed config rather than ech
     const res = await fetch(`http://127.0.0.1:${server.port}/admin/config/card`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
     });
-    assert.deepEqual(await res.json(), { mode: null, capPerDay: null, producer: null, engine: null });
+    assert.deepEqual(await res.json(), { mode: null, capPerDay: null, producer: null, engine: null,
+      jev: { state: 'unconfigured', enabled: false, callsToday: 0, inputTokensToday: 0, costUsdToday: 0 } });
   } finally { await server.close(); }
 });

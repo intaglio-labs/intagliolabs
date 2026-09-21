@@ -41,7 +41,7 @@
     "SCOPE. This ledger describes THIS repository. One entry was removed when the",
     "code was extracted for open source: the outbound iMessage lane, which was the",
     "courier's send path and is not here. A ledger that over-declares is as",
-    "misleading as one that under-declares \u2014 it invites a reader to believe a",
+    "misleading as one that under-declares — it invites a reader to believe a",
     "capability exists.",
     "",
     "2026-08-24. The marketing site MOVED INTO this repository, at site/. It reaches",
@@ -71,7 +71,8 @@
     "website": "a host the public marketing site in site/ reaches: a subresource the visitor's browser loads, or a link it hands them. Not the product's egress -- no daemon opens these",
     "frontier-client": "an installed official provider client receives one user-reviewed prompt on stdin and owns its subscription login and vendor-controlled network stack; the app neither implements its socket nor reads its credential",
     "public-lookup": "the installed claude client is driven headless, with WebSearch as its one enabled tool, to search the public web for a person the owner already knows using only public identifiers (name, firm, a public handle, a public profile URL) the owner's own corpus already holds; no per-call review box -- the review happens afterward through the PENDING claim queue, same as every other producer here",
-    "loopback": "never leaves the machine"
+    "loopback": "never leaves the machine",
+    "judgment-model": "a hosted decision model (TypeSafe Jev) receives structured state derived from the owner's own messages plus typed questions, and returns numbers and closed enums only -- no text; the socket is opened by hermes itself, on a timer, with no per-call review"
   },
   "_the_claim": [
     "The narrow claim this system actually keeps, stated once:",
@@ -106,7 +107,7 @@
       "direction": "outbound-send",
       "purpose": "send one prompt whose complete text the owner reviewed and approved, then receive one answer. chatgpt.com is the root service destination; the installed Codex client may use additional vendor-controlled supporting hosts outside this repository's implementation and literal-host tripwire",
       "credential": "owned and refreshed by the installed Codex client through Sign in with ChatGPT; Intaglio never reads, copies or logs it",
-      "decision": "Owner-directed 2026-08-31. Allowed only after the local answer, through the visible editable review box and a provider-named send button. The process gets a separate empty private working directory, read-only sandbox, no approvals, no app database handle and no inherited API-key variables. Its sibling isolated CODEX_HOME is deleted and rebuilt before every run with only a symlink to Codex's own auth file \u2014 client state from earlier handoffs cannot linger \u2014 so the model-visible working directory contains no credential and ordinary Codex plugins, hooks, MCP servers, skills, history and config cannot observe the prompt. The exact sent text remains visible as a receipt.",
+      "decision": "Owner-directed 2026-08-31. Allowed only after the local answer, through the visible editable review box and a provider-named send button. The process gets a separate empty private working directory, read-only sandbox, no approvals, no app database handle and no inherited API-key variables. Its sibling isolated CODEX_HOME is deleted and rebuilt before every run with only a symlink to Codex's own auth file — client state from earlier handoffs cannot linger — so the model-visible working directory contains no credential and ordinary Codex plugins, hooks, MCP servers, skills, history and config cannot observe the prompt. The exact sent text remains visible as a receipt.",
       "evidence": "widget/ui/chat.js frontierPrompt/openFrontierReview; widget/src/Bridge.swift frontierSend; widget/src/FrontierRunner.swift CodexFrontierJob"
     },
     {
@@ -118,6 +119,18 @@
       "credential": "owned and refreshed by the installed Claude client through its subscription login; Intaglio never reads, copies or logs it",
       "decision": "Owner-directed 2026-08-31 for the widget's frontier handoff, under the visible-review boundary described for ChatGPT above: safe mode, empty tool set, no permission prompts, strict empty MCP configuration, empty settings sources, no browser, no session persistence, and the approved prompt on stdin rather than argv. \n\nOWNER DECISION 2026-09-07 (prototype, recorded verbatim in the session that built it): \"use my subscription; privacy when it matters, intelligence where needed\". That authorizes the installed claude client to be driven headless by ui/server/relationship/engines.mjs with NO per-call review box, by every producer named below; the review happens afterwards through the PENDING claim queue on the desk, where nothing becomes an accepted fact until the owner decides. It does NOT narrow what leaves, and this row used to name only the first of the three, which is why it is spelled out. WHAT EACH PRODUCER SENDS:\n\n  * pages.mjs (person pages, L5 step 4) -- the person's display name and role, and up to ~6k characters of THEM/ME conversation excerpts pooled from their episodes: real iMessage/WhatsApp/mail body text from the owner's corpus, plus the titles of meetings attended together. gatherPersonContext -> renderPrompt.\n  * sweep.mjs (discovery sweep, L5 step 5) -- the same THEM/ME excerpt shape, restricted to lines NEW since that person's cursor, plus the person's name, role and sub-role tags, plus the titles of upcoming calendar meetings attended together. newRowsFor -> renderSweepPrompt. Reachable by hand as `node ui/scripts/sweep-once.mjs --power full --engine claude-cli`, and on the Distiller's timer.\n  * draft.mjs (card drafts) -- the person's name, the card and owe kind, days overdue, the owner's own recorded commitment text, the built page lines about that person (model-composed prose), the person's last quoted line verbatim, and owner-authored ME lines as a tone sample. renderPrompt.\n\nSo: private message-derived text about third parties leaves on this path, unreviewed per call, on a timer. That is the decision as taken -- it is not softened here, and _the_claim above is narrower than this row for exactly that reason (\"reviewed prompt text\" covers (a) and not (b)). The isolation posture is unchanged from (a) and is what the decision rests on: empty tool set, no MCP, empty settings sources, no browser, no session persistence, prompt on stdin, no database handle, no app-held credential. Revisit before this leaves the house.",
       "evidence": "widget/ui/chat.js frontierPrompt/openFrontierReview; widget/src/Bridge.swift frontierSend; widget/src/FrontierRunner.swift ClaudeFrontierJob; ui/server/relationship/engines.mjs createEngine (defaults to claude-cli whenever the binary resolves) and createClaudeCliEngine (the argv and the isolation flags); ui/server/relationship/pages.mjs gatherPersonContext + renderPrompt (POST /admin/relationship/pages/build); ui/server/relationship/sweep.mjs newRowsFor + renderSweepPrompt (POST /admin/relationship/sweep, ui/scripts/sweep-once.mjs); ui/server/relationship/draft.mjs renderPrompt (POST /admin/relationship/draft); prompts/person_page.md, prompts/sweep.md, prompts/reconnect_draft.md"
+    },
+    {
+      "host": "api.typesafe.ai",
+      "kind": "judgment-model",
+      "component": "ui/server/relationship/jev.mjs createJev -> POST /v1/systemone (the only module that opens this socket); driven by the relationship layer's judgment call sites named in `evidence`",
+      "direction": "outbound-send",
+      "purpose": "The reconnect card's JUDGMENT layer: which of a person's own lines is worth quoting (a score per candidate line), how the last conversation ended (warm/neutral/bad), how professional and how close the relationship is (two scores) with relatives/romantic flags, whether the owner would want a reminder now, and -- in later commits -- a yes/no prefilter before the local claim distiller, a pick among code-extracted sub-role/firm options in the sweep, and a pick among verbatim lines for person-page sections. Jev generates no text: every answer is a probability, a score or one of the options this code supplied.",
+      "credential": "a TypeSafe API key the owner placed at ~/.hazlie/secrets/typesafe-api-key.txt (0600; TYPESAFE_API_KEY may override for tests), read by connectors/lib/secrets.mjs readSecretLine, sent as a bearer header, never logged and never in argv",
+      "decision": "OWNER DECISION 2026-09-20, recorded in the session that built it, in plainer words than it was said: the privacy promise that excerpt-sending features stay off until turned on is dropped for judgments -- this is about the value of the card, and judgments are ON by default whenever a key is present, with no consent toggle. What leaves, unreviewed and on a timer: a code-built `personState` bundle (LinkedIn title/company/industry, channels, message volume/balance/span and meeting counts rendered as WORDS, recency as words, the last 8 direct lines each clipped to 160 characters, one long line from the other person per year up to 6) and, for the quote judgment, up to 12 of the other person's recent lines; for the distiller prefilter, the owner's and the other person's lines of an episode. The Claude toggle in engines.mjs is unchanged. TypeSafe's published policy 2026-09-20: no training on inputs; retention per their DPA; zero-data-retention is an enterprise option not in force here. Measured before shipping (54 owner-judged cards, 2026-09-20): structured state lifted 'would the owner want this reminder' from AUC 0.58 to 0.72; kind is read as two axes because a four-way label was wrong for friends the owner also works with.",
+      "evidence": [
+        "ui/server/relationship/jev.mjs"
+      ]
     },
     {
       "host": "api.anthropic.com",
@@ -136,7 +149,7 @@
       "direction": "inbound-fetch",
       "purpose": "fetch the owner's own Notion pages",
       "credential": "notion internal integration token",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connectors/lib/notionClient.mjs:18 NOTION_BASE_URL"
     },
     {
@@ -174,8 +187,8 @@
       "kind": "api",
       "component": "connectors/lib/gcalClient.mjs, connectors/lib/gmailClient.mjs, connect/server.mjs",
       "direction": "inbound-fetch",
-      "purpose": "read the owner's own calendar and mailbox. Calendar: the owner's calendar lives in Notion Calendar, which speaks to Google directly and never syncs into Calendar.app. Mail: replaced IMAP on 2026-08-26 \u2014 Google will not accept gmail.readonly over IMAP, which demands the full-mailbox scope (read, write, delete and send), so reaching mail over REST is what keeps the grant read-only",
-      "credential": "google access token, scopes calendar.readonly and gmail.readonly \u2014 read-only in both: cannot create, move or delete an event, and cannot send, delete or even mark a message read",
+      "purpose": "read the owner's own calendar and mailbox. Calendar: the owner's calendar lives in Notion Calendar, which speaks to Google directly and never syncs into Calendar.app. Mail: replaced IMAP on 2026-08-26 — Google will not accept gmail.readonly over IMAP, which demands the full-mailbox scope (read, write, delete and send), so reaching mail over REST is what keeps the grant read-only",
+      "credential": "google access token, scopes calendar.readonly and gmail.readonly — read-only in both: cannot create, move or delete an event, and cannot send, delete or even mark a message read",
       "decision": "ui/AGENTS.md egress policy, amended 2026-08-19. 2026-09-12: connect/server.mjs /api/google-probe joins this row rather than opening a new one. Same host, same installed client, same gmail.readonly grant, and strictly less data than connectors/sources/mail.mjs already fetches -- one messages.list with maxResults=1, whose reply is reduced to a count and an HTTP status before it leaves that function. It exists because a token file on disk does not establish that the grant buys a read: consent can complete while the project is over its restricted-scope user cap, or with gmail.readonly unticked, and the onboarding screen must be able to say so. Recorded here per this file's own rule that a row's decision must describe what THAT invocation does -- the component field named only gcalClient.mjs while gmailClient.mjs had ridden it since 2026-08-26.",
       "evidence": "connectors/lib/gcalClient.mjs, connect/server.mjs googleProbe()"
     },
@@ -186,7 +199,7 @@
       "direction": "bidirectional",
       "purpose": "Discord DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.discord; bridges/native.json discord"
     },
     {
@@ -196,7 +209,7 @@
       "direction": "bidirectional",
       "purpose": "Slack DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.slack; bridges/native.json slack"
     },
     {
@@ -206,7 +219,7 @@
       "direction": "bidirectional",
       "purpose": "Slack's web client, which the login window walks to after a successful sign-in because it is where the session's client token lives.",
       "credential": "the owner's own Slack session, already established by the sign-in they just completed in that window.",
-      "decision": "Already covered by the slack.com entry in substance \u2014 the fence matches by suffix and app.slack.com is inside it \u2014 and listed separately because the tripwire reads literals, and because the reason this particular subdomain is named in source deserves to be findable. Slack's sign-in ends on an interstitial offering to launch the desktop app; that page holds no token, so the window walks to the web client once, after the required cookies prove the sign-in worked. Not a workaround for a failed login: it is the last step the owner would otherwise have to know to take, and one of them sat on that page with nothing to press (2026-08-26).",
+      "decision": "Already covered by the slack.com entry in substance — the fence matches by suffix and app.slack.com is inside it — and listed separately because the tripwire reads literals, and because the reason this particular subdomain is named in source deserves to be findable. Slack's sign-in ends on an interstitial offering to launch the desktop app; that page holds no token, so the window walks to the web client once, after the required cookies prove the sign-in worked. Not a workaround for a failed login: it is the last step the owner would otherwise have to know to take, and one of them sat on that page with nothing to press (2026-08-26).",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.storageUrl"
     },
     {
@@ -266,7 +279,7 @@
       "direction": "bidirectional",
       "purpose": "The same reCAPTCHA widget, from Google's alternate domain.",
       "credential": "none, as above.",
-      "decision": "NOT OBSERVED, and listed anyway \u2014 the one row in this file that is precaution rather than measurement, said plainly so nobody mistakes it for evidence. Google serves the identical widget from this domain for networks where google.com is unreachable, and which one a page gets is decided by the script URL the site loads. If it is never used this row is unused; if it is, its absence would have been an empty challenge box that reproduces on nobody's machine but the owner's.",
+      "decision": "NOT OBSERVED, and listed anyway — the one row in this file that is precaution rather than measurement, said plainly so nobody mistakes it for evidence. Google serves the identical widget from this domain for networks where google.com is unreachable, and which one a page gets is decided by the script URL the site loads. If it is never used this row is unused; if it is, its absence would have been an empty challenge box that reproduces on nobody's machine but the owner's.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.messenger/PLATFORMS.slack.webLogin.allowedFrameHosts"
     },
     {
@@ -276,7 +289,7 @@
       "direction": "bidirectional",
       "purpose": "Telegram DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.telegram; bridges/native.json telegram"
     },
     {
@@ -306,7 +319,7 @@
       "kind": "bridge",
       "component": "bridges/ mautrix-linkedin + connect/lib/bridge.mjs",
       "direction": "inbound-fetch",
-      "purpose": "LinkedIn DMs through a local Matrix bridge \u2014 replaced the hand-unzipped CSV export (owner, 2026-08-25)",
+      "purpose": "LinkedIn DMs through a local Matrix bridge — replaced the hand-unzipped CSV export (owner, 2026-08-25)",
       "credential": "the owner's own LinkedIn session, captured by the login webview",
       "decision": "Owner asked for LinkedIn to sync like every other social source, 2026-08-25. Same posture as the Meta and X bridges: read-only, no host port, double puppeting off.",
       "evidence": "bridges/native.json linkedin; connect/lib/bridge.mjs PLATFORMS.linkedin"
@@ -525,7 +538,7 @@
       "purpose": "the IBM Plex Mono and Caveat stylesheet the landing page links",
       "credential": "none",
       "decision": "Public marketing site. The visitor's browser loads this, not any Intaglio Labs process; it carries no credential and sees only that someone opened the page.",
-      "evidence": "site/index.html:13 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono\u2026&family=Caveat\u2026\" rel=\"stylesheet\">"
+      "evidence": "site/index.html:13 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono…&family=Caveat…\" rel=\"stylesheet\">"
     },
     {
       "host": "fonts.gstatic.com",
@@ -545,7 +558,7 @@
       "purpose": "the backer credit under the download button",
       "credential": "none",
       "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. No credential, no automatic request.",
-      "evidence": "site/index.html:406,590 backed by <a href=\"https://www.character.vc/\"> \u2014 once per board"
+      "evidence": "site/index.html:406,590 backed by <a href=\"https://www.character.vc/\"> — once per board"
     },
     {
       "host": "www.linkedin.com",
@@ -555,7 +568,7 @@
       "purpose": "the two builder credits under the download button",
       "credential": "none",
       "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. No credential, no automatic request.",
-      "evidence": "site/index.html:406,590 built by <a href=\"https://www.linkedin.com/in/\u2026\"> \u2014 once per board"
+      "evidence": "site/index.html:406,590 built by <a href=\"https://www.linkedin.com/in/…\"> — once per board"
     },
     {
       "host": "github.com",
@@ -565,7 +578,7 @@
       "purpose": "download the prebuilt mautrix bridge binaries named in bridges/native.json, replacing the container images pulled from dock.mau.dev. Separately and unchanged, the upstream project links the marketing site hands to a visitor's browser.",
       "credential": "none -- unauthenticated public release assets",
       "decision": "Replaces a `docker pull` with an equivalent fetch of the same upstream software, so the posture is unchanged: upstream artifacts reach the owner's machine from upstream, and this repo conveys none of them. Every asset is pinned by sha256 from the release's own sha256sums.txt, and a mismatch is deleted rather than used. Was kind=website while only the marketing site linked here; the product fetches now, so the stronger kind wins.",
-      "evidence": "site/notices/index.html:321,329 (moonshine and silero-vad repository links) and site/index.html:241,405,427,589 (the download buttons, which point at this project's own releases \u2014 header and try-now, once per board) and site/index.html:399,584 (the \"open sourced OS\" link under the prompts headline, once per board)"
+      "evidence": "site/notices/index.html:321,329 (moonshine and silero-vad repository links) and site/index.html:241,405,427,589 (the download buttons, which point at this project's own releases — header and try-now, once per board) and site/index.html:399,584 (the \"open sourced OS\" link under the prompts headline, once per board)"
     },
     {
       "host": "www.pexels.com",
@@ -575,7 +588,7 @@
       "purpose": "the Pexels licence and homepage, cited where the landing-page photographs are credited",
       "credential": "none",
       "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. The photographs THEMSELVES are not this path -- they are resized copies served from this origin under site/photos/, deliberately not hot-linked, so opening the landing page sends Pexels no request and tells them nothing about who visited.",
-      "evidence": "site/notices/index.html \u00a7Landing-page photographs -- https://www.pexels.com/ and https://www.pexels.com/license/"
+      "evidence": "site/notices/index.html §Landing-page photographs -- https://www.pexels.com/ and https://www.pexels.com/license/"
     },
     {
       "host": "api.github.com",
@@ -615,7 +628,7 @@
       "purpose": "mautrix project homepage",
       "credential": null,
       "decision": "allowed",
-      "evidence": "site/privacy/index.html -- \u00a76 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
+      "evidence": "site/privacy/index.html -- §6 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
     },
     {
       "host": "release-assets.githubusercontent.com",
@@ -674,7 +687,7 @@
       "direction": "inbound-fetch",
       "purpose": "the SUBFRAME Facebook embeds its two-step verification challenge in. Meta serves it from its own sandbox host rather than from facebook.com, so the login window has to be allowed to render a frame from here or the security step arrives as an empty page",
       "credential": "none of ours -- the owner is signing in to Meta in a window whose cookies are harvested for the bridge; nothing is sent to this host that Meta did not put in the page",
-      "decision": "SUBFRAME ONLY, and that distinction is the whole point: fbsbx.com is deliberately absent from allowedHosts, so the window can never NAVIGATE here \u2014 the main frame is where a password is typed. Measured 2026-08-30 as \"blocked-subframe Messenger www.fbsbx.com\", after which the 2FA page sat with a 2.5MB DOM rendering nothing; five theories were spent on that blank page, including a wrong conclusion that Meta refuses embedded webviews outright, before the fence itself was instrumented.",
+      "decision": "SUBFRAME ONLY, and that distinction is the whole point: fbsbx.com is deliberately absent from allowedHosts, so the window can never NAVIGATE here — the main frame is where a password is typed. Measured 2026-08-30 as \"blocked-subframe Messenger www.fbsbx.com\", after which the 2FA page sat with a 2.5MB DOM rendering nothing; five theories were spent on that blank page, including a wrong conclusion that Meta refuses embedded webviews outright, before the fence itself was instrumented.",
       "evidence": "connect/lib/bridge.mjs webLogin.allowedFrameHosts for messenger and instagram; ~/.hazlie/logs/bridge-login.log blocked-subframe"
     },
     {

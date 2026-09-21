@@ -477,3 +477,69 @@ export function ensureRelationshipDefaults({
   const written = raw.relationshipMemory;
   return { capPerDay: written.capPerDay, producer: written.producer, changed };
 }
+
+// THE JUDGMENT ENGINE'S SETTINGS (owner decision 2026-09-20: judgments on Jev,
+// on by default whenever a key is present -- see ui/server/relationship/jev.mjs).
+//
+// One closed field set, one atomic read-modify-write, every sibling key
+// preserved -- the same shape as setRelationshipEngine above. Under
+// relationshipMemory rather than at the top level because the connectors
+// daemon's TOP_KEYS admits relationshipMemory and validateConfig does not
+// descend into it; a new top-level key would kill the daemon silently
+// (connectors/AGENTS.md). ui/test/onboarding-progress.test.mjs round-trips the
+// written file through validateConfig to keep that true.
+//
+// `enabled: false` is the only way to switch judgments OFF with a key present;
+// there is no toggle in the product for it, by the owner's decision, so the
+// key exists for a developer and for a route test, not a screen.
+export const JEV_FIELDS = Object.freeze(['enabled', 'model', 'timeoutMs', 'maxRetries', 'dailyTokenBudget', 'judgments']);
+export const JEV_JUDGMENTS = Object.freeze(['quote', 'ending', 'kind', 'distill', 'page', 'sweep']);
+const JEV_MAX_DAILY_TOKENS = 500_000_000;
+
+export function validateRelationshipJev(fields) {
+  if (fields === null || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw new Error('jev settings must be a JSON object');
+  }
+  for (const key of Object.keys(fields)) {
+    if (!JEV_FIELDS.includes(key)) throw new Error(`unknown jev field ${JSON.stringify(key)}; accepted: ${JEV_FIELDS.join(', ')}`);
+  }
+  if (fields.enabled !== undefined && typeof fields.enabled !== 'boolean') throw new Error('enabled must be a boolean');
+  if (fields.model !== undefined && !(typeof fields.model === 'string' && /^jev-[a-z0-9.-]{1,32}$/u.test(fields.model))) {
+    throw new Error('model must be a jev model id such as jev-latest');
+  }
+  if (fields.timeoutMs !== undefined && !(Number.isInteger(fields.timeoutMs) && fields.timeoutMs >= 1000 && fields.timeoutMs <= 60_000)) {
+    throw new Error('timeoutMs must be an integer from 1000 through 60000');
+  }
+  if (fields.maxRetries !== undefined && !(Number.isInteger(fields.maxRetries) && fields.maxRetries >= 0 && fields.maxRetries <= 5)) {
+    throw new Error('maxRetries must be an integer from 0 through 5');
+  }
+  if (fields.dailyTokenBudget !== undefined && !(Number.isInteger(fields.dailyTokenBudget) && fields.dailyTokenBudget >= 0 && fields.dailyTokenBudget <= JEV_MAX_DAILY_TOKENS)) {
+    throw new Error(`dailyTokenBudget must be an integer from 0 through ${JEV_MAX_DAILY_TOKENS}`);
+  }
+  if (fields.judgments !== undefined) {
+    if (fields.judgments === null || typeof fields.judgments !== 'object' || Array.isArray(fields.judgments)) {
+      throw new Error('judgments must be an object of booleans');
+    }
+    for (const [k, v] of Object.entries(fields.judgments)) {
+      if (!JEV_JUDGMENTS.includes(k)) throw new Error(`unknown judgment ${JSON.stringify(k)}; accepted: ${JEV_JUDGMENTS.join(', ')}`);
+      if (typeof v !== 'boolean') throw new Error(`judgments.${k} must be a boolean`);
+    }
+  }
+}
+
+export function setRelationshipJev({ configPath = ownerConfigPath(), ...fields } = {}) {
+  validateRelationshipJev(fields);
+  const raw = readMutableConfig(configPath);
+  const existing = relationshipMemorySection(raw);
+  const current = existing?.jev && typeof existing.jev === 'object' && !Array.isArray(existing.jev) ? existing.jev : {};
+  const merged = Object.fromEntries([
+    ...Object.entries(current),
+    ...Object.entries(fields).map(([k, v]) => (k === 'judgments'
+      ? [k, Object.fromEntries([...Object.entries(current.judgments ?? {}), ...Object.entries(v)])]
+      : [k, v])),
+  ]);
+  if (JSON.stringify(merged) === JSON.stringify(current)) return { jev: merged, changed: false };
+  raw.relationshipMemory = Object.fromEntries([...Object.entries(existing ?? {}), ['jev', merged]]);
+  writeMutableConfig(configPath, raw);
+  return { jev: merged, changed: true };
+}

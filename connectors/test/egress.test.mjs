@@ -409,6 +409,40 @@ const CLI_PRODUCERS = Object.freeze([
   'ui/server/relationship/lookup.mjs',
 ]);
 
+// THE SECOND OUTBOUND PATH THAT CARRIES MESSAGE-DERIVED TEXT (owner decision
+// 2026-09-20): the judgment model. Unlike the CLI, this repo opens the socket
+// itself, so the literal-host tripwire above does see api.typesafe.ai -- but a
+// new call site that builds state for jev.mjs is invisible to it, exactly as a
+// new CLI producer was. Every module that calls jev.ask must be listed in the
+// ledger row's `evidence`.
+const JEV_PRODUCERS = Object.freeze([
+  'ui/server/relationship/jev.mjs',
+]);
+
+test('every module that asks the judgment model is named in the ledger', () => {
+  const { ledger } = declaredHosts();
+  const rows = ledger.paths.filter((p) => p.host === 'api.typesafe.ai');
+  assert.equal(rows.length, 1, 'api.typesafe.ai must be declared exactly once');
+  assert.equal(rows[0].kind, 'judgment-model');
+  const named = rows[0].evidence ?? [];
+  const missing = JEV_PRODUCERS.filter((mod) => !named.includes(mod));
+  assert.deepEqual(missing, [], `these modules drive the judgment model and the ledger row does not name them: ${missing.join(', ')}`);
+  for (const mod of JEV_PRODUCERS) {
+    const full = join(REPO, mod);
+    assert.ok(existsSync(full), `${mod} is in JEV_PRODUCERS but does not exist`);
+    const text = readFileSync(full, 'utf8');
+    assert.match(text, /jev\.ask|JEV_ENDPOINT|createJev/u, `${mod} is listed as a judgment producer but names no jev seam`);
+  }
+  // And the reverse: any module that imports the client is listed.
+  const importers = scannedFiles()
+    .filter((f) => f.endsWith('.mjs') && !f.includes('/test/'))
+    .filter((f) => /relationship\/jev\.mjs['"]/u.test(readFileSync(f, 'utf8')))
+    .map((f) => f.slice(REPO.length + 1))
+    .filter((rel) => rel !== 'ui/server/hermes.mjs');
+  const unlisted = importers.filter((rel) => !named.includes(rel));
+  assert.deepEqual(unlisted, [], `these modules import the judgment client but the ledger does not name them: ${unlisted.join(', ')}`);
+});
+
 test('every producer that spawns the installed claude client is named in the ledger', () => {
   const { ledger } = declaredHosts();
   const anthropic = ledger.paths.filter((p) => p.host === 'api.anthropic.com');

@@ -63,7 +63,8 @@ import {
 import {
   MAX_CAP_PER_DAY, RELATIONSHIP_ENGINES, RELATIONSHIP_MODES, RELATIONSHIP_PRODUCERS,
   ensureRelationshipDefaults, installHomeFor, loadOwner, markOwnerPerson, markPersonRole,
-  markPersonSubRoles, ownerConfigPath, setRelationshipEngine, setRelationshipMode,
+  markPersonSubRoles, ownerConfigPath, setRelationshipEngine, setRelationshipJev, setRelationshipMode,
+  JEV_FIELDS,
 } from './people/owner.mjs';
 import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
@@ -90,6 +91,7 @@ import {
   runLintPass, lintFindings, resolveLintFinding, lintStatus,
 } from './relationship/lint.mjs';
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
+import { createJev, jevStatus, JUDGMENT_SCHEMA } from './relationship/jev.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { personCardFacts, changedForCard } from './relationship/cardFacts.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
@@ -1953,6 +1955,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     const db = new DatabaseSync(dbPath);
     hardenConnection(db);
     db.exec(SCHEMA);
+    db.exec(JUDGMENT_SCHEMA);
     ensurePeopleProjectionSchema(db);
     migrate(db);
     return db;
@@ -1984,6 +1987,9 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     chmodSync(dbPath, 0o600);
     hardenConnection(db);
     db.exec(SCHEMA);
+    // The judgment cache and usage ledger (jev.mjs): IF NOT EXISTS on new
+    // tables, no SCHEMA_VERSION bump, the rm_card_draft precedent.
+    db.exec(JUDGMENT_SCHEMA);
     ensurePeopleProjectionSchema(db);
     migrate(db);
     // Reassert after schema creation in case the platform replaced the file.
@@ -2492,6 +2498,9 @@ const RECALL_PARAMS = Object.freeze(['q', 'limit']);
 const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth', 'includeAnonymous']);
 const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
 const CONFIG_ENGINE_FIELDS = Object.freeze(['engine']);
+// The judgment engine's settings route accepts exactly the fields owner.mjs
+// validates; one list, imported, so the route and the writer cannot disagree.
+const CONFIG_JEV_FIELDS = JEV_FIELDS;
 const CONFIG_CARD_FIELDS = Object.freeze(['capPerDay', 'producer']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_DRAFT_FIELDS = Object.freeze(['snapshot_id']);
@@ -3764,6 +3773,39 @@ function relationshipMemoryEngine(policy, engineOverride) {
   return createEngine({ ...cfg, relationshipMemory, llama: policy.llama });
 }
 
+// The judgment engine (jev.mjs), same seam discipline: a start()-time
+// override (`policy.relationshipJev`, a pre-built engine object or null) wins
+// outright for tests, else one client per distinct jev config, rebuilt when the
+// owner's config section changes. It is memoised because the client carries
+// the 401 latch and the circuit breaker, and a fresh object per request would
+// forget both -- a rejected key would then be retried on every card poll.
+const jevClients = new Map();
+function relationshipJev(policy) {
+  if (policy.relationshipJev !== undefined) return policy.relationshipJev;
+  const cfg = readOwnerConfig(policy) ?? {};
+  const section = cfg.relationshipMemory?.jev ?? {};
+  // THE KEY LIVES IN THE INSTALL THE CONFIG BELONGS TO, never on "this Mac"
+  // (the round-6 rule behind installHomeFor): a route test pointing
+  // ownerConfigPath at a tmpdir must not find the developer's real key and
+  // report `ok`. A config path that names no install gets a path that names no
+  // file, which reads as unconfigured; TYPESAFE_API_KEY still overrides.
+  const configFile = ownerConfigFile(policy);
+  const installHome = installHomeFor(configFile);
+  const keyPath = typeof section.keyPath === 'string' && section.keyPath
+    ? section.keyPath
+    : installHome
+      ? join(installHome, '.hazlie', 'secrets', 'typesafe-api-key.txt')
+      : join(dirname(configFile), '.no-install-no-judgment-key');
+  const key = JSON.stringify({ ...section, keyPath });
+  let client = jevClients.get(key);
+  if (!client) {
+    if (jevClients.size >= 8) jevClients.clear();
+    client = createJev({ ...cfg, relationshipMemory: { ...cfg.relationshipMemory, jev: { ...section, keyPath } } });
+    jevClients.set(key, client);
+  }
+  return client;
+}
+
 // The engine public lookup uses -- same seam discipline as
 // relationshipMemoryEngine, its own test-seam override
 // (policy.relationshipLookupEngine, a pre-built engine object OR null)
@@ -4095,6 +4137,29 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
+  // THE JUDGMENT ENGINE'S SETTINGS (owner decision 2026-09-20; see jev.mjs).
+  // Bearer-only and closed-field like the engine route above. There is no
+  // on/off switch in the product for judgments -- they run whenever a key is
+  // present -- so this route exists for the token budget, the model id and
+  // per-judgment flags, and for a developer to write `enabled:false`.
+  // owner.mjs validates every field; a bad value is a 400 with the reason.
+  if (req.method === 'POST' && url.pathname === '/admin/config/jev') {
+    if (!hasJsonMediaType(req)) {
+      send(res, 415, { error: 'content-type must be application/json' }, cors);
+      return;
+    }
+    const body = await readJson(req);
+    assertClosedFields(body, CONFIG_JEV_FIELDS);
+    let result;
+    try {
+      result = setRelationshipJev({ ...body, ...ownerConfigTarget(policy) });
+    } catch (error) {
+      throw badRequest(error?.message ?? 'invalid jev settings');
+    }
+    send(res, 200, { state: 'ok', ...result }, cors);
+    return;
+  }
+
   // WHAT LETS A CARD EXIST AT ALL, RECORDED FROM ONBOARDING.
   //
   // Two keys a fresh install has neither of, and hermes reads both as "no owner
@@ -4180,6 +4245,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       capPerDay: Number.isInteger(chosen?.capPerDay) ? chosen.capPerDay : null,
       producer: named(chosen?.producer),
       engine: named(chosen?.engine),
+      // The judgment engine's state for the settings row: unconfigured | ok |
+      // rejected | paused, plus today's calls, tokens and derived cost. Absent
+      // config is `unconfigured`, never a default.
+      jev: jevStatus(db, relationshipJev(policy)),
     }, cors);
     return;
   }

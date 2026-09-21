@@ -32,6 +32,19 @@
 // whether a binary is installed is not "off"; it is "on, if you happen to
 // have the client". Resolvability decides only whether an OPTED-IN engine
 // can actually run, never whether it is chosen.
+//
+// ~~THE GLOBAL READING OF THE PARAGRAPH ABOVE -- "any feature sending message
+// excerpts to a model outside the Mac is OFF until the owner turns it on" --~~
+// is FALSE since 2026-09-20. Owner decision, recorded in the session that made
+// it: "fuck the privacy promise bullshit, this is about bringing value".
+// ui/server/relationship/jev.mjs sends message-derived state to
+// api.typesafe.ai by default whenever a key file is present, with no toggle;
+// ops/EGRESS.json names the host and the decision. Everything said here about
+// the CLI engine's own opt-in stays exactly as true as it was: that switch is
+// unchanged, and this file still never picks the CLI without
+// relationshipMemory.engine === 'claude-cli'. Judgments (grade, classify,
+// pick among lines) go to Jev; prose (pages, drafts, sweep lines, lookup)
+// stays here.
 
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, existsSync } from 'node:fs';

@@ -74,6 +74,13 @@ Do not re-add these; their absence is a decision, not an oversight.
    in tracked source. That is a tripwire, not a document. If you add a network
    call, declare it there with a real justification, or the build stops.
 
+   Since 2026-09-20 there are two outbound paths that carry message-derived
+   text. The judgment model (`ui/server/relationship/jev.mjs`, host
+   `api.typesafe.ai`, kind `judgment-model` in `ops/EGRESS.json`) receives a
+   code-built state bundle and short excerpts by default whenever a key is
+   present -- owner decision, recorded in that ledger row. The paragraph below
+   describes the other.
+
    Public lookup is the one path that sends anything outward, and what it
    sends is a search string built only from allowlisted public identifiers:
    display name, firm/company, a public handle already in the corpus, and a
