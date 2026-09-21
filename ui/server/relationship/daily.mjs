@@ -12,7 +12,13 @@
 // day, day-parity still burns that day on Owe and shows the owner nothing,
 // where "serve whichever was shown longer ago" naturally gives the other
 // producer the turn instead.
-export const CARD_PRODUCERS = Object.freeze(['owe', 'reconnect']);
+// ~~Object.freeze(['owe', 'reconnect'])~~ -- a third producer, `ask` ("looking
+// for", 2026-09-21), joins the rotation. The order is still the tie-break
+// (control-first, then the two that came later), and produceDailyBatch now
+// walks every kind the policy actually supplies, least-recently-shown first,
+// so an install without an active ask behaves exactly as the two-producer
+// one did.
+export const CARD_PRODUCERS = Object.freeze(['owe', 'reconnect', 'ask']);
 
 // How long a per-kind refill stays throttled after producing zero candidates
 // -- same value and reasoning as the single-producer constant it replaces
@@ -64,21 +70,23 @@ export function refillRetryMsFor(db) {
 // The kind whose turn it is: whichever was LEAST RECENTLY shown (a 'shown'
 // rm_card_event), never-shown counting as -Infinity (goes first). A tie
 // (including "neither has ever been shown") resolves to CARD_PRODUCERS[0].
-export function pickProducer(db, { now = Date.now() } = {}) {
+// Every kind in `kinds`, least recently shown first; ties keep CARD_PRODUCERS
+// order. `kinds` defaults to the full list; produceDailyBatch passes the kinds
+// the policy actually has producers for.
+export function producerOrder(db, { now = Date.now(), kinds = CARD_PRODUCERS } = {}) {
+  void now;
   const rows = db.prepare(
     "SELECT kind, MAX(created_at) AS lastShown FROM rm_card_event WHERE event = 'shown' GROUP BY kind"
   ).all();
   const lastShownByKind = new Map(rows.map((r) => [r.kind, Number(r.lastShown)]));
   const tsFor = (kind) => (lastShownByKind.has(kind) ? lastShownByKind.get(kind) : -Infinity);
+  const ordered = CARD_PRODUCERS.filter((k) => kinds.includes(k));
+  // A stable sort on a pre-ordered list keeps the tie-break.
+  return ordered.map((k, i) => ({ k, i, ts: tsFor(k) })).sort((a, b) => a.ts - b.ts || a.i - b.i).map((x) => x.k);
+}
 
-  let best = CARD_PRODUCERS[0];
-  let bestTs = tsFor(best);
-  for (let i = 1; i < CARD_PRODUCERS.length; i++) {
-    const kind = CARD_PRODUCERS[i];
-    const ts = tsFor(kind);
-    if (ts < bestTs) { best = kind; bestTs = ts; }
-  }
-  return best;
+export function pickProducer(db, { now = Date.now(), kinds = CARD_PRODUCERS } = {}) {
+  return producerOrder(db, { now, kinds })[0];
 }
 
 // WHAT "CONSUMED" MEANS, AND WHAT A PEEK IS (2026-09-08, contrarian review A
@@ -439,9 +447,9 @@ export function liveQueuePersonKeys(db, kind, {
 export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
   const refillRetryMs = policy.refillRetryMs ?? REFILL_RETRY_MS;
   const windowMs = policy.liveWindowMs ?? LIVE_WINDOW_MS;
-  rel.refill ??= { owe: { at: null, empty: false }, reconnect: { at: null, empty: false } };
+  rel.refill ??= { owe: { at: null, empty: false }, reconnect: { at: null, empty: false }, ask: { at: null, empty: false } };
   rel.cards ??= [];
-  rel.batch ??= { owe: null, reconnect: null };
+  rel.batch ??= { owe: null, reconnect: null, ask: null };
 
   // A STALE BATCH LEAVES THE QUEUE (finding 4). Nothing used to prune
   // rel.cards, and hydrateCards restored the newest batch per (kind, mode)
@@ -452,8 +460,9 @@ export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
   // serving queue read from, means the next request refills instead.
   rel.cards = rel.cards.filter((card) => isSnapshotFresh(db, card.snapshot_id, { now, windowMs }));
 
-  const P = pickProducer(db, { now });
-  const Q = CARD_PRODUCERS.find((k) => k !== P);
+  // Every kind this policy can produce, least recently shown first (three
+  // producers since 2026-09-21; a policy with two behaves as it always did).
+  const kinds = producerOrder(db, { now, kinds: Object.keys(policy.producers ?? {}) });
 
   const refillKeyFor = (kind) => (policy.refillKey ? policy.refillKey(kind) : kind);
   const modeFor = (kind) => (policy.modeFor ? policy.modeFor(kind) : undefined);
@@ -478,13 +487,11 @@ export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
 
   const servable = policy.servable;
   const age = { now, windowMs };
-  if (hasLiveOfKind(db, rel.cards, P, policy.currentVersions, modeFor(P), servable, age)) return { servingKind: P };
-  const producedP = tryProduce(P);
-  if (producedP.produced > 0) return { servingKind: P };
-
-  if (hasLiveOfKind(db, rel.cards, Q, policy.currentVersions, modeFor(Q), servable, age)) return { servingKind: Q };
-  const producedQ = tryProduce(Q);
-  if (producedQ.produced > 0) return { servingKind: Q };
+  for (const kind of kinds) {
+    if (hasLiveOfKind(db, rel.cards, kind, policy.currentVersions, modeFor(kind), servable, age)) return { servingKind: kind };
+    const produced = tryProduce(kind);
+    if (produced.produced > 0) return { servingKind: kind };
+  }
 
   return { servingKind: null, reason: 'pool-exhausted' };
 }

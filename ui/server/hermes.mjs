@@ -95,6 +95,7 @@ import { createJev, jevStatus, JUDGMENT_SCHEMA, DEFAULT_DAILY_TOKEN_BUDGET } fro
 import { cardOverrides, quotesJudged, judgeMany, poolJudgmentOrder } from './relationship/judgments.mjs';
 import {
   ASK_SCHEMA, createAsk, listAsks, getAsk, setAskActive, deleteAsk, askMatches, askStatus, askJudgmentOrder, runAskPass,
+  produceAskBatch, askCardFacts, ASK_PRODUCER_VERSION,
 } from './relationship/ask.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { personCardFacts, changedForCard } from './relationship/cardFacts.mjs';
@@ -3144,7 +3145,7 @@ export function applyMemoryBatch(db, body) {
 // gate (rm_card_event by person_key/kind, in owe.mjs's owePool and
 // producer.mjs's poolSql): a person judged under an old version stays
 // excluded from the pool exactly as before.
-const CURRENT_PRODUCER_VERSION = { owe: OWE_PRODUCER_VERSION, reconnect: PRODUCER_VERSION };
+const CURRENT_PRODUCER_VERSION = { owe: OWE_PRODUCER_VERSION, reconnect: PRODUCER_VERSION, ask: ASK_PRODUCER_VERSION };
 
 // The rel.refill key reconnect's own (kind, mode) queue keeps its throttle
 // state under -- see daily.mjs's produceDailyBatch `refillKey` contract.
@@ -3165,7 +3166,7 @@ function reconnectRefillKey(mode) {
 // so asking Owe's batch for a mode would only ever erase the owner's last
 // picker choice.
 function hydrateCards(db, policy) {
-  const empty = () => ({ cards: [], batch: { owe: null, reconnect: null }, mode: null });
+  const empty = () => ({ cards: [], batch: { owe: null, reconnect: null, ask: null }, mode: null });
   try {
     let nameStmt = null;
     try { nameStmt = db.prepare('SELECT display_name FROM people WHERE person_key = ?'); } catch {}
@@ -3182,7 +3183,7 @@ function hydrateCards(db, policy) {
     const eligibilityReconnect = relationshipProducerConfig(policy ?? {}).producer === 'eligibility';
 
     const cards = [];
-    const batch = { owe: null, reconnect: null };
+    const batch = { owe: null, reconnect: null, ask: null };
     let mode = null;
     let modeBatchId = null; // tracks which mode's batch is the most recent, for `mode` recovery below
 
@@ -3199,7 +3200,7 @@ function hydrateCards(db, policy) {
         'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
         'WHERE batch_id = ? ORDER BY id'
       ).all(batchId);
-      const versionGated = kind === 'owe' || eligibilityReconnect;
+      const versionGated = kind === 'owe' || kind === 'ask' || eligibilityReconnect;
       const kindRow = rows.find((row) => row.kind === kind);
       if (versionGated && kindRow && kindRow.producer_version !== CURRENT_PRODUCER_VERSION[kind]) return;
       if (batch[kind] === null || batchId > batch[kind]) batch[kind] = batchId;
@@ -3247,6 +3248,11 @@ function hydrateCards(db, policy) {
       "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'owe' AND created_at > ?"
     ).get(freshSince);
     loadBatch('owe', oweLatest?.batchId != null ? Number(oweLatest.batchId) : null);
+    // The ask producer's latest fresh batch, restored like owe's.
+    const askLatest = db.prepare(
+      "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'ask' AND created_at > ?"
+    ).get(freshSince);
+    loadBatch('ask', askLatest?.batchId != null ? Number(askLatest.batchId) : null);
 
     if (eligibilityReconnect) {
       // Reconnect: modes are queues (L5 mode-picker follow-on) -- restore the
@@ -4773,6 +4779,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           // default: a refill on an empty queue must keep serving the mode
           // they asked for, not quietly widen back to 'any'.
           reconnect: (dailyDb, { now: at }) => produceBatch(dailyDb, { mode: reconnectMode, now: at }),
+          // "Looking for" (plan step 3): the best unshown match across the
+          // active asks at fit_level >= 3. With no active ask it produces
+          // nothing and the rotation is the two-producer one it was.
+          ask: (dailyDb, { now: at }) => produceAskBatch(dailyDb, { now: at }),
         },
         // A card carried in rel.cards under a producer_version this producer
         // no longer runs (see CURRENT_PRODUCER_VERSION / hydrateCards above)
@@ -5203,9 +5213,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // puts its own lastMeetingAt on the card object cannot shadow the
       // pinned shape.
       const facts = personCardFacts(db, card.personKey, { now: nowForLive });
+      // An ask card carries the ask it answers and its "fits because",
+      // resolved from the evidence id at serve time (a fact from the current
+      // state or a live line), never copied into the snapshot.
+      const askFacts = card.kind === 'ask' ? askCardFacts(db, card, { now: nowForLive }) : {};
       send(res, 200, { card: { ...card, quoteContextId: resolved.quoteContextId, quote, sentence, left, leftTone, label, judged,
         who: page.sections.who?.text ?? null, page,
-        changed: changedForCard(changed), drafts, ...facts },
+        changed: changedForCard(changed), drafts, ...facts, ...askFacts },
         // PROVENANCE, NOT POLICY (round-5 finding 10). `servedMode` answers
         // "which mode produced the card in your hand", and the only thing that
         // knows is the batch the card came out of. A card produced before any

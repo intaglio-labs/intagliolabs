@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { openDb, start } from '../server/hermes.mjs';
 import {
   createAsk, listAsks, getAsk, setAskActive, deleteAsk, askTerms, askCandidates, buildAskCall, judgeAskPerson,
-  runAskPass, askJudgmentOrder, askMatches, askStatus, FIT, FIT_LEVEL, ASK_MATCH_MIN_LEVEL,
+  runAskPass, askJudgmentOrder, askMatches, askStatus, FIT, FIT_LEVEL, ASK_MATCH_MIN_LEVEL, produceAskBatch, askCardFacts,
 } from '../server/relationship/ask.mjs';
 
 const DAY = 86_400_000;
@@ -126,6 +126,30 @@ test('the pass fans out, below-threshold people are judged but not matches, and 
   const paused = { ...jev, state: 'paused' };
   const stopped = await runAskPass(db, paused, ask, ['p:a'], { now: NOW });
   assert.equal(stopped.declined, 1);
+});
+
+test('the ask producer makes one card from the best match at level 3, skips people shown this month, and resolves fits-because at serve time', () => {
+  const db = openDb(':memory:');
+  seed(db, 'p:hi', { name: 'High Fit', linkedin: { position: 'Partner', company: 'Health Seed Fund' }, lines: ['we invest at seed in health tech'] });
+  seed(db, 'p:mid', { name: 'Mid Fit', lines: ['maybe'] });
+  seed(db, 'p:shown', { name: 'Shown Already', linkedin: { position: 'GP', company: 'Seed Fund' }, lines: ['deck?'] });
+  const ask = createAsk(db, 'a seed investor in health tech', { now: NOW });
+  const put = db.prepare(`INSERT INTO rm_ask_match(ask_id, person_key, fit, fit_level, confidence, evidence_kind, evidence_id, state_hash, model, question_sha, judged_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+  put.run(ask.id, 'p:hi', 0.9, 3.6, 0.8, 'fact', 'F2', 'h', 'm', 'q', NOW);
+  put.run(ask.id, 'p:mid', 0.5, 2.6, 0.5, null, null, 'h', 'm', 'q', NOW);
+  put.run(ask.id, 'p:shown', 0.95, 3.9, 0.9, 'fact', 'F2', 'h', 'm', 'q', NOW);
+  db.prepare(`INSERT INTO rm_card_event(person_key, kind, event, rule_version, time_band, created_at) VALUES ('p:shown','ask','shown','ask-v1','morning',?)`).run(NOW - 2 * DAY);
+  assert.equal(produceAskBatch(db, { now: NOW }).cards.length, 1, 'one card a day');
+  const { cards } = produceAskBatch(db, { now: NOW });
+  assert.equal(cards[0].personKey, 'p:hi', 'the shown person is skipped; the level-2.6 person is below the card floor');
+  assert.equal(cards[0].kind, 'ask');
+  assert.equal(cards[0].sentence, 'looking for: a seed investor in health tech');
+  assert.equal(cards[0].quoteContextId, null, 'a fact pick carries no quote');
+  assert.deepEqual(askCardFacts(db, cards[0], { now: NOW }), { ask: { id: ask.id, text: ask.text }, fitsBecause: 'company: Health Seed Fund', fitLevel: 3.6 });
+  const snap = db.prepare('SELECT summary, evidence FROM rm_candidate_snapshot WHERE kind = ?').get('ask');
+  assert.ok(!snap.evidence.includes('Health Seed Fund'), 'the snapshot holds the evidence id, never its text');
+  setAskActive(db, ask.id, false, { now: NOW });
+  assert.equal(produceAskBatch(db, { now: NOW }).cards.length, 0, 'a paused ask produces nothing');
 });
 
 test('the routes are bearer-only, create starts a pass, matches read back, and the sweep tick advances active asks', async () => {

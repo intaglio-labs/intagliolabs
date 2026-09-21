@@ -301,6 +301,87 @@ export function askMatches(db, ask, { now = Date.now(), limit = 50, minLevel = A
   });
 }
 
+// ---- the card producer (plan step 3; owner decision 3: one ask card a day,
+// inside the existing cap) -------------------------------------------------
+//
+// Kind `ask` joins owe and reconnect in daily.mjs's rotation. The best unshown
+// match across the active asks at fit_level >= 3.0 becomes one card; its
+// sentence is the owner's own ask, its quote the evidence line when the
+// evidence was a line, and its "fits because" is resolved at serve time from
+// the evidence id -- a pick, never prose, and never copied into the snapshot.
+export const ASK_PRODUCER_VERSION = 'ask-v1';
+export const ASK_RANK_STRATEGY = 'fit-level-then-fit';
+const ASK_RESHOW_DAYS = 30;
+
+export function askPool(db, { now = Date.now(), minLevel = ASK_CARD_MIN_LEVEL } = {}) {
+  const asks = listAsks(db).filter((a) => a.active);
+  if (asks.length === 0) return [];
+  const shown = new Set(db.prepare(
+    `SELECT DISTINCT person_key FROM rm_card_event WHERE kind = 'ask' AND created_at > ?`
+  ).all(now - ASK_RESHOW_DAYS * 86_400_000).map((r) => r.person_key));
+  const out = [];
+  for (const ask of asks) {
+    const rows = db.prepare(
+      `SELECT m.person_key, m.fit, m.fit_level, m.evidence_kind, m.evidence_id, p.display_name, p.role, p.sent, p.received, p.met_in_person
+       FROM rm_ask_match m JOIN people p ON p.person_key = m.person_key
+       WHERE m.ask_id = ? AND m.fit_level >= ? AND p.role NOT IN ('romantic','family')
+       ORDER BY m.fit_level DESC, m.fit DESC LIMIT 20`
+    ).all(ask.id, minLevel);
+    for (const r of rows) {
+      if (shown.has(r.person_key)) continue;
+      out.push({
+        personKey: r.person_key, name: r.display_name, role: r.role, askId: ask.id, askText: ask.text,
+        fit: r.fit, fitLevel: r.fit_level, evidenceKind: r.evidence_kind, evidenceId: r.evidence_id,
+        messages: Number(r.sent) + Number(r.received), meetings: Number(r.met_in_person),
+        quoteContextId: r.evidence_kind === 'line' ? Number(r.evidence_id) : null,
+      });
+    }
+  }
+  out.sort((a, b) => b.fitLevel - a.fitLevel || (b.fit ?? 0) - (a.fit ?? 0));
+  return out;
+}
+
+export function produceAskBatch(db, { now = Date.now(), limit = 1 } = {}) {
+  const pool = askPool(db, { now });
+  const chosen = pool.slice(0, limit);
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+  ).run(now, chosen.length, 'open', null).lastInsertRowid);
+  const insSnap = db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  );
+  const cards = [];
+  for (const c of chosen) {
+    const summary = `looking for: ${c.askText}`;
+    const shared = {
+      ask_id: c.askId, fit: c.fit, fit_level: c.fitLevel, evidence_kind: c.evidenceKind, evidence_id: c.evidenceId,
+      messages: c.messages, meetings: c.meetings, depth: c.messages + 3 * c.meetings, topics: [], mode: null,
+    };
+    const evidence = { quote_context_id: c.quoteContextId, role: c.role, label: null, focus: null, left: null, leftTone: null, ...shared };
+    const snapshotId = Number(insSnap.run(batchId, c.personKey, 'ask', summary, JSON.stringify(evidence), ASK_PRODUCER_VERSION, ASK_RANK_STRATEGY, now).lastInsertRowid);
+    cards.push({
+      personKey: c.personKey, name: c.name, kind: 'ask', sentence: summary, quoteContextId: c.quoteContextId, role: c.role,
+      focus: null, label: null, left: null, leftTone: null, evidence: shared,
+      producer_version: ASK_PRODUCER_VERSION, rank_strategy: ASK_RANK_STRATEGY, snapshot_id: snapshotId,
+    });
+  }
+  return { batchId, cards, pool };
+}
+
+// The serve's "fits because" for an ask card: the evidence text from the
+// current state (a fact) or the live row (a line). Null when neither resolves.
+export function askCardFacts(db, card, { now = Date.now() } = {}) {
+  const ev = card?.evidence ?? {};
+  if (!Number.isInteger(ev.ask_id)) return { ask: null, fitsBecause: null, fitLevel: null };
+  const ask = getAsk(db, ev.ask_id);
+  const state = ev.evidence_kind === 'fact' ? buildPersonState(db, card.personKey, { now }) : null;
+  return {
+    ask: ask ? { id: ask.id, text: ask.text } : null,
+    fitsBecause: evidenceText(db, card.personKey, ev.evidence_kind ?? null, ev.evidence_id ?? null, state),
+    fitLevel: ev.fit_level ?? null,
+  };
+}
+
 export function askStatus(db, ask, { now = Date.now() } = {}) {
   const judged = Number(db.prepare('SELECT COUNT(*) AS n FROM rm_ask_match WHERE ask_id = ?').get(ask.id).n);
   const matches = Number(db.prepare('SELECT COUNT(*) AS n FROM rm_ask_match WHERE ask_id = ? AND (fit_level >= ? OR fit >= ?)').get(ask.id, ASK_MATCH_MIN_LEVEL, ASK_MATCH_MIN_FIT).n);

@@ -67,7 +67,7 @@ function stubProducer(cardsToReturn) {
 
 // ---- 12: pickProducer ----------------------------------------------------
 test('pickProducer: none shown -> owe; owe shown recently -> reconnect; a tie -> CARD_PRODUCERS[0]', () => {
-  assert.deepEqual([...CARD_PRODUCERS], ['owe', 'reconnect']);
+  assert.deepEqual([...CARD_PRODUCERS], ['owe', 'reconnect', 'ask']);
   assert.equal(REFILL_RETRY_MS, 15 * 60_000);
 
   const dbNone = openDb(':memory:');
@@ -81,7 +81,13 @@ test('pickProducer: none shown -> owe; owe shown recently -> reconnect; a tie ->
   const dbTie = openDb(':memory:');
   insertShown(dbTie, { kind: 'owe', createdAt: NOW - 5 * DAY });
   insertShown(dbTie, { kind: 'reconnect', createdAt: NOW - 5 * DAY });
-  assert.equal(pickProducer(dbTie, { now: NOW }), 'owe', 'an exact tie resolves to CARD_PRODUCERS[0]');
+  assert.equal(pickProducer(dbTie, { now: NOW, kinds: ['owe', 'reconnect'] }), 'owe', 'an exact tie resolves to CARD_PRODUCERS[0]');
+  // With the third producer in the policy (2026-09-21), the kind never shown
+  // is the least recently shown and goes first; the tie-break still holds
+  // between the two that were.
+  assert.equal(pickProducer(dbTie, { now: NOW }), 'ask', 'never shown beats shown five days ago');
+  insertShown(dbTie, { kind: 'ask', createdAt: NOW - 5 * DAY });
+  assert.equal(pickProducer(dbTie, { now: NOW }), 'owe', 'a three-way tie resolves to CARD_PRODUCERS[0]');
 });
 
 // ---- 13: per-kind unjudged, not whole-queue -------------------------------

@@ -422,6 +422,8 @@ function tieLine(c) {
   // An Owe card's sentence is its receipt for one specific overdue thing, and
   // its trigger line carries no counts to collide with.
   if (c.kind === 'owe') return sentence;
+  // An ask card's sentence is the owner's own words ("looking for: ...").
+  if (c.kind === 'ask') return sentence;
   return TEMPLATE_TIE.test(sentence) ? '' : sentence;
 }
 
@@ -567,8 +569,17 @@ function render(c) {
   // serves on its next turn, which is exactly what an owner reaching for
   // them wants. So it stays visible, always.
   const isOwe = c.kind === 'owe';
-  el('rcTitle').textContent = isOwe ? 'owe?' : 'reconnect?';
+  const isAsk = c.kind === 'ask';
+  el('rcTitle').textContent = isOwe ? 'owe?' : isAsk ? 'looking for?' : 'reconnect?';
   el('rcYes').textContent = isOwe ? 'will reply' : 'will text them';
+  // An ask card says why this person fits what the owner typed: the judgment
+  // engine's evidence pick, resolved by the server from a fact or a live line.
+  const fits = asText(c.fitsBecause);
+  const fitsRow = el('rcFitsRow');
+  if (fitsRow) {
+    fitsRow.hidden = !(isAsk && fits);
+    el('rcFits').textContent = fits;
+  }
   el('rcModes').hidden = !modesOn;
 
   const trigger = triggerLine(c);
