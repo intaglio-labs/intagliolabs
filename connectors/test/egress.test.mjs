@@ -417,6 +417,8 @@ const CLI_PRODUCERS = Object.freeze([
 // ledger row's `evidence`.
 const JEV_PRODUCERS = Object.freeze([
   'ui/server/relationship/jev.mjs',
+  // The card's judgment pass: personState.mjs builds what leaves, this asks.
+  'ui/server/relationship/judgments.mjs',
 ]);
 
 test('every module that asks the judgment model is named in the ledger', () => {

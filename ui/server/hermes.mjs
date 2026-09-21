@@ -92,6 +92,7 @@ import {
 } from './relationship/lint.mjs';
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { createJev, jevStatus, JUDGMENT_SCHEMA } from './relationship/jev.mjs';
+import { cardOverrides, quotesJudged, judgeMany } from './relationship/judgments.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { personCardFacts, changedForCard } from './relationship/cardFacts.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
@@ -2516,6 +2517,7 @@ const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 // flag is --limit (matching build-person-pages.mjs's naming), but the route
 // itself thinks of the same number as the pass's budget (SWEEP_BUDGET).
 const RELATIONSHIP_SWEEP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'engine', 'limit']);
+const RELATIONSHIP_JUDGE_FIELDS = Object.freeze(['limit']);
 const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'critical']);
 // Same field set and validation as the sweep route above (power/budget/
 // battery/onAc/thermal/limit); public lookup has no per-request engine
@@ -3929,6 +3931,71 @@ function startPageBuilds(db, policy, rel, batchId, cards) {
   drain(batchId, personKeys);
 }
 
+// THE JUDGMENT PASS FOR A BATCH, mirroring startPageBuilds exactly: the
+// producers stay synchronous; this runs after a batch lands, one person a
+// second, and writes the rm_judgment cache the serve reads. A pass already
+// running queues the next batch; a declined engine (unconfigured, paused,
+// rejected) is a pass that asks nothing. Never awaited by the request.
+function startCardJudgments(db, policy, rel, batchId, cards) {
+  const personKeys = cards.filter((c) => c.kind === 'reconnect').map((c) => c.personKey);
+  if (personKeys.length === 0) return;
+  if (rel.judgingActive) {
+    rel.judgingPending = { batchId, personKeys: [...new Set([...(rel.judgingPending?.personKeys ?? []), ...personKeys])] };
+    return;
+  }
+  rel.judgingActive = true;
+  const jev = relationshipJev(policy);
+  const judgments = readOwnerConfig(policy)?.relationshipMemory?.jev?.judgments ?? {};
+  const drain = (id, keys) => judgeMany(db, jev, keys, { judgments })
+    .then((totals) => { rel.judging = { batchId: id, ...totals, at: Date.now() }; })
+    .catch((e) => { rel.judging = { batchId: id, lastError: String(e?.message ?? e), at: Date.now() }; })
+    .then(() => {
+      const next = rel.judgingPending ?? null;
+      rel.judgingPending = null;
+      if (next) return drain(next.batchId, next.personKeys);
+      rel.judgingActive = false;
+      return undefined;
+    });
+  drain(batchId, personKeys);
+}
+
+// THE NIGHTLY POOL PASS: every eligible person, cheapest first to skip (an
+// unchanged state is a cache hit and costs nothing), bounded per tick so the
+// widget's existing timer -- the sweep route -- drives it without a new
+// scheduler. 694 people at ~1.3k tokens is about $0.04 for a full pass; the
+// spacing keeps hermes answering.
+function startPoolJudgments(db, policy, rel, { limit = 40, now = Date.now() } = {}) {
+  if (rel.judgingActive) return { started: false, reason: 'already running' };
+  const jev = relationshipJev(policy);
+  if (jev.state !== 'ok') return { started: false, reason: jev.state };
+  let keys = [];
+  try {
+    keys = eligiblePool(db, { mode: 'any', now }).map((c) => c.personKey).slice(0, Math.max(1, limit));
+  } catch (e) {
+    return { started: false, reason: `pool: ${e?.name ?? 'Error'}` };
+  }
+  if (keys.length === 0) return { started: false, reason: 'empty pool' };
+  startCardJudgments(db, policy, rel, null, keys.map((personKey) => ({ personKey, kind: 'reconnect' })));
+  return { started: true, people: keys.length };
+}
+
+// THE QUOTE THE CARD WILL SHOW, resolved once and read by BOTH the
+// servability gate and the serve (design pre-mortem: a serve-time override
+// that the gate did not see would pass a card on one row and emit another
+// that is deleted). For a reconnect card whose person the judgment pass has
+// reached, the cache decides: the best line at or above the floor, or NO quote
+// at all when nothing qualified -- a card without a quote is a card the
+// widget already knows how to draw, and a filler quote is worse than none
+// (the first live card led with a birthday wish). Unjudged, or any other
+// kind: the producer's own reference, unchanged.
+function resolveCardQuote(db, card) {
+  if (card.kind === 'reconnect' && card.personKey && quotesJudged(db, card.personKey)) {
+    const over = cardOverrides(db, card.personKey);
+    return { quoteContextId: over.quoteContextId, judged: true, overrides: over };
+  }
+  return { quoteContextId: Number.isInteger(card.quoteContextId) ? card.quoteContextId : null, judged: false, overrides: null };
+}
+
 // WHY A QUEUED CARD CANNOT BE SERVED RIGHT NOW, or null when it can be --
 // the `servable` half of daily.mjs's CONSUMED model (see the block comment
 // there). Derived on every request and never stored: nothing here is
@@ -3948,8 +4015,9 @@ function cardBlockReason(db, rel, card) {
   // The quote is a REFERENCE resolved against the live row: row gone means
   // the receipt is gone, so the card is gone (the deletion cascade honored
   // at serve time rather than violated at store time).
-  if (Number.isInteger(card.quoteContextId)) {
-    if (db.prepare('SELECT 1 FROM context WHERE id = ?').get(card.quoteContextId) === undefined) {
+  const { quoteContextId } = resolveCardQuote(db, card);
+  if (Number.isInteger(quoteContextId)) {
+    if (db.prepare('SELECT 1 FROM context WHERE id = ?').get(quoteContextId) === undefined) {
       return 'quote-gone';
     }
   }
@@ -4668,6 +4736,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         refillKey: (kind) => (kind === 'reconnect' ? reconnectRefillKey(reconnectMode) : kind),
         onBatchProduced: (kind, batchId, cards) => {
           if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
+          // And the judgment pass, beside it (never inside the producer).
+          if (cards.length > 0) startCardJudgments(db, policy, rel, batchId, cards);
         },
       };
       try {
@@ -4955,9 +5025,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // Resolve the quote from the LIVE row. Row gone or edited: the receipt
       // is gone, so the card is gone -- the deletion cascade, honored at
       // serve time instead of violated at store time.
+      // Through resolveCardQuote, the same resolver cardBlockReason used, so
+      // the gate and the serve agree on which row this card stands on. A
+      // judged person with no qualifying line serves with quote null.
+      const resolved = resolveCardQuote(db, card);
       let quote = null;
-      if (Number.isInteger(card.quoteContextId)) {
-        const row = db.prepare('SELECT text FROM context WHERE id = ?').get(card.quoteContextId);
+      if (Number.isInteger(resolved.quoteContextId)) {
+        const row = db.prepare('SELECT text FROM context WHERE id = ?').get(resolved.quoteContextId);
         if (row === undefined) continue;
         quote = String(row.text).slice(0, 200);
       }
@@ -4971,6 +5045,18 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // or retracted evidence.
       let left = card.left;
       let leftTone = card.leftTone;
+      // The judgment engine's tone and label ride in where the producer left
+      // them empty (the eligibility producer writes neither); a matcher card
+      // that already carries a tone keeps its own. The tone shows only above
+      // the confidence gate cardOverrides applies, and it writes no prose:
+      // `left` stays whatever the page or the producer said.
+      let label = card.label ?? null;
+      let judged = null;
+      if (resolved.judged && card.kind === 'reconnect') {
+        judged = { leftConfidence: resolved.overrides.leftConfidence, worth: resolved.overrides.worth, closeness: resolved.overrides.closeness, quoteScore: resolved.overrides.quoteScore };
+        if (leftTone === null || leftTone === undefined) leftTone = resolved.overrides.leftTone;
+        if (label === null) label = resolved.overrides.kind;
+      }
       const commitmentClaimId = card.evidence?.commitment_claim_id;
       if (Number.isInteger(commitmentClaimId)) {
         const claimRow = db.prepare('SELECT text FROM claim WHERE id = ?').get(commitmentClaimId);
@@ -5051,7 +5137,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // puts its own lastMeetingAt on the card object cannot shadow the
       // pinned shape.
       const facts = personCardFacts(db, card.personKey, { now: nowForLive });
-      send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page,
+      send(res, 200, { card: { ...card, quoteContextId: resolved.quoteContextId, quote, sentence, left, leftTone, label, judged,
+        who: page.sections.who?.text ?? null, page,
         changed: changedForCard(changed), drafts, ...facts },
         // PROVENANCE, NOT POLICY (round-5 finding 10). `servedMode` answers
         // "which mode produced the card in your hand", and the only thing that
@@ -5321,7 +5408,27 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       thermal: body.thermal ?? null,
       now: Date.now(),
     });
-    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
+    // The pool judgment pass rides the same tick (fire-and-forget; its own
+    // guard refuses when a pass is running or the engine is not ok). One
+    // bounded slice per tick: forty people, a second apart, under a minute.
+    const judging = startPoolJudgments(db, policy, rel, { limit: body.power === 'full' ? 60 : 20 });
+    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null, judging }, cors);
+    return;
+  }
+
+  // THE JUDGMENT PASS BY HAND (bearer-only): the desk's way to judge the pool
+  // now, or the widget's when a batch needs its quotes before the first serve.
+  // `limit` bounds the people; the pass itself is the same one the sweep tick
+  // starts. Answers with what it started, never with what it found.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/judge') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_JUDGE_FIELDS);
+    if (body.limit !== undefined && (!Number.isInteger(body.limit) || body.limit < 1 || body.limit > 2000)) {
+      throw badRequest('"limit" must be an integer from 1 through 2000');
+    }
+    const rel = relationshipState(db, policy);
+    const started = startPoolJudgments(db, policy, rel, { limit: body.limit ?? 40 });
+    send(res, 200, { ...started, engine: relationshipJev(policy).state, last: rel.judging ?? null }, cors);
     return;
   }
 

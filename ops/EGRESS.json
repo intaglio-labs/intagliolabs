@@ -129,7 +129,8 @@
       "credential": "a TypeSafe API key the owner placed at ~/.hazlie/secrets/typesafe-api-key.txt (0600; TYPESAFE_API_KEY may override for tests), read by connectors/lib/secrets.mjs readSecretLine, sent as a bearer header, never logged and never in argv",
       "decision": "OWNER DECISION 2026-09-20, recorded in the session that built it, in plainer words than it was said: the privacy promise that excerpt-sending features stay off until turned on is dropped for judgments -- this is about the value of the card, and judgments are ON by default whenever a key is present, with no consent toggle. What leaves, unreviewed and on a timer: a code-built `personState` bundle (LinkedIn title/company/industry, channels, message volume/balance/span and meeting counts rendered as WORDS, recency as words, the last 8 direct lines each clipped to 160 characters, one long line from the other person per year up to 6) and, for the quote judgment, up to 12 of the other person's recent lines; for the distiller prefilter, the owner's and the other person's lines of an episode. The Claude toggle in engines.mjs is unchanged. TypeSafe's published policy 2026-09-20: no training on inputs; retention per their DPA; zero-data-retention is an enterprise option not in force here. Measured before shipping (54 owner-judged cards, 2026-09-20): structured state lifted 'would the owner want this reminder' from AUC 0.58 to 0.72; kind is read as two axes because a four-way label was wrong for friends the owner also works with.",
       "evidence": [
-        "ui/server/relationship/jev.mjs"
+        "ui/server/relationship/jev.mjs",
+        "ui/server/relationship/judgments.mjs"
       ]
     },
     {

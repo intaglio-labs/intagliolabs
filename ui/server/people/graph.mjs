@@ -26,6 +26,7 @@
 // thread, never stored -- see memory/threadKind.mjs for why it is not a field.
 import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
 import { inferRelationshipRoleIndex } from './roles.mjs';
+import { judgedRoles } from '../relationship/judgments.mjs';
 import { subRolesFor } from './subRoles.mjs';
 
 const DAY = 86_400_000;
@@ -981,6 +982,7 @@ export function buildGraph(
     new Map(graph.flatMap((person) => (person.identifiers ?? []).map((id) => [id, person.key]))),
     new Map(graph.map((person) => [person.key, person.name]))
   );
+  const judged = judgedRoles(contextDb);
   return graph.map((person) => {
     const yearRoles = inferredRoles.rolesByYear.get(person.key) ?? new Map();
     const activeYears = new Set((person.timeline ?? []).map((bucket) => Number(String(bucket.ym).slice(0, 4))));
@@ -998,7 +1000,12 @@ export function buildGraph(
     }
     return {
       ...person,
-      role: owner?.roles?.get(person.key) ?? inferredRoles.roles.get(person.key) ?? 'friend',
+      // PRECEDENCE (owner decision 2026-09-20, "kind should ship from jev"):
+      // the owner's own correction, then the judgment engine's derived label
+      // (rm_judgment kind='kind', judgments.mjs), then the regex guess, then
+      // friend. The regex scorer stays as the fallback for a person nobody has
+      // judged yet; it is no longer the writer once a judgment exists.
+      role: owner?.roles?.get(person.key) ?? judged.get(person.key) ?? inferredRoles.roles.get(person.key) ?? 'friend',
       rolesByYear,
       // Investor/founder/operator tags derived from the LinkedIn export, or
       // the owner's own correction (config.personSubRoles) when one exists.

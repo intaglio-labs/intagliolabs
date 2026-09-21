@@ -71,6 +71,7 @@ import { RECONNECT_GATES } from './reconnect.mjs';
 import { liveQueuePersonKeys } from './daily.mjs';
 import { CAL_GATES } from './calendarReconnect.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
+import { judgedScores, worthBucket } from './judgments.mjs';
 
 // v2 (review finding 5 + 11): the authored gate is direct-message-only
 // (room = 0), and a person the OTHER producer is currently holding in its
@@ -251,7 +252,17 @@ export function eligiblePool(db, { mode, now = Date.now(), includeOffered = fals
     });
   }
 
-  out.sort((a, b) => b.depth - a.depth || b.change - a.change || b.quietDays - a.quietDays);
+  // ~~out.sort((a, b) => b.depth - a.depth || b.change - a.change || b.quietDays - a.quietDays);~~
+  // Since 2026-09-20 the judgment engine's `worth` leads the order as a
+  // bucket (judgments.mjs worthBucket: likely, unjudged, unsure, unlikely) and
+  // the arithmetic rank decides inside a bucket. The eligibility GATES above
+  // are untouched -- who may be offered is still SQL; this only says who
+  // first. No file in this module calls a model: the bucket is read from the
+  // rm_judgment cache the background pass filled.
+  const worth = judgedScores(db, 'worth');
+  for (const c of out) c.worth = worth.has(c.personKey) ? worth.get(c.personKey) : null;
+  out.sort((a, b) => worthBucket(b.worth) - worthBucket(a.worth)
+    || b.depth - a.depth || b.change - a.change || b.quietDays - a.quietDays);
   return out;
 }
 

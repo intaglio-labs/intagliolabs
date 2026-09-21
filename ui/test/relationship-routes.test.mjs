@@ -1643,3 +1643,63 @@ test('GET /admin/config/card answers null for a malformed config rather than ech
       jev: { state: 'unconfigured', enabled: false, callsToday: 0, inputTokensToday: 0, costUsdToday: 0 } });
   } finally { await server.close(); }
 });
+
+// THE SERVE READS THE JUDGMENT CACHE, AND SO DOES THE GATE (2026-09-20). A
+// judged person whose producer quote scored as filler serves with quote null
+// and the tone and label the judgments carry; the gate tests the row the
+// serve will actually stand on, so an override pointing at a deleted row
+// blocks the card instead of letting the serve emit a ghost.
+test('a judged card serves the judged quote, tone and label, and the gate follows the same row', async () => {
+  await withServer(async ({ call, db }) => {
+    await call('POST', '/ingest', [
+      { ts: Date.now() - 2000, source: 'imessage', entity_id: 'j:ask', text: 'could you look over the deck before thursday?' },
+      { ts: Date.now() - 1000, source: 'imessage', entity_id: 'j:bday', text: 'happy birthday!! hope it is a good one' },
+    ]);
+    const ask = Number(db.prepare(`SELECT id FROM context WHERE entity_id = 'j:ask'`).get().id);
+    const bday = Number(db.prepare(`SELECT id FROM context WHERE entity_id = 'j:bday'`).get().id);
+    const key = 'name:lapsed colleague';
+    // The person and their lines, as the projection would have them.
+    db.prepare(`INSERT INTO people(person_key, display_name, first_seen, last_seen, last_from_them, last_from_owner, sent, received,
+      met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year, linkedin, sub_roles, built_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(key, 'Lapsed Colleague', 1, 2, 2, 1, 5, 5, 0, 0, 10, 0, 'friend', '{}', null, '[]', 3);
+    for (const [id, hash] of [[ask, 'ha'], [bday, 'hb']]) {
+      db.prepare(`UPDATE context SET content_hash = ? WHERE id = ?`).run(hash, id);
+      db.prepare(`INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+        VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, 'c')`).run(key, id);
+    }
+    // What a judgment pass would have written: the birthday line is filler,
+    // the ask is a real quote; a warm ending above the gate; a business kind.
+    const put = db.prepare(`INSERT INTO rm_judgment(person_key, kind, subject_id, subject_hash, answer, score, probability, confidence, model, question_sha, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    put.run(key, 'quote', bday, 'hb', null, 0.6, null, 0.9, 'm', 'q', 5);
+    put.run(key, 'quote', ask, 'ha', null, 3.7, null, 0.8, 'm', 'q', 5);
+    put.run(key, 'ending', null, 'sh', 'warm', 0.8, 0.8, 0.7, 'm', 'e', 5);
+    put.run(key, 'kind', null, 'sh', 'business', 3.2, null, null, 'm', 'k', 5);
+    put.run(key, 'worth', null, 'sh', null, 0.71, null, null, 'm', 'w', 5);
+
+    await call('POST', '/admin/relationship/refresh'); await settle();
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(card.name, 'Lapsed Colleague');
+    assert.equal(card.quote, 'could you look over the deck before thursday?', 'the judged quote beats the producer\'s birthday reference');
+    assert.equal(card.quoteContextId, ask);
+    assert.equal(card.label, 'business', 'the stub card carried label business; a null label would take the judged kind');
+    assert.equal(card.leftTone, 'warm');
+    assert.equal(card.judged.worth, 0.71);
+    assert.equal(card.judged.quoteScore, 3.7);
+
+    // Delete the judged row. The resolver re-reads the CURRENT candidates, so
+    // the ask drops out and the birthday line -- scored as filler -- does not
+    // take its place: the card re-serves (it was already shown) with no quote
+    // at all, and the gate, reading the same resolver, has no missing row to
+    // block on. Gate and serve stand on one answer either way.
+    await call('POST', '/admin/delete-entities', { source: 'imessage', entity_ids: ['j:ask'] });
+    const after = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(after.card?.name, 'Lapsed Colleague');
+    assert.equal(after.card.quote, null, 'no qualifying line left: the quote is hidden, not replaced by filler');
+    assert.equal(after.card.quoteContextId, null);
+  }, { relationshipMatcher: async (svc) => {
+    const db2 = svc.db();
+    const bday = Number(db2.prepare(`SELECT id FROM context WHERE entity_id = 'j:bday'`).get()?.id ?? 0);
+    return { cards: [ { ...structuredClone(STUB_CARDS[0]), quoteContextId: bday || null, leftTone: null, left: null } ], focus: 'x', currentTopics: [] };
+  } });
+});
