@@ -78,11 +78,11 @@ test('the birthday line clears the old floor and loses to the judged quote; stat
     lines: [
       { who: 'them', text: 'would you be up for reviewing the onboarding flow before we ship it next month?' },
       { who: 'owner', text: 'yes send it over' },
-      { who: 'them', text: 'Happy birthday Rishab !' },
+      { who: 'them', text: 'Happy birthday Sam !' },
     ],
   });
-  // NON-VACUITY: today's floor accepts the birthday wish (23 chars, 3 words,
-  // and "happy" is not an ACK word), so the first live card led with it.
+  // NON-VACUITY: today's floor accepts the birthday wish (20 chars, 3 words,
+  // and "happy" is not an ACK word), so the first live card led with one.
   assert.equal(substantiveQuoteContextId(db, 'p:1'), ids[2], 'the old floor picks the birthday line');
 
   const call = buildJudgmentCall(db, 'p:1', { now: NOW });

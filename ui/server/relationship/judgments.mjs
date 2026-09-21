@@ -92,7 +92,7 @@ export function buildJudgmentCall(db, personKey, { now = Date.now(), judgments =
   const state = buildPersonState(db, personKey, { now });
   if (!state) return null;
   const candidates = judgments.quote === false ? [] : quoteCandidates(db, personKey);
-  const ended = judgments.ending === false ? [] : lastExchange(db, personKey, { limit: ENDED_LINES });
+  const ended = judgments.ending === false ? [] : lastExchange(db, personKey, { limit: ENDED_LINES }).map(({ who, text }) => ({ who, text }));
   const questions = {};
   const quoteShas = [];
   candidates.forEach((_, i) => {
@@ -292,6 +292,7 @@ export function worthBucket(worth) {
 // keeps the people page answering while a batch is judged.
 export async function judgeMany(db, jev, personKeys, { now = Date.now(), judgments = {}, dailyTokenBudget = null, spacingMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), onEach = null } = {}) {
   const totals = { asked: 0, cached: 0, declined: 0, inputTokens: 0 };
+  personKeys = [...new Set(personKeys)];
   for (const personKey of personKeys) {
     if (jev.state !== 'ok') { totals.declined += personKeys.length - totals.asked - totals.cached - totals.declined; break; }
     let result = null;

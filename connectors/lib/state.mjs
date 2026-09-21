@@ -289,6 +289,10 @@ export function openStateDb(path = defaultStateDbPath()) {
   // one clock.
   function reopenYearlyWalk({ now = Date.now } = {}) {
     let changes = 0;
+    // The tapback tallies are additive per scan (imessage_reactions), so a
+    // walk that starts over would count every year twice. A purge is the one
+    // thing that reopens the walk, and it makes the tallies untrue as well.
+    try { changes += Number(db.prepare('DELETE FROM imessage_reactions').run().changes); } catch { /* pre-round-one db */ }
     // COMPLETE, because yearlyBackfill.task() short-circuits on it for EVERY
     // connector: left standing over a purged source's missing checkpoints it
     // means that source is never scheduled to walk its history again.

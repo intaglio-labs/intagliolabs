@@ -216,8 +216,12 @@ test('the cache stores closed tokens and numbers only, replaces on the same subj
   assert.equal(Number(db.prepare(`SELECT COUNT(*) n FROM rm_judgment WHERE kind='quote'`).get().n), 1, 'same subject and sha replaces');
   assert.equal(judgmentFor(db, { kind: 'quote', subjectId: 42, subjectHash: 'h', questionSha: 'q' }).score, 3.9);
   assert.equal(judgmentFor(db, { kind: 'quote', subjectId: 42, subjectHash: 'other', questionSha: 'q' }), null, 'an edited row is a different subject');
+  // Two rows remain before the prune: the second ending replaced the first
+  // (a person-scoped judgment is the newest only), and the quote replaced on
+  // its subject.
+  assert.equal(Number(db.prepare('SELECT COUNT(*) n FROM rm_judgment').get().n), 2);
   const pruned = pruneJudgments(db, { now: t0 + 91 * 86_400_000 });
-  assert.equal(pruned, 3);
+  assert.equal(pruned, 2);
   assert.equal(judgmentFor(db, { personKey: 'p1', kind: 'ending' }), null);
   assert.ok(a);
 });

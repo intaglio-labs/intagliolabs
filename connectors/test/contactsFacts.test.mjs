@@ -12,8 +12,10 @@ function store({ withFacts = true } = {}) {
   db.exec(`CREATE TABLE ZABCDRECORD(Z_PK INTEGER PRIMARY KEY, ZFIRSTNAME TEXT, ZLASTNAME TEXT, ZORGANIZATION TEXT${withFacts ? ', ZJOBTITLE TEXT, ZDEPARTMENT TEXT, ZNICKNAME TEXT' : ''});
     CREATE TABLE ZABCDPHONENUMBER(ZOWNER INTEGER, ZFULLNUMBER TEXT);
     CREATE TABLE ZABCDEMAILADDRESS(ZOWNER INTEGER, ZADDRESS TEXT);
-    ${withFacts ? 'CREATE TABLE ZABCDRELATEDNAME(ZOWNER INTEGER, ZLABEL TEXT, ZNAME TEXT);' : ''}`);
+    ${withFacts ? 'CREATE TABLE ZABCDRELATEDNAME(ZOWNER INTEGER, ZLABEL TEXT, ZNAME TEXT); CREATE TABLE ZABCDGROUP(Z_PK INTEGER PRIMARY KEY, ZNAME TEXT); CREATE TABLE Z_19PARENTGROUPS(Z_19CONTACTS INTEGER, Z_15PARENTGROUPS INTEGER);' : ''}`);
   if (withFacts) {
+    db.prepare('INSERT INTO ZABCDGROUP VALUES (7, ?)').run('Founders');
+    db.prepare('INSERT INTO Z_19PARENTGROUPS VALUES (1, 7)').run();
     db.prepare('INSERT INTO ZABCDRECORD VALUES (1, ?, ?, ?, ?, ?, ?)').run('Ada', 'Example', 'Studio', 'Head of Design', 'Product', 'Addy');
     db.prepare('INSERT INTO ZABCDRECORD VALUES (2, ?, ?, ?, ?, ?, ?)').run('Bo', 'Example', null, null, null, null);
     db.prepare('INSERT INTO ZABCDRELATEDNAME VALUES (2, ?, ?)').run('_$!<Mother>!$_', 'Ada Example');
@@ -46,8 +48,8 @@ test('readStore returns the card facts beside the identifiers, keyed by the same
   assert.ok(ada && bo);
   const adaFacts = facts.find((f) => f.personRef === ada.personRef);
   const boFacts = facts.find((f) => f.personRef === bo.personRef);
-  assert.deepEqual(adaFacts, { personRef: ada.personRef, jobTitle: 'Head of Design', department: 'Product', nickname: 'Addy', relationLabels: [] });
-  assert.deepEqual(boFacts, { personRef: bo.personRef, jobTitle: null, department: null, nickname: null, relationLabels: ['mother', 'college roommate'] });
+  assert.deepEqual(adaFacts, { personRef: ada.personRef, jobTitle: 'Head of Design', department: 'Product', nickname: 'Addy', relationLabels: [], groups: ['Founders'] });
+  assert.deepEqual(boFacts, { personRef: bo.personRef, jobTitle: null, department: null, nickname: null, relationLabels: ['mother', 'college roommate'], groups: [] });
   assert.equal(facts.length, 2, 'the orphan label on a card that does not exist is dropped');
 });
 
@@ -60,12 +62,13 @@ test('an older store shape reads as no facts, not a failure', () => {
 
 test('the framework path reads the same facts from the helper shape and tolerates an older helper', () => {
   const facts = factsFromContacts([
-    { contactId: 'c1', displayName: 'Ada Example', phones: ['+15550100001'], emails: [], jobTitle: ' Head of Design ', relations: [{ label: '_$!<Friend>!$_', name: 'Bo' }, { label: '' }] },
+    { contactId: 'c1', displayName: 'Ada Example', phones: ['+15550100001'], emails: [], jobTitle: ' Head of Design ', relations: [{ label: '_$!<Friend>!$_', name: 'Bo' }, { label: '' }], groups: ['Founders', ' '] },
     { contactId: 'c2', displayName: 'Bo Example', phones: ['+15550100002'], emails: [] },
     { displayName: '', phones: ['+15550100003'] },
   ]);
   assert.equal(facts.length, 1);
   assert.equal(facts[0].jobTitle, 'Head of Design');
   assert.deepEqual(facts[0].relationLabels, ['friend']);
+  assert.deepEqual(facts[0].groups, ['Founders']);
   assert.equal(typeof facts[0].personRef, 'string');
 });

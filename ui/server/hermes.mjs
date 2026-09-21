@@ -3803,7 +3803,9 @@ function relationshipJev(policy) {
   const key = JSON.stringify({ ...section, keyPath });
   let client = jevClients.get(key);
   if (!client) {
-    if (jevClients.size >= 8) jevClients.clear();
+    // Evict the OLDEST, never everything (review low finding): a clear would
+    // drop every live circuit breaker and 401 latch at once.
+    if (jevClients.size >= 8) jevClients.delete(jevClients.keys().next().value);
     client = createJev({ ...cfg, relationshipMemory: { ...cfg.relationshipMemory, jev: { ...section, keyPath } } });
     jevClients.set(key, client);
   }

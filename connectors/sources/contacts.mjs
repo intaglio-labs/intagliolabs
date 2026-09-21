@@ -146,15 +146,48 @@ export function readStore(db) {
       factRows.get(owner).relationLabels.push(label);
     }
   }
+  // GROUPS: ZABCDGROUP holds the names; the membership join table is
+  // generated per schema version (Z_<n>PARENTGROUPS / Z_<n>CONTACTS), so it is
+  // discovered by its column names rather than spelled. A store without one
+  // reads as no groups.
+  const groupsByOwner = readGroups(db);
   const facts = [];
   for (const [owner, identifiers] of byOwner) {
     const displayName = names.get(owner);
     const personRef = personRefFor({ displayName, identifiers: identifiers.map((item) => item.identifier) });
     for (const item of identifiers) entries.push({ ...item, displayName, personRef });
-    const f = factRows.get(owner);
-    if (f && (f.jobTitle || f.department || f.nickname || f.relationLabels.length)) facts.push({ personRef, ...f });
+    const f = factRows.get(owner) ?? { jobTitle: null, department: null, nickname: null, relationLabels: [] };
+    const groups = groupsByOwner.get(owner) ?? [];
+    if (f.jobTitle || f.department || f.nickname || f.relationLabels.length || groups.length) facts.push({ personRef, ...f, groups });
   }
   return { entries, facts, reason: null };
+}
+
+export function readGroups(db) {
+  const out = new Map();
+  const group = tableColumns(db, 'ZABCDGROUP');
+  if (!group.has('Z_PK') || !group.has('ZNAME')) return out;
+  const names = new Map();
+  for (const r of db.prepare('SELECT Z_PK, ZNAME FROM ZABCDGROUP').all()) {
+    if (typeof r.ZNAME === 'string' && r.ZNAME.trim()) names.set(Number(r.Z_PK), r.ZNAME.trim().slice(0, 60));
+  }
+  if (names.size === 0) return out;
+  let joinTable = null;
+  for (const t of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'Z\\_%' ESCAPE '\\'").all()) {
+    const cols = [...tableColumns(db, t.name)];
+    const g = cols.find((c) => /GROUPS$/u.test(c));
+    const c = cols.find((c2) => /CONTACTS$/u.test(c2));
+    if (g && c) { joinTable = { name: t.name, g, c }; break; }
+  }
+  if (!joinTable) return out;
+  for (const r of db.prepare(`SELECT ${joinTable.g} AS g, ${joinTable.c} AS c FROM "${joinTable.name}"`).all()) {
+    const name = names.get(Number(r.g));
+    if (!name) continue;
+    const owner = Number(r.c);
+    if (!out.has(owner)) out.set(owner, []);
+    out.get(owner).push(name);
+  }
+  return out;
 }
 
 // `_$!<Mother>!$_` -> "mother"; a custom label stays as typed, lowercased and
@@ -183,8 +216,9 @@ export function factsFromContacts(contacts) {
     const personRef = personRefFor({ contactId: c?.contactId, displayName: display, identifiers });
     const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
     const relationLabels = (Array.isArray(c.relations) ? c.relations : []).map((r) => relationLabel(r?.label)).filter(Boolean);
-    const f = { personRef, jobTitle: clean(c.jobTitle), department: clean(c.department), nickname: clean(c.nickname), relationLabels };
-    if (f.jobTitle || f.department || f.nickname || relationLabels.length) facts.push(f);
+    const groups = (Array.isArray(c.groups) ? c.groups : []).filter((g) => typeof g === 'string' && g.trim()).map((g) => g.trim().slice(0, 60));
+    const f = { personRef, jobTitle: clean(c.jobTitle), department: clean(c.department), nickname: clean(c.nickname), relationLabels, groups };
+    if (f.jobTitle || f.department || f.nickname || relationLabels.length || groups.length) facts.push(f);
   }
   return facts;
 }

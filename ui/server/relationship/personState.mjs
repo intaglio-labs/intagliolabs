@@ -91,14 +91,17 @@ export function trend(byYear, now = Date.now()) {
 // isAutomatedRow runs here, in code, because Jev would rank a shipping notice
 // highly: it is specific, it names things, and it is nothing to reply to.
 export function quoteCandidates(db, personKey, { limit = QUOTE_CANDIDATES } = {}) {
+  // Fetch more than the limit and filter first (review finding 13): a person
+  // whose newest twelve lines are all notifications still has lines to judge.
   const rows = db.prepare(
     `SELECT c.id AS id, c.text AS text, c.content_hash AS hash, c.ts AS ts
      FROM person_event_links pel JOIN context c ON c.id = pel.context_id
      WHERE pel.person_key = ? AND pel.authored = 1 AND pel.room = 0
      ORDER BY c.ts DESC LIMIT ?`
-  ).all(personKey, limit);
+  ).all(personKey, limit * 4);
   return rows
     .filter((r) => typeof r.text === 'string' && r.text.trim().length > 0 && !isAutomatedRow(r.text))
+    .slice(0, limit)
     .map((r) => ({ id: Number(r.id), hash: r.hash ?? null, ts: Number(r.ts), text: clip(r.text) }));
 }
 
@@ -110,7 +113,9 @@ export function lastExchange(db, personKey, { limit = EXCHANGE_LINES } = {}) {
      WHERE pel.person_key = ? AND pel.room = 0 AND (pel.authored = 1 OR pel.owner_authored = 1)
      ORDER BY c.ts DESC LIMIT ?`
   ).all(personKey, limit);
-  return rows.reverse().map((r) => ({ who: r.theirs ? 'them' : 'owner', text: clip(r.text) }));
+  // `question` is judged on the whole line, before the clip: a long question
+  // still ends in a question mark (review low finding).
+  return rows.reverse().map((r) => ({ who: r.theirs ? 'them' : 'owner', text: clip(r.text), question: /\?\s*$/u.test(String(r.text ?? '')) }));
 }
 
 function tableExists(db, name) {
@@ -192,9 +197,9 @@ export function buildPersonState(db, personKey, { now = Date.now() } = {}) {
       who_wrote_last: !p.last_from_them && !p.last_from_owner
         ? 'nobody'
         : (Number(p.last_from_them) || 0) > (Number(p.last_from_owner) || 0) ? 'them' : 'owner',
-      last_line_from_them_is_question: Boolean(lastTheirs && lastTheirs.who === 'them' && /\?\s*$/u.test(lastTheirs.text)),
+      last_line_from_them_is_question: Boolean(lastTheirs && lastTheirs.who === 'them' && lastTheirs.question),
     },
-    last_exchange: exchange,
+    last_exchange: exchange.map(({ who, text }) => ({ who, text })),
     their_words_over_the_years: sample,
   };
   return state;

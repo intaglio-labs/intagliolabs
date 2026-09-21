@@ -372,6 +372,7 @@ CREATE TABLE IF NOT EXISTS rm_judgment(
   created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS rm_judgment_lookup ON rm_judgment(person_key, kind, created_at);
+CREATE INDEX IF NOT EXISTS rm_judgment_kind_person ON rm_judgment(kind, person_key, id);
 CREATE UNIQUE INDEX IF NOT EXISTS rm_judgment_cache
   ON rm_judgment(kind, subject_id, subject_hash, question_sha) WHERE subject_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS rm_jev_usage(
@@ -399,6 +400,11 @@ export function recordJudgment(db, {
   if (subjectId !== null) {
     db.prepare(`DELETE FROM rm_judgment WHERE kind = ? AND subject_id = ? AND subject_hash IS ? AND question_sha = ?`)
       .run(kind, subjectId, subjectHash, questionSha);
+  } else if (personKey !== null) {
+    // A person-scoped judgment is the newest one only: it is a cache, and a
+    // row per pass would grow without bound and make every newest-per-person
+    // read a correlated scan (review finding 12).
+    db.prepare(`DELETE FROM rm_judgment WHERE kind = ? AND person_key = ? AND subject_id IS NULL`).run(kind, personKey);
   }
   const info = db.prepare(`INSERT INTO rm_judgment(person_key, kind, subject_id, subject_hash, answer, score, probability,
       confidence, model, question_sha, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
