@@ -186,9 +186,90 @@ END;
 const schemaReady = new WeakSet();
 let warnedProjectionFailure = false;
 
+// FACTS THE SPINE KNOWS AND THE CORPUS CANNOT PROVE (ingestion round one,
+// 2026-09-20): the rest of the address-book card, and tapback counts per
+// person. Copied from state.db at every projection rebuild by writeSpineFacts,
+// keyed by person_key so personState.mjs reads them with one lookup. No text
+// beyond short labels the owner typed.
+export const SPINE_FACTS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS person_contact_facts(
+  person_key      TEXT PRIMARY KEY REFERENCES people(person_key) ON DELETE CASCADE,
+  job_title       TEXT,
+  department      TEXT,
+  nickname        TEXT,
+  relation_labels TEXT NOT NULL DEFAULT '[]',
+  groups          TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS person_reactions(
+  person_key TEXT PRIMARY KEY REFERENCES people(person_key) ON DELETE CASCADE,
+  from_them  INTEGER NOT NULL DEFAULT 0,
+  from_owner INTEGER NOT NULL DEFAULT 0
+);
+`;
+
+function spineHasTable(stateDb, name) {
+  try {
+    return stateDb.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+export function writeSpineFacts(contextDb, stateDb) {
+  ensurePeopleProjectionSchema(contextDb);
+  contextDb.exec('DELETE FROM person_contact_facts; DELETE FROM person_reactions;');
+  if (!stateDb) return { facts: 0, reactions: 0 };
+  let facts = 0;
+  let reactions = 0;
+  if (spineHasTable(stateDb, 'contact_facts')) {
+    const ins = contextDb.prepare(
+      'INSERT OR REPLACE INTO person_contact_facts(person_key, job_title, department, nickname, relation_labels, groups) VALUES (?,?,?,?,?,?)'
+    );
+    // A card reaches a person through its identifiers: whatever key the graph
+    // gave the person (a contact key, a name key, an id key), the projection's
+    // person_identifiers already holds the join, so the card's phones and
+    // emails are looked up there rather than the key format guessed here.
+    const exists = contextDb.prepare('SELECT 1 FROM people WHERE person_key = ?');
+    const byIdentifier = contextDb.prepare('SELECT person_key FROM person_identifiers WHERE identifier = ?');
+    const cardIds = spineHasTable(stateDb, 'contact_ids')
+      ? stateDb.prepare('SELECT identifier FROM contact_ids WHERE person_ref = ?')
+      : null;
+    for (const r of stateDb.prepare('SELECT person_ref, job_title, department, nickname, relation_labels, groups FROM contact_facts').all()) {
+      let key = exists.get(`contact:${r.person_ref}`) ? `contact:${r.person_ref}` : null;
+      if (!key && cardIds) {
+        for (const id of cardIds.all(r.person_ref)) {
+          const hit = byIdentifier.get(id.identifier)?.person_key;
+          if (hit) { key = hit; break; }
+        }
+      }
+      if (!key) continue;
+      ins.run(key, r.job_title ?? null, r.department ?? null, r.nickname ?? null, r.relation_labels ?? '[]', r.groups ?? '[]');
+      facts += 1;
+    }
+  }
+  if (spineHasTable(stateDb, 'imessage_reactions')) {
+    // chat_guid -> the one person a direct chat is with; rooms are skipped.
+    const who = contextDb.prepare(
+      "SELECT person_key FROM person_event_links WHERE conversation_key = ? AND room = 0 GROUP BY person_key ORDER BY COUNT(*) DESC LIMIT 1"
+    );
+    const totals = new Map();
+    for (const r of stateDb.prepare('SELECT chat_guid, from_me, count FROM imessage_reactions').all()) {
+      const person = who.get(`imessage:${r.chat_guid}`)?.person_key;
+      if (!person) continue;
+      const t = totals.get(person) ?? { them: 0, owner: 0 };
+      if (Number(r.from_me) === 1) t.owner += Number(r.count) || 0; else t.them += Number(r.count) || 0;
+      totals.set(person, t);
+    }
+    const ins = contextDb.prepare('INSERT OR REPLACE INTO person_reactions(person_key, from_them, from_owner) VALUES (?,?,?)');
+    for (const [key, t] of totals) { ins.run(key, t.them, t.owner); reactions += 1; }
+  }
+  return { facts, reactions };
+}
+
 export function ensurePeopleProjectionSchema(db) {
   if (schemaReady.has(db)) return;
   db.exec(PEOPLE_PROJECTION_SCHEMA);
+  db.exec(SPINE_FACTS_SCHEMA);
   const eventColumns = new Set(
     db.prepare("SELECT name FROM pragma_table_info('person_event_links')").all().map((row) => row.name)
   );
@@ -226,7 +307,7 @@ export function isProjectedPeopleSource(source) {
 export function clearPeopleProjection(db) {
   db.exec(
     'DELETE FROM people_projection_dirty; DELETE FROM person_event_links; DELETE FROM identity_evidence; DELETE FROM person_identifiers; DELETE FROM person_channels; ' +
-    'DELETE FROM person_activity; DELETE FROM person_active_days; DELETE FROM people; ' +
+    'DELETE FROM person_activity; DELETE FROM person_active_days; DELETE FROM person_contact_facts; DELETE FROM person_reactions; DELETE FROM people; ' +
     'UPDATE people_projection_state SET projected_revision = -1, identity_fingerprint = NULL, ' +
     'projected_day = NULL, built_at = NULL, people_count = 0 WHERE id = 1;'
   );
@@ -738,17 +819,22 @@ export function refreshPeopleProjection(
     const incremental = incrementallyRefreshProjection(contextDb, stateDb, state, {
       now, owner, aliases, identityFingerprint, day,
     });
-    if (incremental) return incremental;
+    if (incremental) {
+      try { writeSpineFacts(contextDb, stateDb); } catch { /* facts are a bonus over the graph, never its failure */ }
+      return incremental;
+    }
   }
 
   const graph = buildGraph(contextDb, stateDb, { now, owner, aliases });
   const eventLinks = buildPersonEventLinks(contextDb, graph, { owner });
-  return {
+  const result = {
     graph: replaceProjection(contextDb, graph, eventLinks, {
       revision: Number(state.source_revision), identityFingerprint, day, now,
     }),
     rebuilt: true,
   };
+  try { writeSpineFacts(contextDb, stateDb); } catch { /* same: the graph stands without them */ }
+  return result;
 }
 
 export function materializedPeopleGraph(

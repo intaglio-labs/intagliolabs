@@ -107,6 +107,28 @@ export function messageToRow(row, { selfName = 'me', excludeChatGuids = [] } = {
   };
 }
 
+// TAPBACKS, TALLIED (ingestion round one, 2026-09-20). isRealMessage rejects
+// every row with a nonzero associated_message_type, which is right for the
+// corpus -- a heart on a message is not a message -- and wrong for the
+// relationship: it is the cheapest warmth signal there is. Types 2000..2005
+// are the six tapbacks being ADDED (love, like, dislike, laugh, emphasis,
+// question); 3000..3005 are the same six being removed and are not counted.
+// Counted per chat and direction, never stored as rows. Pure, for the test.
+export const TAPBACK_ADD_MIN = 2000;
+export const TAPBACK_ADD_MAX = 2005;
+export function tallyReactions(dbRows) {
+  const tallies = new Map();
+  for (const r of dbRows ?? []) {
+    const t = Number(r?.associated_message_type ?? 0);
+    if (t < TAPBACK_ADD_MIN || t > TAPBACK_ADD_MAX) continue;
+    const chat = typeof r?.chat_guid === 'string' && r.chat_guid ? r.chat_guid : null;
+    if (!chat) continue;
+    const key = `${chat}|${Number(r?.is_from_me ?? 0) === 1 ? 1 : 0}`;
+    tallies.set(key, (tallies.get(key) ?? 0) + 1);
+  }
+  return tallies;
+}
+
 export function messagesToRows(dbRows, { selfName = 'me', excludeChatGuids = [] } = {}) {
   const mapped = [];
   let skipped = 0;

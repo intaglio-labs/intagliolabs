@@ -115,12 +115,78 @@ export function readStore(db) {
       add(owner, normalizeEmail(r.ZADDRESS), 'email');
     }
   }
+  // THE REST OF THE CARD (ingestion round one, 2026-09-20): job title,
+  // department, nickname from the record; relation labels from
+  // ZABCDRELATEDNAME. Apple stores a stock label as `_$!<Mother>!$_` and a
+  // custom one bare; both become one short lowercase word. Read only where the
+  // column exists, so an older store shape reads as "no facts", not a failure.
+  const factCols = ['ZJOBTITLE', 'ZDEPARTMENT', 'ZNICKNAME'].filter((c) => rec.has(c));
+  const factRows = new Map();
+  if (factCols.length > 0) {
+    for (const r of db.prepare(`SELECT Z_PK, ${factCols.join(', ')} FROM ZABCDRECORD`).all()) {
+      const owner = Number(r.Z_PK);
+      if (!byOwner.has(owner)) continue;
+      const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+      factRows.set(owner, {
+        jobTitle: rec.has('ZJOBTITLE') ? clean(r.ZJOBTITLE) : null,
+        department: rec.has('ZDEPARTMENT') ? clean(r.ZDEPARTMENT) : null,
+        nickname: rec.has('ZNICKNAME') ? clean(r.ZNICKNAME) : null,
+        relationLabels: [],
+      });
+    }
+  }
+  const related = tableColumns(db, 'ZABCDRELATEDNAME');
+  if (related.has('ZOWNER') && related.has('ZLABEL')) {
+    for (const r of db.prepare('SELECT ZOWNER, ZLABEL FROM ZABCDRELATEDNAME').all()) {
+      const owner = Number(r.ZOWNER);
+      if (!byOwner.has(owner)) continue;
+      const label = relationLabel(r.ZLABEL);
+      if (!label) continue;
+      if (!factRows.has(owner)) factRows.set(owner, { jobTitle: null, department: null, nickname: null, relationLabels: [] });
+      factRows.get(owner).relationLabels.push(label);
+    }
+  }
+  const facts = [];
   for (const [owner, identifiers] of byOwner) {
     const displayName = names.get(owner);
     const personRef = personRefFor({ displayName, identifiers: identifiers.map((item) => item.identifier) });
     for (const item of identifiers) entries.push({ ...item, displayName, personRef });
+    const f = factRows.get(owner);
+    if (f && (f.jobTitle || f.department || f.nickname || f.relationLabels.length)) facts.push({ personRef, ...f });
   }
-  return { entries, reason: null };
+  return { entries, facts, reason: null };
+}
+
+// `_$!<Mother>!$_` -> "mother"; a custom label stays as typed, lowercased and
+// bounded. Anything that is not a short word of letters is dropped: a label is
+// a category, and a sentence in the label field is not one.
+export function relationLabel(raw) {
+  if (typeof raw !== 'string') return null;
+  const m = raw.match(/^_\$!<(.+)>!\$_$/u);
+  const word = (m ? m[1] : raw).trim().toLowerCase();
+  if (!word || word.length > 40 || !/^[\p{L}\p{M}' -]+$/u.test(word)) return null;
+  return word;
+}
+
+// The Contacts-framework path's equivalent: the helper may hand back
+// `jobTitle`, `department`, `nickname` and `relations` ([{label, name}]) per
+// card; absent keys mean an older helper, and read as no facts.
+export function factsFromContacts(contacts) {
+  const facts = [];
+  for (const c of Array.isArray(contacts) ? contacts : []) {
+    const display = typeof c?.displayName === 'string' ? c.displayName.trim() : '';
+    if (!display) continue;
+    const identifiers = [
+      ...(Array.isArray(c.phones) ? c.phones : []).map(normalizePhone),
+      ...(Array.isArray(c.emails) ? c.emails : []).map(normalizeEmail),
+    ].filter(Boolean);
+    const personRef = personRefFor({ contactId: c?.contactId, displayName: display, identifiers });
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+    const relationLabels = (Array.isArray(c.relations) ? c.relations : []).map((r) => relationLabel(r?.label)).filter(Boolean);
+    const f = { personRef, jobTitle: clean(c.jobTitle), department: clean(c.department), nickname: clean(c.nickname), relationLabels };
+    if (f.jobTitle || f.department || f.nickname || relationLabels.length) facts.push(f);
+  }
+  return facts;
 }
 
 // The Contacts-framework shape -> the same spine entries readStore() produces.
@@ -233,6 +299,13 @@ export function createContactsSource({ home } = {}) {
           // destructive identity churn.
           if (access === 'full') ctx.state.replaceContacts(entries);
           else if (entries.length > 0) ctx.state.upsertContacts(entries);
+          // The rest of the card, only when the read was complete: a partial
+          // view cannot prove a label was removed. Never costs the run its names.
+          if (access === 'full' && typeof ctx.state.replaceContactFacts === 'function') {
+            try { ctx.state.replaceContactFacts(factsFromContacts(cards)); } catch (e) {
+              ctx.log.warn('contacts_facts_failed', { connector: 'contacts', code: String(e?.code ?? e?.name ?? '') });
+            }
+          }
           // Photos are a nice-to-have on top of the spine: a failure here must
           // never cost the run its names, which are the thing the graph cannot
           // work without.
@@ -302,6 +375,7 @@ export function createContactsSource({ home } = {}) {
       }
 
       const byIdentifier = new Map();
+      const factsByRef = new Map();
       let storesRead = 0;
       const attempts = [];
       const cacheDir = join(ctx.cacheDir, 'contacts');
@@ -317,7 +391,8 @@ export function createContactsSource({ home } = {}) {
           // end advanced past the one that broke -- after which the mtime
           // short-circuit skipped the whole connector on every later run. One
           // silent failure masked itself permanently.
-          const { entries, reason } = readStore(db);
+          const { entries, facts = [], reason } = readStore(db);
+          for (const f of facts) factsByRef.set(f.personRef, f);
           if (reason) {
             attempts.push(`${src} (${reason})`);
             ctx.log.info('contacts_store_skipped', { connector: 'contacts', code: reason });
@@ -360,6 +435,12 @@ export function createContactsSource({ home } = {}) {
       // removed from Contacts.
       if (stores.length > 0 && storesRead === stores.length) ctx.state.replaceContacts(entries);
       else if (entries.length > 0) ctx.state.upsertContacts(entries);
+      // The rest of the card rides the same completeness rule as the names.
+      if (stores.length > 0 && storesRead === stores.length && typeof ctx.state.replaceContactFacts === 'function') {
+        try { ctx.state.replaceContactFacts([...factsByRef.values()]); } catch (e) {
+          ctx.log.warn('contacts_facts_failed', { connector: 'contacts', code: String(e?.code ?? e?.name ?? '') });
+        }
+      }
       ctx.log.info('contacts_scan', {
         connector: 'contacts',
         stores: stores.length,

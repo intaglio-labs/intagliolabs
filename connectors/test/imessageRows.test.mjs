@@ -7,6 +7,7 @@ import {
   isRealMessage,
   messageToRow,
   messagesToRows,
+  tallyReactions,
 } from '../lib/imessageRows.mjs';
 import { scanFloor, historyCeiling } from '../sources/imessage.mjs';
 
@@ -252,4 +253,23 @@ test('the history ceiling is independent of the forward floor', () => {
   });
   assert.notEqual(forward.appleNanos, history.appleNanos);
   assert.ok(history.appleNanos < forward.appleNanos, 'history reads below the live cursor');
+});
+
+// Tapbacks are rejected as rows (isRealMessage) and counted as warmth
+// (tallyReactions): the two must agree on what a tapback is, and removals
+// must not count. Fails against a tree without tallyReactions.
+test('tapbacks are counted per chat and direction, removals and real messages are not', () => {
+  const rows = [
+    { associated_message_type: 2000, chat_guid: 'iMessage;-;+1', is_from_me: 0 },
+    { associated_message_type: 2001, chat_guid: 'iMessage;-;+1', is_from_me: 0 },
+    { associated_message_type: 2005, chat_guid: 'iMessage;-;+1', is_from_me: 1 },
+    { associated_message_type: 3000, chat_guid: 'iMessage;-;+1', is_from_me: 0 }, // a removal
+    { associated_message_type: 0, chat_guid: 'iMessage;-;+1', is_from_me: 0, text: 'a message' },
+    { associated_message_type: 2003, chat_guid: null, is_from_me: 0 }, // no chat, nowhere to count
+    { associated_message_type: 2002, chat_guid: 'iMessage;+;room', is_from_me: 0 },
+  ];
+  const t = tallyReactions(rows);
+  assert.deepEqual([...t.entries()].sort(), [['iMessage;+;room|0', 1], ['iMessage;-;+1|0', 2], ['iMessage;-;+1|1', 1]]);
+  for (const r of rows) if (Number(r.associated_message_type) !== 0) assert.equal(isRealMessage(r), false);
+  assert.deepEqual([...tallyReactions([]).entries()], []);
 });

@@ -162,6 +162,9 @@ export function buildPersonState(db, personKey, { now = Date.now() } = {}) {
     sample.push({ year: String(r.y), text: clip(r.text) });
   }
   const contact = contactFacts(db, personKey);
+  const reactions = tableExists(db, 'person_reactions')
+    ? db.prepare('SELECT from_them, from_owner FROM person_reactions WHERE person_key = ?').get(personKey)
+    : null;
   const state = {
     professional: {
       linkedin: li
@@ -180,6 +183,8 @@ export function buildPersonState(db, personKey, { now = Date.now() } = {}) {
       meetings_one_on_one: count(mt?.n ?? 0),
       last_meeting: ago(Number(mt?.last) || 0, now),
       trend: trend(byYear, now),
+      // Tapbacks (ingestion round one): the cheapest warmth signal, as words.
+      ...(reactions ? { reactions_from_them: count(reactions.from_them), reactions_from_owner: count(reactions.from_owner) } : {}),
     },
     recency: {
       they_last_wrote: ago(Number(p.last_from_them) || 0, now),

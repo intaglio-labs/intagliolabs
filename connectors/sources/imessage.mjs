@@ -19,7 +19,7 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { snapshotStore } from '../lib/storeReader.mjs';
-import { messagesToRows } from '../lib/imessageRows.mjs';
+import { messagesToRows, tallyReactions } from '../lib/imessageRows.mjs';
 import { pinnedThreadGuids } from '../lib/pinnedThread.mjs';
 
 const DEFAULT_BACKFILL_DAYS = 90;
@@ -205,6 +205,18 @@ export function createImessageSource({ home } = {}) {
         // left on disk still names a thread that must stay excluded.
         const excludeChatGuids = pinnedThreadGuids({ home: resolvedHome });
 
+        // Tapbacks are counted here, before the row filter drops them, and
+        // never become rows (imessageRows.mjs tallyReactions). A failure to
+        // record a tally must not cost the pass its messages.
+        let reactions = 0;
+        try {
+          const tallies = tallyReactions(dbRows);
+          for (const guid of excludeChatGuids) { tallies.delete(`${guid}|0`); tallies.delete(`${guid}|1`); }
+          if (typeof ctx.state.addReactionCounts === 'function') reactions = ctx.state.addReactionCounts(tallies);
+        } catch (e) {
+          ctx.log.warn('imessage_reactions_failed', { connector: 'imessage', code: String(e?.code ?? e?.name ?? '') });
+        }
+
         ({ rows, skipped } = messagesToRows(
           dbRows.map((r) => ({ ...r, date: r.date, is_from_me: Number(r.is_from_me) })),
           { selfName: ctx.config?.selfName ?? 'me', excludeChatGuids }
@@ -216,6 +228,7 @@ export function createImessageSource({ home } = {}) {
           floorReason: floor.reason,
           examined: dbRows.length,
           rows: rows.length,
+          reactions,
           skipped,
           // A COUNT, never the guid: connectors/AGENTS.md forbids logging a
           // chat identifier, and 0 vs 1 is the whole diagnostic anyway.

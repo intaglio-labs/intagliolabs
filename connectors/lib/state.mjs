@@ -72,6 +72,37 @@ CREATE TABLE IF NOT EXISTS contact_avatars(
   jpeg       BLOB NOT NULL,
   updated_ts INTEGER NOT NULL
 );
+/* THE REST OF THE CARD (ingestion round one, owner decision 2026-09-20). The
+   address book carries facts the owner typed that no message can prove: a
+   relation label ("mother", "spouse"), a job title and department, a nickname.
+   Keyed per CARD (person_ref, the same opaque membership contact_ids carries)
+   because these are facts about the person, not about one of their numbers.
+   Read by hermes' people projection into person_contact_facts, and from there
+   into the judgment engine's state. Labels and groups are canonical JSON
+   arrays of short strings. */
+CREATE TABLE IF NOT EXISTS contact_facts(
+  person_ref      TEXT PRIMARY KEY,
+  job_title       TEXT,
+  department      TEXT,
+  nickname        TEXT,
+  relation_labels TEXT NOT NULL DEFAULT '[]',
+  groups          TEXT NOT NULL DEFAULT '[]',
+  updated_ts      INTEGER NOT NULL
+);
+/* TAPBACKS, COUNTED, NEVER STORED AS ROWS (ingestion round one). The reader
+   rejects associated_message_type != 0 before anything counts, so the
+   cheapest warmth signal in the corpus was thrown away at the door. It is
+   tallied here per chat and direction; hermes joins chat_guid to a person
+   through person_event_links.conversation_key ('imessage:<chat_guid>'). The
+   count is additive per scan and cursor-bounded, so it is approximate across
+   a re-walked year and exact otherwise. */
+CREATE TABLE IF NOT EXISTS imessage_reactions(
+  chat_guid  TEXT NOT NULL,
+  from_me    INTEGER NOT NULL CHECK (from_me IN (0,1)),
+  count      INTEGER NOT NULL DEFAULT 0,
+  updated_ts INTEGER NOT NULL,
+  PRIMARY KEY (chat_guid, from_me)
+);
 CREATE TABLE IF NOT EXISTS imessage_undecoded(
   guid          TEXT PRIMARY KEY,
   rowid         INTEGER NOT NULL,
@@ -328,6 +359,62 @@ export function openStateDb(path = defaultStateDbPath()) {
     // clears is only the three pieces of state that describe WHERE THE SHARED
     // WALK IS, which a purge has just made untrue.
     reopenYearlyWalk,
+
+    // The rest of the address-book card, one row per card (see contact_facts).
+    // Replace, not merge: a full read of the store is the truth about what the
+    // owner has saved, and a label they removed must go.
+    replaceContactFacts(rows, now = Date.now()) {
+      const list = Array.isArray(rows) ? rows : [];
+      const tx = db.prepare('BEGIN');
+      tx.run();
+      try {
+        db.prepare('DELETE FROM contact_facts').run();
+        const ins = db.prepare(
+          'INSERT INTO contact_facts(person_ref, job_title, department, nickname, relation_labels, groups, updated_ts) ' +
+            'VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(person_ref) DO UPDATE SET job_title = excluded.job_title, ' +
+            'department = excluded.department, nickname = excluded.nickname, relation_labels = excluded.relation_labels, ' +
+            'groups = excluded.groups, updated_ts = excluded.updated_ts'
+        );
+        let n = 0;
+        for (const r of list) {
+          if (!r || typeof r.personRef !== 'string' || !r.personRef) continue;
+          const labels = [...new Set((Array.isArray(r.relationLabels) ? r.relationLabels : []).filter((s) => typeof s === 'string' && s).map((s) => s.slice(0, 40)))].sort();
+          const groups = [...new Set((Array.isArray(r.groups) ? r.groups : []).filter((s) => typeof s === 'string' && s).map((s) => s.slice(0, 60)))].sort();
+          if (!r.jobTitle && !r.department && !r.nickname && labels.length === 0 && groups.length === 0) continue;
+          ins.run(r.personRef, r.jobTitle ? String(r.jobTitle).slice(0, 120) : null, r.department ? String(r.department).slice(0, 120) : null,
+            r.nickname ? String(r.nickname).slice(0, 60) : null, JSON.stringify(labels), JSON.stringify(groups), now);
+          n += 1;
+        }
+        db.prepare('COMMIT').run();
+        return n;
+      } catch (error) {
+        db.prepare('ROLLBACK').run();
+        throw error;
+      }
+    },
+
+    // Tapback tallies from one scan, added to what is already counted.
+    // `tallies` is a Map or object keyed `${chat_guid}|${0|1}` -> count.
+    addReactionCounts(tallies, now = Date.now()) {
+      const entries = tallies instanceof Map ? [...tallies.entries()] : Object.entries(tallies ?? {});
+      if (entries.length === 0) return 0;
+      const up = db.prepare(
+        'INSERT INTO imessage_reactions(chat_guid, from_me, count, updated_ts) VALUES (?, ?, ?, ?) ' +
+          'ON CONFLICT(chat_guid, from_me) DO UPDATE SET count = count + excluded.count, updated_ts = excluded.updated_ts'
+      );
+      let added = 0;
+      for (const [key, count] of entries) {
+        const sep = key.lastIndexOf('|');
+        if (sep <= 0) continue;
+        const chat = key.slice(0, sep);
+        const fromMe = key.slice(sep + 1) === '1' ? 1 : 0;
+        const n = Number(count);
+        if (!Number.isInteger(n) || n <= 0) continue;
+        up.run(chat, fromMe, n, now);
+        added += n;
+      }
+      return added;
+    },
 
     // Wipes every cursor a connector owns: the exact name plus the
     // `<name>:...` namespace. Used by run.mjs --purge so a purged source
