@@ -91,8 +91,8 @@ import {
   runLintPass, lintFindings, resolveLintFinding, lintStatus,
 } from './relationship/lint.mjs';
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
-import { createJev, jevStatus, JUDGMENT_SCHEMA } from './relationship/jev.mjs';
-import { cardOverrides, quotesJudged, judgeMany } from './relationship/judgments.mjs';
+import { createJev, jevStatus, JUDGMENT_SCHEMA, DEFAULT_DAILY_TOKEN_BUDGET } from './relationship/jev.mjs';
+import { cardOverrides, quotesJudged, judgeMany, poolJudgmentOrder } from './relationship/judgments.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { personCardFacts, changedForCard } from './relationship/cardFacts.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
@@ -3945,10 +3945,12 @@ function startCardJudgments(db, policy, rel, batchId, cards) {
     rel.judgingPending = { batchId, personKeys: [...new Set([...(rel.judgingPending?.personKeys ?? []), ...personKeys])] };
     return;
   }
-  rel.judgingActive = true;
   const jev = relationshipJev(policy);
-  const judgments = readOwnerConfig(policy)?.relationshipMemory?.jev?.judgments ?? {};
-  const drain = (id, keys) => judgeMany(db, jev, keys, { judgments })
+  const jevCfg = readOwnerConfig(policy)?.relationshipMemory?.jev ?? {};
+  const judgments = jevCfg.judgments ?? {};
+  const dailyTokenBudget = Number.isInteger(jevCfg.dailyTokenBudget) ? jevCfg.dailyTokenBudget : DEFAULT_DAILY_TOKEN_BUDGET;
+  rel.judgingActive = true;
+  const drain = (id, keys) => judgeMany(db, jev, keys, { judgments, dailyTokenBudget })
     .then((totals) => { rel.judging = { batchId: id, ...totals, at: Date.now() }; })
     .catch((e) => { rel.judging = { batchId: id, lastError: String(e?.message ?? e), at: Date.now() }; })
     .then(() => {
@@ -3972,11 +3974,13 @@ function startPoolJudgments(db, policy, rel, { limit = 40, now = Date.now() } = 
   if (jev.state !== 'ok') return { started: false, reason: jev.state };
   let keys = [];
   try {
-    keys = eligiblePool(db, { mode: 'any', now }).map((c) => c.personKey).slice(0, Math.max(1, limit));
+    // Unjudged and stalest first, never the top of the rank (review finding 3).
+    keys = poolJudgmentOrder(db, eligiblePool(db, { mode: 'any', now }).map((c) => c.personKey), { now })
+      .slice(0, Math.max(1, limit));
   } catch (e) {
     return { started: false, reason: `pool: ${e?.name ?? 'Error'}` };
   }
-  if (keys.length === 0) return { started: false, reason: 'empty pool' };
+  if (keys.length === 0) return { started: false, reason: 'nothing due' };
   startCardJudgments(db, policy, rel, null, keys.map((personKey) => ({ personKey, kind: 'reconnect' })));
   return { started: true, people: keys.length };
 }
@@ -4014,6 +4018,18 @@ function cardBlockReason(db, rel, card) {
     cap: { max: Number.MAX_SAFE_INTEGER, windowMs: 1 },
   });
   if (!gate.allowed) return gate.reason; // 'suppressed' | 'muted'
+  // A KIND THAT FLIPPED AFTER THE BATCH (review finding 8): the eligibility
+  // pool excludes romantic and family at produce time, and since the judgment
+  // engine writes people.role a person can become either while their card is
+  // queued. The exclusion is policy, so it holds at serve time too.
+  // Scoped exactly as the producer scopes it: mode 'any' (or none) excludes
+  // romantic and family; the investor/founder queues admit on sub_roles alone
+  // and a family member who is also an investor still gets that card.
+  const mode = card.evidence?.mode;
+  if (card.kind === 'reconnect' && card.personKey && (mode === undefined || mode === null || mode === 'any')) {
+    const role = db.prepare('SELECT role FROM people WHERE person_key = ?').get(card.personKey)?.role;
+    if (role === 'romantic' || role === 'family') return 'role-excluded';
+  }
   // The quote is a REFERENCE resolved against the live row: row gone means
   // the receipt is gone, so the card is gone (the deletion cascade honored
   // at serve time rather than violated at store time).

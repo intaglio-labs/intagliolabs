@@ -205,7 +205,18 @@ CREATE TABLE IF NOT EXISTS person_reactions(
   from_them  INTEGER NOT NULL DEFAULT 0,
   from_owner INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS person_event_links_conversation_room ON person_event_links(conversation_key, room);
 `;
+
+// The newest derived-kind judgment row, as a stamp: any new kind row changes
+// it, and nothing else does.
+function judgedKindsStamp(contextDb) {
+  try {
+    return Number(contextDb.prepare(`SELECT COALESCE(MAX(id), 0) AS id FROM rm_judgment WHERE kind = 'kind'`).get().id);
+  } catch {
+    return 0;
+  }
+}
 
 function spineHasTable(stateDb, name) {
   try {
@@ -803,7 +814,10 @@ export function refreshPeopleProjection(
 ) {
   ensurePeopleProjectionSchema(contextDb);
   const state = projectionState(contextDb);
-  const identityFingerprint = peopleIdentityFingerprint(stateDb, aliases, owner);
+  // The judgment engine's derived kinds are an identity input now (review
+  // finding 8): a kind that flips must dirty the projection, or people.role
+  // keeps the old label until something unrelated rebuilds it.
+  const identityFingerprint = hashJson({ base: peopleIdentityFingerprint(stateDb, aliases, owner), kinds: judgedKindsStamp(contextDb) });
   const day = localDay(now);
   const fresh = !force
     && Number(state.projected_revision) === Number(state.source_revision)

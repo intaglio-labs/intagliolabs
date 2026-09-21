@@ -442,7 +442,9 @@ test('every module that asks the judgment model is named in the ledger', () => {
   // And the reverse: any module that imports the client is listed.
   const importers = scannedFiles()
     .filter((f) => f.endsWith('.mjs') && !f.includes('/test/'))
-    .filter((f) => /relationship\/jev\.mjs['"]/u.test(readFileSync(f, 'utf8')))
+    // `./jev.mjs` from a sibling and `relationship/jev.mjs` from anywhere else
+    // (review finding 5: the sibling form is what the two real callers use).
+    .filter((f) => /\/jev\.mjs['"]/u.test(readFileSync(f, 'utf8')))
     .map((f) => f.slice(REPO.length + 1))
     .filter((rel) => rel !== 'ui/server/hermes.mjs');
   const unlisted = importers.filter((rel) => !named.includes(rel));

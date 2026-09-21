@@ -11,6 +11,7 @@ import { substantiveQuoteContextId, eligiblePool } from '../server/relationship/
 import { buildPersonState, quoteCandidates, ago, span, count, balance, trend, stateHash } from '../server/relationship/personState.mjs';
 import {
   deriveKind, buildJudgmentCall, judgePerson, cardOverrides, judgedRoles, judgedScores, worthBucket, judgeMany,
+  quotesJudged, poolJudgmentOrder,
   ENDED, WORTH, PROFESSIONAL_AXIS, CLOSENESS, RELATIVES, ROMANTIC, QUOTE_MIN_SCORE,
 } from '../server/relationship/judgments.mjs';
 import { judgmentFor } from '../server/relationship/jev.mjs';
@@ -185,6 +186,53 @@ test('judgeMany walks a list, counts declines, and stops when the engine is not 
   const stopped = await judgeMany(db, paused, ['p:a', 'p:b'], { now: NOW, spacingMs: 0 });
   assert.equal(stopped.asked, 0);
   assert.equal(stopped.declined, 2);
+});
+
+test('a narrowed pass does not satisfy a later full pass, and quote-off leaves the producer\'s quote standing', async () => {
+  const db = openDb(':memory:');
+  seedPerson(db, 'p:n', { lines: [{ who: 'them', text: 'would you be up for a walk through the new pricing page next week?' }] });
+  const jev = fakeJev(() => ({
+    worth: { type: 'noul', noul: 0.5 },
+    professional_axis: { type: 'score', score: 3, confidence: 0.6, probabilities: {} },
+    closeness: { type: 'score', score: 2, confidence: 0.6, probabilities: {} },
+    relatives: { type: 'noul', noul: 0 }, romantic: { type: 'noul', noul: 0 },
+    quote_L1: { type: 'score', score: 3.5, confidence: 0.8, probabilities: {} },
+  }));
+  // Quotes and kind switched off: nothing written for either.
+  const narrow = await judgePerson(db, jev, 'p:n', { now: NOW, judgments: { quote: false, kind: false } });
+  assert.equal(narrow.cached, false);
+  assert.equal(narrow.kind, undefined);
+  assert.equal(quotesJudged(db, 'p:n'), false, 'quote off: the floor still owns the quote');
+  assert.equal(judgedRoles(db).has('p:n'), false);
+  // The full pass on the same person is a different set of questions: it asks again.
+  const full = await judgePerson(db, jev, 'p:n', { now: NOW + 1 });
+  assert.equal(full.cached, false, 'review finding 1: a narrowed pass must not cache the full one');
+  assert.equal(full.kind, 'business');
+  assert.equal(quotesJudged(db, 'p:n'), true);
+  assert.equal(jev.asks.length, 2);
+  // And a budget already spent declines before asking.
+  const budgeted = await judgePerson(db, jev, 'p:n', { now: NOW + 2, force: true, dailyTokenBudget: 1 });
+  assert.equal(budgeted, null);
+  assert.equal(jev.asks.length, 2);
+});
+
+test('a judged person with no quotable line carries the marker, so the card hides its quote rather than falling back', async () => {
+  const db = openDb(':memory:');
+  seedPerson(db, 'p:m', { lines: [{ who: 'them', text: 'ok' }] });
+  const jev = fakeJev(() => ({ worth: { type: 'noul', noul: 0.4 }, quote_L1: { type: 'score', score: 0.2, confidence: 0.9, probabilities: {} } }));
+  await judgePerson(db, jev, 'p:m', { now: NOW });
+  assert.equal(quotesJudged(db, 'p:m'), true);
+  assert.equal(cardOverrides(db, 'p:m').quoteContextId, null);
+});
+
+test('the pool pass looks at the unjudged and the stalest first, never the top of the rank', () => {
+  const db = openDb(':memory:');
+  const put = db.prepare(`INSERT INTO rm_judgment(person_key, kind, score, model, question_sha, created_at) VALUES (?, 'worth', 0.9, 'm', 'q', ?)`);
+  put.run('p:fresh', NOW - 1000);
+  put.run('p:stale', NOW - 10 * 86_400_000);
+  put.run('p:older', NOW - 30 * 86_400_000);
+  const order = poolJudgmentOrder(db, ['p:fresh', 'p:new', 'p:stale', 'p:older'], { now: NOW });
+  assert.deepEqual(order, ['p:new', 'p:older', 'p:stale'], 'fresh is skipped; unjudged first, then oldest judgment first');
 });
 
 test('the question set is pinned: a reorder or a reword is a different sha and a cache miss', () => {

@@ -49,7 +49,8 @@ export async function prefilterEpisodes(db, jev, episodeIds, {
   if (!jev || jev.state !== 'ok') return all(jev ? jev.state : 'unconfigured');
   if (lock && lock.active) return all('busy');
   const spent = usageToday(db, now).inputTokens;
-  if (dailyTokenBudget > 0 && spent >= dailyTokenBudget) return all('budget');
+  // A budget of 0 is "spend nothing", not "unlimited" (review finding 6).
+  if (Number.isInteger(dailyTokenBudget) && dailyTokenBudget >= 0 && spent >= dailyTokenBudget) return all('budget');
   if (lock) lock.active = true;
   try {
     const distill = [];

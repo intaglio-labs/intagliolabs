@@ -30,7 +30,7 @@
 // (graph.mjs reads judgedRoles below between the owner's override and the
 // regex guess), so the seven consumers of the label keep their enum and their
 // queries untouched.
-import { choiceQuestion, scoreQuestion, noulQuestion, recordJudgment, judgmentFor, recordUsage } from './jev.mjs';
+import { choiceQuestion, scoreQuestion, noulQuestion, recordJudgment, judgmentFor, recordUsage, usageToday } from './jev.mjs';
 import { buildPersonState, quoteCandidates, lastExchange, stateHash, ENDED_LINES } from './personState.mjs';
 
 export const JUDGMENT_VERSION = 'rm-judge-v1';
@@ -113,19 +113,28 @@ export function buildJudgmentCall(db, personKey, { now = Date.now(), judgments =
     ...(candidates.length ? { quote_candidates: candidates.map((c, i) => ({ id: `L${i + 1}`, text: c.text })) } : {}),
     ...(ended.length ? { last_exchange: ended } : {}),
   };
-  return { state: body, questions, candidates, quoteShas, hash: stateHash(body) };
+  // THE CACHE KEY COVERS THE QUESTIONS ASKED, not just the state (review
+  // finding 1): a pass narrowed by judgments.kind:false must not satisfy a
+  // later full pass on the same person forever.
+  return { state: body, questions, candidates, quoteShas, hash: stateHash({ body, asked: Object.keys(questions) }) };
 }
 
 // Ask, record, derive. Returns a summary of numbers (never text) or null when
 // the engine declined (unconfigured, paused, oversize, network...) -- the
 // caller falls back and may retry on the next pass.
-export async function judgePerson(db, jev, personKey, { now = Date.now(), judgments = {}, force = false } = {}) {
+export async function judgePerson(db, jev, personKey, { now = Date.now(), judgments = {}, force = false, dailyTokenBudget = null } = {}) {
   const call = buildJudgmentCall(db, personKey, { now, judgments });
   if (!call) return null;
-  // Same facts and lines as the last judgment: nothing to ask.
+  // Same facts, lines and questions as the last judgment: nothing to ask.
   const prior = judgmentFor(db, { personKey, kind: 'worth' });
   if (!force && prior && prior.subject_hash === call.hash && prior.question_sha === WORTH.sha) {
     return { personKey, cached: true, hash: call.hash };
+  }
+  // THE DAILY BUDGET BINDS HERE TOO (review finding 6): owner decision 2 named
+  // 25M tokens a day for everything, not just the distiller. Spent means this
+  // person waits for tomorrow; the caller reads null as a decline.
+  if (Number.isInteger(dailyTokenBudget) && dailyTokenBudget >= 0 && usageToday(db, now).inputTokens >= dailyTokenBudget) {
+    return null;
   }
   const out = await jev.ask({ state: call.state, questions: call.questions });
   if (!out) return null;
@@ -142,28 +151,40 @@ export async function judgePerson(db, jev, personKey, { now = Date.now(), judgme
     recordJudgment(db, { personKey, kind: 'quote', subjectId: c.id, subjectHash: c.hash, score: ans.score, confidence: ans.confidence, model, questionSha: call.quoteShas[i], now });
     summary.quotes += 1;
   });
-  if (a.ended?.type === 'choice') {
+  // "THE QUOTES WERE JUDGED" IS ITS OWN FACT (review finding 2). A person with
+  // no candidate lines, or whose lines all failed to score, still had their
+  // quotes looked at -- so a marker row (subject null) says so, and the serve
+  // may hide the quote rather than fall back to the floor. With
+  // judgments.quote:false nothing is written and the producer's quote stands.
+  if (judgments.quote !== false && summary.quotes === 0) {
+    recordJudgment(db, { personKey, kind: 'quote', subjectHash: call.hash, model, questionSha: `${WORTH.sha}:none`, now });
+  }
+  // ONLY ANSWERS TO QUESTIONS THAT WERE ASKED. jev.mjs sanitizes to the ids it
+  // sent, but this module must not depend on that: an answer for a question
+  // the config switched off is not a judgment.
+  const asked = (id) => Object.hasOwn(call.questions, id);
+  if (asked('ended') && a.ended?.type === 'choice') {
     recordJudgment(db, { personKey, kind: 'ending', subjectHash: call.hash, answer: a.ended.choice, probability: a.ended.probabilities[a.ended.choice] ?? null, confidence: a.ended.confidence, model, questionSha: ENDED.sha, now });
     summary.ended = a.ended.choice;
   }
   let axis = null; let closeness = null; let relatives = null; let romantic = null;
-  if (a.professional_axis?.type === 'score') {
+  if (asked('professional_axis') && a.professional_axis?.type === 'score') {
     axis = a.professional_axis.score;
     recordJudgment(db, { personKey, kind: 'professional_axis', subjectHash: call.hash, score: axis, confidence: a.professional_axis.confidence, model, questionSha: PROFESSIONAL_AXIS.sha, now });
   }
-  if (a.closeness?.type === 'score') {
+  if (asked('closeness') && a.closeness?.type === 'score') {
     closeness = a.closeness.score;
     recordJudgment(db, { personKey, kind: 'closeness', subjectHash: call.hash, score: closeness, confidence: a.closeness.confidence, model, questionSha: CLOSENESS.sha, now });
   }
-  if (a.relatives?.type === 'noul') {
+  if (asked('relatives') && a.relatives?.type === 'noul') {
     relatives = a.relatives.noul;
     recordJudgment(db, { personKey, kind: 'relatives', subjectHash: call.hash, score: relatives, model, questionSha: RELATIVES.sha, now });
   }
-  if (a.romantic?.type === 'noul') {
+  if (asked('romantic') && a.romantic?.type === 'noul') {
     romantic = a.romantic.noul;
     recordJudgment(db, { personKey, kind: 'romantic', subjectHash: call.hash, score: romantic, model, questionSha: ROMANTIC.sha, now });
   }
-  const kind = deriveKind({ relatives, romantic, professionalAxis: axis });
+  const kind = asked('professional_axis') ? deriveKind({ relatives, romantic, professionalAxis: axis }) : null;
   if (kind) {
     recordJudgment(db, { personKey, kind: 'kind', subjectHash: call.hash, answer: kind, score: axis, model, questionSha: `${PROFESSIONAL_AXIS.sha}:${RELATIVES.sha}:${ROMANTIC.sha}`, now });
     summary.kind = kind;
@@ -204,11 +225,14 @@ export function cardOverrides(db, personKey) {
   return out;
 }
 
-// True when the cache says anything about this person's quotes at all --
-// the serve uses it to tell "judged, nothing worth quoting" (hide the quote)
-// from "not judged yet" (today's floor).
+// True when the cache says anything about this person's QUOTES -- a scored
+// line or the "looked, nothing to quote" marker -- so the serve can tell
+// "judged, nothing worth quoting" (hide the quote) from "not judged yet"
+// (today's floor). ~~It asked about `worth`~~, which is written whenever any
+// judgment runs, so judgments.quote:false hid every card's quote (review
+// finding 2).
 export function quotesJudged(db, personKey) {
-  return judgmentFor(db, { personKey, kind: 'worth' }) !== null;
+  return judgmentFor(db, { personKey, kind: 'quote' }) !== null;
 }
 
 // The derived label per person for the projection: newest 'kind' row each.
@@ -266,13 +290,13 @@ export function worthBucket(worth) {
 // threaded and each ask is a network await the loop yields on, but the state
 // builds between them are synchronous SQL. `spacingMs` between people is what
 // keeps the people page answering while a batch is judged.
-export async function judgeMany(db, jev, personKeys, { now = Date.now(), judgments = {}, spacingMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), onEach = null } = {}) {
+export async function judgeMany(db, jev, personKeys, { now = Date.now(), judgments = {}, dailyTokenBudget = null, spacingMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), onEach = null } = {}) {
   const totals = { asked: 0, cached: 0, declined: 0, inputTokens: 0 };
   for (const personKey of personKeys) {
     if (jev.state !== 'ok') { totals.declined += personKeys.length - totals.asked - totals.cached - totals.declined; break; }
     let result = null;
     try {
-      result = await judgePerson(db, jev, personKey, { now: typeof now === 'function' ? now() : now, judgments });
+      result = await judgePerson(db, jev, personKey, { now: typeof now === 'function' ? now() : now, judgments, dailyTokenBudget });
     } catch {
       result = null; // a per-person failure never stops the pass; counted only
     }
@@ -280,7 +304,26 @@ export async function judgeMany(db, jev, personKeys, { now = Date.now(), judgmen
     else if (result.cached) totals.cached += 1;
     else { totals.asked += 1; totals.inputTokens += result.inputTokens ?? 0; }
     if (onEach) { try { onEach(personKey, result); } catch { /* observer */ } }
-    if (spacingMs > 0 && personKey !== personKeys[personKeys.length - 1]) await sleep(spacingMs);
+    // The spacing is for the network call, so a cache hit does not pay it
+    // (review finding 3: a tick of cached names slept for a minute).
+    if (spacingMs > 0 && result && !result.cached && personKey !== personKeys[personKeys.length - 1]) await sleep(spacingMs);
   }
   return totals;
+}
+
+// WHO THE POOL PASS SHOULD LOOK AT NEXT: the eligible people with no current
+// judgment first, then the stalest. ~~The top of the rank~~ -- which, once
+// `worth` leads the order, is the people already judged likely, so a bounded
+// slice re-read the same cached names every tick and never reached anyone new
+// (review finding 3). `judgedAt` is the newest `worth` row per person.
+export function poolJudgmentOrder(db, personKeys, { staleAfterMs = 7 * 86_400_000, now = Date.now() } = {}) {
+  const at = new Map();
+  try {
+    for (const r of db.prepare(
+      `SELECT person_key, MAX(created_at) AS at FROM rm_judgment WHERE kind = 'worth' AND person_key IS NOT NULL GROUP BY person_key`
+    ).all()) at.set(r.person_key, Number(r.at));
+  } catch { /* a database from before the table existed */ }
+  return [...personKeys]
+    .filter((k) => !at.has(k) || now - at.get(k) >= staleAfterMs)
+    .sort((a, b) => (at.get(a) ?? 0) - (at.get(b) ?? 0));
 }

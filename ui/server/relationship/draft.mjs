@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { personInfo, readPersonPage } from './pages.mjs';
+import { cardOverrides, quotesJudged } from './judgments.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const PROMPT_PATH = join(here, '..', '..', '..', 'prompts', 'reconnect_draft.md');
@@ -54,7 +55,14 @@ export function buildDraftContext(db, snapshotId) {
   const page = readPersonPage(db, snap.person_key);
 
   let lastQuote = null;
-  const quoteContextId = evidence.quote_context_id;
+  // THE LINE THE CARD ACTUALLY SHOWED (review finding 7): once the judgment
+  // engine has looked at this person's quotes, the card serves its pick (or
+  // none), and a draft that quoted the producer's reference would be replying
+  // to a line the owner never saw. Unjudged: the snapshot's reference, as before.
+  let quoteContextId = evidence.quote_context_id;
+  if (snap.kind === 'reconnect' && quotesJudged(db, snap.person_key)) {
+    quoteContextId = cardOverrides(db, snap.person_key).quoteContextId;
+  }
   if (Number.isInteger(quoteContextId)) {
     const row = db.prepare('SELECT text FROM context WHERE id = ?').get(quoteContextId);
     if (row !== undefined) lastQuote = String(row.text).slice(0, 200);
