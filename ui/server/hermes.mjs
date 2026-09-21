@@ -93,6 +93,9 @@ import {
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { createJev, jevStatus, JUDGMENT_SCHEMA, DEFAULT_DAILY_TOKEN_BUDGET } from './relationship/jev.mjs';
 import { cardOverrides, quotesJudged, judgeMany, poolJudgmentOrder } from './relationship/judgments.mjs';
+import {
+  ASK_SCHEMA, createAsk, listAsks, getAsk, setAskActive, deleteAsk, askMatches, askStatus, askJudgmentOrder, runAskPass,
+} from './relationship/ask.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { personCardFacts, changedForCard } from './relationship/cardFacts.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
@@ -1958,6 +1961,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     hardenConnection(db);
     db.exec(SCHEMA);
     db.exec(JUDGMENT_SCHEMA);
+    db.exec(ASK_SCHEMA);
     ensurePeopleProjectionSchema(db);
     migrate(db);
     return db;
@@ -1992,6 +1996,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     // The judgment cache and usage ledger (jev.mjs): IF NOT EXISTS on new
     // tables, no SCHEMA_VERSION bump, the rm_card_draft precedent.
     db.exec(JUDGMENT_SCHEMA);
+    db.exec(ASK_SCHEMA);
     ensurePeopleProjectionSchema(db);
     migrate(db);
     // Reassert after schema creation in case the platform replaced the file.
@@ -2519,6 +2524,10 @@ const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 // itself thinks of the same number as the pass's budget (SWEEP_BUDGET).
 const RELATIONSHIP_SWEEP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'engine', 'limit']);
 const RELATIONSHIP_JUDGE_FIELDS = Object.freeze(['limit']);
+const ASK_CREATE_FIELDS = Object.freeze(['text']);
+const ASK_ACTIVE_FIELDS = Object.freeze(['id', 'active']);
+const ASK_ID_FIELDS = Object.freeze(['id']);
+const ASK_JUDGE_FIELDS = Object.freeze(['id', 'limit']);
 const MEMORY_PREFILTER_FIELDS = Object.freeze(['episode_ids', 'power']);
 const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'critical']);
 // Same field set and validation as the sweep route above (power/budget/
@@ -3997,6 +4006,33 @@ function startPoolJudgments(db, policy, rel, { limit = 40, now = Date.now() } = 
   return { started: true, people: keys.length };
 }
 
+// THE ASK PASS (relationship/ask.mjs): judge a slice of candidates against one
+// ask, four in flight, never awaited by the request. One pass per ask at a
+// time; a second start while one runs is refused, not queued -- the sweep
+// tick will come round again.
+function startAskPass(db, policy, rel, ask, { limit = 200, now = Date.now() } = {}) {
+  rel.asking ??= new Map();
+  if (rel.asking.get(ask.id)?.active) return { started: false, reason: 'already running' };
+  const jev = relationshipJev(policy);
+  if (jev.state !== 'ok') return { started: false, reason: jev.state };
+  const cfg = readOwnerConfig(policy)?.relationshipMemory?.jev ?? {};
+  const dailyTokenBudget = Number.isInteger(cfg.dailyTokenBudget) ? cfg.dailyTokenBudget : DEFAULT_DAILY_TOKEN_BUDGET;
+  let keys = [];
+  try {
+    keys = askJudgmentOrder(db, ask, { now, limit });
+  } catch (e) {
+    return { started: false, reason: `order: ${e?.name ?? 'Error'}` };
+  }
+  if (keys.length === 0) return { started: false, reason: 'nothing due' };
+  const entry = { active: true, people: keys.length, startedAt: now, totals: null, lastError: null };
+  rel.asking.set(ask.id, entry);
+  runAskPass(db, jev, ask, keys, { dailyTokenBudget })
+    .then((totals) => { entry.totals = totals; })
+    .catch((e) => { entry.lastError = String(e?.message ?? e); })
+    .then(() => { entry.active = false; entry.endedAt = Date.now(); });
+  return { started: true, people: keys.length };
+}
+
 // THE QUOTE THE CARD WILL SHOW, resolved once and read by BOTH the
 // servability gate and the serve (design pre-mortem: a serve-time override
 // that the gate did not see would pass a card on one row and emit another
@@ -5447,7 +5483,14 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // guard refuses when a pass is running or the engine is not ok). One
     // bounded slice per tick: forty people, a second apart, under a minute.
     const judging = startPoolJudgments(db, policy, rel, { limit: body.power === 'full' ? 60 : 20 });
-    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null, judging }, cors);
+    // And every active ask advances by a slice on the same tick.
+    const asking = [];
+    try {
+      for (const a of listAsks(db).filter((x) => x.active)) {
+        asking.push({ id: a.id, ...startAskPass(db, policy, rel, a, { limit: body.power === 'full' ? 60 : 30 }) });
+      }
+    } catch { /* an ask that cannot start is not the sweep's failure */ }
+    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null, judging, asking }, cors);
     return;
   }
 
@@ -5455,6 +5498,66 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   // now, or the widget's when a batch needs its quotes before the first serve.
   // `limit` bounds the people; the pass itself is the same one the sweep tick
   // starts. Answers with what it started, never with what it found.
+  // LOOKING FOR (relationship/ask.mjs). Bearer-only, like everything under
+  // handleAdmin. The ask text is stored in the database, not the config: it is
+  // corpus-adjacent (the owner's words about people) and the daemon must
+  // never see it as a config key.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/ask') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, ASK_CREATE_FIELDS);
+    if (typeof body.text !== 'string') throw badRequest('"text" must be a string');
+    let ask;
+    try { ask = createAsk(db, body.text); } catch (e) { throw badRequest(e?.message ?? 'invalid ask'); }
+    const rel = relationshipState(db, policy);
+    const started = startAskPass(db, policy, rel, ask, { limit: 200 });
+    send(res, 200, { ask, started }, cors);
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/ask') {
+    const rel = relationshipState(db, policy);
+    const asks = listAsks(db).map((a) => ({ ...a, running: Boolean(rel.asking?.get(a.id)?.active), status: askStatus(db, a) }));
+    send(res, 200, { asks, engine: relationshipJev(policy).state }, cors);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/ask/active') {
+    const body = await readJson(req);
+    assertClosedFields(body, ASK_ACTIVE_FIELDS);
+    if (!Number.isInteger(body.id) || typeof body.active !== 'boolean') throw badRequest('"id" (integer) and "active" (boolean) are required');
+    if (!setAskActive(db, body.id, body.active)) { send(res, 404, { error: 'no such ask' }, cors); return; }
+    send(res, 200, { state: 'ok', ask: getAsk(db, body.id) }, cors);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/ask/delete') {
+    const body = await readJson(req);
+    assertClosedFields(body, ASK_ID_FIELDS);
+    if (!Number.isInteger(body.id)) throw badRequest('"id" must be an integer');
+    send(res, 200, { state: 'ok', deleted: deleteAsk(db, body.id) }, cors);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/ask/judge') {
+    const body = await readJson(req);
+    assertClosedFields(body, ASK_JUDGE_FIELDS);
+    if (!Number.isInteger(body.id)) throw badRequest('"id" must be an integer');
+    if (body.limit !== undefined && (!Number.isInteger(body.limit) || body.limit < 1 || body.limit > 2000)) throw badRequest('"limit" must be 1..2000');
+    const ask = getAsk(db, body.id);
+    if (!ask) { send(res, 404, { error: 'no such ask' }, cors); return; }
+    const rel = relationshipState(db, policy);
+    send(res, 200, { ...startAskPass(db, policy, rel, ask, { limit: body.limit ?? 200 }), pass: rel.asking?.get(ask.id) ?? null }, cors);
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/ask/matches') {
+    const id = Number(url.searchParams.get('id'));
+    if (!Number.isInteger(id)) throw badRequest('"id" query parameter must be an integer');
+    const ask = getAsk(db, id);
+    if (!ask) { send(res, 404, { error: 'no such ask' }, cors); return; }
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+    const all = url.searchParams.get('all') === '1';
+    const rel = relationshipState(db, policy);
+    send(res, 200, { ask, status: askStatus(db, ask), running: Boolean(rel.asking?.get(ask.id)?.active), matches: askMatches(db, ask, { limit, all }) }, cors);
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/admin/relationship/judge') {
     const body = await readJson(req);
     assertClosedFields(body, RELATIONSHIP_JUDGE_FIELDS);
@@ -8225,6 +8328,10 @@ export async function start({
   // loopback llama-server. Production leaves this undefined and
   // relationshipMemoryEngine() reads the owner's config file per call.
   relationshipMemoryEngine: relationshipMemoryEngineOverride,
+  // Test seam for the judgment engine (relationshipJev): a pre-built
+  // `{state, model, ask}` object wins outright; absent, the client is built
+  // from the owner's config and the database's own install.
+  relationshipJev: relationshipJevOverride,
   // Test seam for public lookup (L5 step 6): a pre-built `{name, complete}`
   // engine (or null, to exercise the no-engine path), same discipline as
   // relationshipMemoryEngine above. Production leaves this undefined and
@@ -8344,6 +8451,7 @@ export async function start({
         // belong to the same install (relationshipJev), never to "this Mac".
         dbPath: resolvedDbPath,
         relationshipMemoryEngine: relationshipMemoryEngineOverride,
+        relationshipJev: relationshipJevOverride,
         relationshipLookupEngine: relationshipLookupEngineOverride,
         relationshipHolder,
         peopleProjectionHolder,

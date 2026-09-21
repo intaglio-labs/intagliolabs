@@ -132,7 +132,9 @@
         "ui/server/relationship/jev.mjs",
         "ui/server/relationship/judgments.mjs",
         "ui/server/relationship/prefilter.mjs",
-        "ui/scripts/eval-jev.mjs"
+        "ui/server/relationship/ask.mjs",
+        "ui/scripts/eval-jev.mjs",
+        "ui/scripts/eval-ask.mjs"
       ]
     },
     {

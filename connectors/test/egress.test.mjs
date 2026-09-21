@@ -423,6 +423,9 @@ const JEV_PRODUCERS = Object.freeze([
   'ui/server/relationship/prefilter.mjs',
   // The by-hand eval that replays judged cards; numbers only, run by the owner.
   'ui/scripts/eval-jev.mjs',
+  // "Looking for": the owner's ask as the instruction, each person's state judged.
+  'ui/server/relationship/ask.mjs',
+  'ui/scripts/eval-ask.mjs',
 ]);
 
 test('every module that asks the judgment model is named in the ledger', () => {
