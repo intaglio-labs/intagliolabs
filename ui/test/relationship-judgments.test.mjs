@@ -11,7 +11,7 @@ import { substantiveQuoteContextId, eligiblePool } from '../server/relationship/
 import { buildPersonState, quoteCandidates, ago, span, count, balance, trend, stateHash } from '../server/relationship/personState.mjs';
 import {
   deriveKind, buildJudgmentCall, judgePerson, cardOverrides, judgedRoles, judgedScores, worthBucket, judgeMany,
-  quotesJudged, poolJudgmentOrder,
+  quotesJudged, poolJudgmentOrder, gateRole, extractFirmCandidates, sweepJudgments, pageJudgments,
   ENDED, WORTH, PROFESSIONAL_AXIS, CLOSENESS, RELATIVES, ROMANTIC, QUOTE_MIN_SCORE,
 } from '../server/relationship/judgments.mjs';
 import { judgmentFor } from '../server/relationship/jev.mjs';
@@ -233,6 +233,56 @@ test('the pool pass looks at the unjudged and the stalest first, never the top o
   put.run('p:older', NOW - 30 * 86_400_000);
   const order = poolJudgmentOrder(db, ['p:fresh', 'p:new', 'p:stale', 'p:older'], { now: NOW });
   assert.deepEqual(order, ['p:new', 'p:older', 'p:stale'], 'fresh is skipped; unjudged first, then oldest judgment first');
+});
+
+test('the gate reads romantic and family only above 0.7; the label turns at 0.5', () => {
+  assert.equal(deriveKind({ romantic: 0.53, professionalAxis: 1 }), 'romantic', 'the card label');
+  assert.equal(gateRole({ answer: 'romantic', axis: 1, romantic: 0.53 }), 'friend', 'the gate does not hide a coin flip');
+  assert.equal(gateRole({ answer: 'romantic', axis: 3, romantic: 0.53 }), 'business');
+  assert.equal(gateRole({ answer: 'romantic', axis: 1, romantic: 0.75 }), 'romantic');
+  assert.equal(gateRole({ answer: 'family', axis: 1, relatives: 0.69 }), 'friend');
+  assert.equal(gateRole({ answer: 'family', axis: 1, relatives: 0.7 }), 'family');
+  assert.equal(gateRole({ answer: 'business', axis: 3 }), 'business');
+  const db = openDb(':memory:');
+  const put = db.prepare(`INSERT INTO rm_judgment(person_key, kind, answer, score, model, question_sha, created_at) VALUES (?,?,?,?,'m','q',?)`);
+  put.run('p:r', 'kind', 'romantic', 0.8, NOW); put.run('p:r', 'romantic', null, 0.55, NOW);
+  put.run('p:s', 'kind', 'romantic', 0.8, NOW); put.run('p:s', 'romantic', null, 0.9, NOW);
+  assert.equal(judgedRoles(db).get('p:r'), 'friend');
+  assert.equal(judgedRoles(db).get('p:s'), 'romantic');
+});
+
+test('the sweep and the page pick among lines by id; a firm must be a substring of its line', async () => {
+  const db = openDb(':memory:');
+  const excerpts = [
+    { contextId: 11, speaker: 'THEM', text: 'just joined Acme Labs as head of platform, wild few weeks', ts: 1 },
+    { contextId: 12, speaker: 'ME', text: 'congrats!!', ts: 2 },
+    { contextId: 13, speaker: 'THEM', text: 'we are raising a seed round in march, would love your take on the deck', ts: 3 },
+    { contextId: 14, speaker: 'THEM', text: 'lol ok', ts: 4 },
+  ];
+  const firms = extractFirmCandidates([{ contextId: 11, text: excerpts[0].text }, { contextId: 13, text: excerpts[2].text }]);
+  assert.ok(firms.some((f) => f.name === 'Acme Labs' && f.contextId === 11), 'the capitalised run after "joined" is a candidate');
+  for (const f of firms) assert.ok(f.quote.includes(f.name), 'every candidate is a substring of its own line');
+
+  const jev = { state: 'ok', model: 'jev-fake', ask: async ({ questions }) => ({
+    answers: {
+      sub_role: { type: 'choice', choice: 'founder', confidence: 0.7, probabilities: { founder: 0.7 } },
+      sub_role_line: { type: 'choice', choice: 'L2', confidence: 0.8, probabilities: {} },
+      ...(questions.firm ? { firm: { type: 'choice', choice: 'Acme Labs', confidence: 0.9, probabilities: {} } } : {}),
+      page_who: { type: 'choice', choice: 'L1', confidence: 0.8, probabilities: {} },
+      page_ask: { type: 'choice', choice: 'L2', confidence: 0.6, probabilities: {} },
+      page_objection: { type: 'choice', choice: 'none', confidence: 0.9, probabilities: {} },
+      page_how_left: { type: 'choice', choice: 'L3', confidence: 0.2, probabilities: {} },
+      page_notable: { type: 'choice', choice: 'L1', confidence: 0.5, probabilities: {} },
+    }, usage: { input_tokens: 300 }, model: 'jev-fake' }) };
+  const sweep = await sweepJudgments(db, jev, { personKey: 'p:x', excerpts, now: NOW });
+  assert.deepEqual(sweep.kept.map((k) => [k.kind, k.value, k.contextId]), [['sub_role', 'founder', 13], ['firm', 'Acme Labs', 11]]);
+  for (const k of sweep.kept) assert.equal(k.text, k.quote, 'no prose: the line is the text');
+  const page = await pageJudgments(db, jev, { personKey: 'p:x', excerpts, now: NOW });
+  assert.deepEqual(page.kept.map((k) => [k.section, k.contextId]), [['who', 11], ['ask', 13], ['notable', 11]], 'none and a 0.2 confidence are dropped');
+  for (const k of page.kept) assert.equal(k.text, k.quote);
+  const rows = db.prepare(`SELECT answer FROM rm_judgment WHERE answer IS NOT NULL`).all();
+  for (const r of rows) assert.ok(!/\s/u.test(r.answer), 'no firm name reached the cache as an answer');
+  assert.equal(Number(db.prepare('SELECT input_tokens FROM rm_jev_usage').get().input_tokens), 600);
 });
 
 test('the question set is pinned: a reorder or a reword is a different sha and a cache miss', () => {

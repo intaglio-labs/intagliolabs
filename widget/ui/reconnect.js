@@ -623,6 +623,10 @@ function render(c) {
   const spoke = spokeLastLine(c);
   el('rcLeft').textContent = left || spoke;
   el('rcLeft').classList.toggle('rc-warn', Boolean(left) && c.leftTone === 'bad');
+  // CONFIDENCE IS A HOVER, NOT A LINE (design decision 8): when the tone came
+  // from the judgment engine, the row says so on hover and nowhere else.
+  const judgedTone = c.judged && Number.isFinite(c.judged.leftConfidence) && c.leftTone;
+  el('rcLeftRow').title = judgedTone ? `judged ${c.leftTone} · ${c.judged.leftConfidence.toFixed(2)}` : '';
   const leftWhen = el('rcLeftWhen');
   const under = left && spoke ? spoke : '';
   leftWhen.textContent = under;

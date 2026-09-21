@@ -31,7 +31,7 @@
 // regex guess), so the seven consumers of the label keep their enum and their
 // queries untouched.
 import { choiceQuestion, scoreQuestion, noulQuestion, recordJudgment, judgmentFor, recordUsage, usageToday } from './jev.mjs';
-import { buildPersonState, quoteCandidates, lastExchange, stateHash, ENDED_LINES } from './personState.mjs';
+import { buildPersonState, quoteCandidates, lastExchange, stateHash, clip, ENDED_LINES } from './personState.mjs';
 
 export const JUDGMENT_VERSION = 'rm-judge-v1';
 
@@ -237,20 +237,43 @@ export function quotesJudged(db, personKey) {
 
 // The derived label per person for the projection: newest 'kind' row each.
 // Read by graph.mjs between the owner's override and the regex guess.
+//
+// TWO THRESHOLDS FOR THE FLAGS (owner, 2026-09-21, after the live check). The
+// card's LABEL turns romantic or family at 0.5 (deriveKind, FLAG_THRESHOLD).
+// people.role -- which the eligibility pool reads to exclude romantic and
+// family -- turns only at GATE_FLAG_THRESHOLD. Live, four people were hidden
+// from cards on flags of 0.53 to 0.75; a coin flip must not silently hide
+// someone, so below the gate threshold the role falls back to what the
+// professional axis says (the kind row keeps the axis in `score`).
+export const GATE_FLAG_THRESHOLD = 0.7;
 export function judgedRoles(db) {
   const out = new Map();
   let rows = [];
   try {
     rows = db.prepare(
-      `SELECT person_key, answer FROM rm_judgment j
-       WHERE kind = 'kind' AND answer IS NOT NULL AND person_key IS NOT NULL
-         AND id = (SELECT MAX(id) FROM rm_judgment k WHERE k.kind = 'kind' AND k.person_key = j.person_key)`
+      `SELECT j.person_key, j.answer, j.score AS axis,
+              (SELECT r.score FROM rm_judgment r WHERE r.kind = 'romantic' AND r.person_key = j.person_key ORDER BY r.id DESC LIMIT 1) AS romantic,
+              (SELECT f.score FROM rm_judgment f WHERE f.kind = 'relatives' AND f.person_key = j.person_key ORDER BY f.id DESC LIMIT 1) AS relatives
+       FROM rm_judgment j
+       WHERE j.kind = 'kind' AND j.answer IS NOT NULL AND j.person_key IS NOT NULL
+         AND j.id = (SELECT MAX(id) FROM rm_judgment k WHERE k.kind = 'kind' AND k.person_key = j.person_key)`
     ).all();
   } catch {
     return out; // a database from before the table existed
   }
-  for (const r of rows) out.set(r.person_key, r.answer);
+  for (const r of rows) out.set(r.person_key, gateRole(r));
   return out;
+}
+
+// Pure, for the test: the role the eligibility gate should read.
+export function gateRole({ answer, axis = null, romantic = null, relatives = null }) {
+  if (answer === 'family' && !(relatives !== null && relatives >= GATE_FLAG_THRESHOLD)) {
+    return axis === null ? 'friend' : (axis >= BUSINESS_AXIS ? 'business' : 'friend');
+  }
+  if (answer === 'romantic' && !(romantic !== null && romantic >= GATE_FLAG_THRESHOLD)) {
+    return axis === null ? 'friend' : (axis >= BUSINESS_AXIS ? 'business' : 'friend');
+  }
+  return answer;
 }
 
 // Newest score of one kind per person -- the rank reads 'worth' this way.
@@ -284,6 +307,131 @@ export function worthBucket(worth) {
   if (worth >= WORTH_LIKELY) return 3;
   if (worth < WORTH_UNLIKELY) return 0;
   return 1;
+}
+
+// ---- the sweep and the page: picks among lines code already has ----------
+//
+// Neither writes a word. The sweep's sub-role and firm were the generative
+// engine's to propose and groundSweep's to check (the firm must be a verbatim
+// substring of its own quote); here the options ARE substrings, so the check
+// holds by construction, and the supporting line is one of the excerpts by id.
+// The page's five sections become "which of these lines best answers the
+// section", so a quote-only page cannot be ungrounded, only empty. Both leave
+// prose (page_lines, the generative page) to the engines in engines.mjs.
+
+const LINE_OPTION_LIMIT = 24;
+
+function lineOptions(excerpts, limit = LINE_OPTION_LIMIT) {
+  const them = excerpts.filter((e) => e.speaker === 'THEM' && typeof e.text === 'string' && e.text.trim()).slice(-limit);
+  return them.map((e, i) => ({ id: `L${i + 1}`, contextId: e.contextId, text: e.text, clipped: clip(e.text) }));
+}
+
+function lineChoice(instructions, lines) {
+  const pairs = Object.freeze([
+    ...lines.map((l) => Object.freeze([l.id, l.clipped])),
+    Object.freeze(['none', 'no line here answers this']),
+  ]);
+  return choiceQuestion(instructions, pairs);
+}
+
+// Firm names a line can carry, extracted in code: "at Acme", "@acme",
+// "Acme Labs" (capitalised runs of one to three words). Bounded and unique.
+export function extractFirmCandidates(lines, { limit = 20 } = {}) {
+  const seen = new Map();
+  const add = (name, line) => {
+    const clean = name.replace(/[.,;:!?)]+$/u, '').trim();
+    if (clean.length < 2 || clean.length > 60 || seen.has(clean.toLowerCase())) return;
+    if (!line.text.includes(clean)) return;
+    seen.set(clean.toLowerCase(), { name: clean, contextId: line.contextId, quote: line.text });
+  };
+  for (const line of lines) {
+    for (const m of line.text.matchAll(/\b(?:at|with|from|joined|joining)\s+([A-Z][\w&.-]*(?:\s+[A-Z][\w&.-]*){0,2})/gu)) add(m[1], line);
+    for (const m of line.text.matchAll(/@([A-Za-z][\w.-]{1,40})/gu)) add(m[1], line);
+    for (const m of line.text.matchAll(/\b([A-Z][a-z][\w&.-]*(?:\s+[A-Z][a-z][\w&.-]*){1,2})\b/gu)) add(m[1], line);
+    if (seen.size >= limit) break;
+  }
+  return [...seen.values()].slice(0, limit);
+}
+
+export const SWEEP_SUB_ROLE_OPTIONS = Object.freeze([
+  ['founder', 'started or runs a company'],
+  ['investor', 'invests in companies: angel, VC, fund'],
+  ['operator', 'works inside a company: engineering, product, sales, ops'],
+  ['none', 'none of these can be told from the lines'],
+]);
+
+// Returns storeSweep-shaped items: {kind, value, text, quote, contextId}.
+export async function sweepJudgments(db, jev, { personKey, excerpts, now = Date.now() }) {
+  const lines = lineOptions(excerpts);
+  if (lines.length === 0) return { kept: [], asked: false };
+  const firms = extractFirmCandidates(lines);
+  const state = { their_lines: lines.map((l) => ({ id: l.id, text: l.clipped })) };
+  const questions = {
+    sub_role: choiceQuestion('From `their_lines`, which of these describes the other person\'s role?', SWEEP_SUB_ROLE_OPTIONS),
+    sub_role_line: lineChoice('Which line in `their_lines` best shows that role? Answer none if the role cannot be told.', lines),
+  };
+  if (firms.length > 0) {
+    questions.firm = choiceQuestion(
+      'Which of these is the company or firm the other person works at or with, as the lines say?',
+      Object.freeze([...firms.map((f) => Object.freeze([f.name, `named in a line as ${JSON.stringify(f.name)}`])), Object.freeze(['none', 'none of these is their firm'])])
+    );
+  }
+  const out = await jev.ask({ state, questions });
+  if (!out) return { kept: [], asked: false };
+  recordUsage(db, { inputTokens: out.usage.input_tokens, now });
+  const kept = [];
+  const role = out.answers.sub_role;
+  const roleLine = out.answers.sub_role_line;
+  if (role?.type === 'choice' && role.choice !== 'none' && (role.confidence ?? 0) >= 0.5 && roleLine?.type === 'choice' && roleLine.choice !== 'none') {
+    const line = lines.find((l) => l.id === roleLine.choice);
+    if (line) {
+      recordJudgment(db, { personKey, kind: 'sweep_sub_role', subjectId: line.contextId, subjectHash: null, answer: role.choice, probability: role.probabilities?.[role.choice] ?? null, confidence: role.confidence, model: out.model ?? jev.model, questionSha: questions.sub_role.sha, now });
+      kept.push({ kind: 'sub_role', value: role.choice, text: line.text, quote: line.text, contextId: line.contextId });
+    }
+  }
+  const firm = out.answers.firm;
+  if (firm?.type === 'choice' && firm.choice !== 'none' && (firm.confidence ?? 0) >= 0.5) {
+    const f = firms.find((x) => x.name === firm.choice);
+    if (f) {
+      // No answer token: a firm name is corpus text, and the cache holds none.
+      // The pick lives in the sweep's own proposal store, as it always has.
+      recordJudgment(db, { personKey, kind: 'sweep_firm', subjectId: f.contextId, subjectHash: null, probability: firm.probabilities?.[firm.choice] ?? null, confidence: firm.confidence, model: out.model ?? jev.model, questionSha: questions.firm.sha, now });
+      kept.push({ kind: 'firm', value: f.name, text: f.quote, quote: f.quote, contextId: f.contextId });
+    }
+  }
+  return { kept, asked: true, inputTokens: out.usage.input_tokens };
+}
+
+export const PAGE_SECTIONS = Object.freeze([
+  ['who', 'Which line best says who this person is: what they do, where, what they are known for?'],
+  ['ask', 'Which line is a request or question they made of the owner that is worth remembering?'],
+  ['objection', 'Which line pushes back on, declines, or doubts something the owner said or proposed?'],
+  ['how_left', 'Which line best shows how the two of them last left things?'],
+  ['notable', 'Which line carries a fact about this person worth remembering months later (a move, a change, a plan, news)?'],
+]);
+export const PAGE_MIN_CONFIDENCE = 0.4;
+
+// Returns storePage-shaped items: {section, text, quote, contextId} where
+// text === quote, the line itself.
+export async function pageJudgments(db, jev, { personKey, excerpts, now = Date.now() }) {
+  const lines = lineOptions(excerpts);
+  if (lines.length === 0) return { kept: [], asked: false };
+  const state = { their_lines: lines.map((l) => ({ id: l.id, text: l.clipped })) };
+  const questions = {};
+  for (const [section, instructions] of PAGE_SECTIONS) questions[`page_${section}`] = lineChoice(`${instructions} Choose from \`their_lines\`.`, lines);
+  const out = await jev.ask({ state, questions });
+  if (!out) return { kept: [], asked: false };
+  recordUsage(db, { inputTokens: out.usage.input_tokens, now });
+  const kept = [];
+  for (const [section] of PAGE_SECTIONS) {
+    const a = out.answers[`page_${section}`];
+    if (!a || a.type !== 'choice' || a.choice === 'none' || (a.confidence ?? 0) < PAGE_MIN_CONFIDENCE) continue;
+    const line = lines.find((l) => l.id === a.choice);
+    if (!line) continue;
+    recordJudgment(db, { personKey, kind: `page_${section}`, subjectId: line.contextId, subjectHash: null, answer: a.choice, probability: a.probabilities?.[a.choice] ?? null, confidence: a.confidence, model: out.model ?? jev.model, questionSha: questions[`page_${section}`].sha, now });
+    kept.push({ section, text: line.text.slice(0, 200), quote: line.text, contextId: line.contextId });
+  }
+  return { kept, asked: true, inputTokens: out.usage.input_tokens };
 }
 
 // One pass over a list of people, sequential, one at a time: hermes is single

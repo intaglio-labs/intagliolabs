@@ -6,7 +6,7 @@
 // test here fails against a tree without the route (404) or the status block.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { start } from '../server/hermes.mjs';
@@ -25,9 +25,12 @@ const configPath = (home) => join(home, '.hazlie', 'connectors', 'config.json');
 const readConfig = (home) => JSON.parse(readFileSync(configPath(home), 'utf8'));
 
 async function withServer(home, fn, opts = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'jev-config-db-'));
+  // The database lives where an install keeps it, because the judgment
+  // engine's key is resolved from the database's own install home.
+  mkdirSync(join(home, '.hazlie', 'context'), { recursive: true, mode: 0o700 });
+  chmodSync(join(home, '.hazlie', 'context'), 0o700);
   const server = await start({
-    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    port: 0, dbPath: join(home, '.hazlie', 'context', 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
     peopleProjectionAutoRebuild: false, ownerConfigPath: configPath(home), ...opts,
   });
   const base = `http://127.0.0.1:${server.port}`;

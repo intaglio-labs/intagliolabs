@@ -29,6 +29,7 @@ import { isAnonymousContact } from '../people/map.mjs';
 import { markPersonSubRoles, loadOwner } from '../people/owner.mjs';
 import { PERSON_SOURCE_POLICY } from '../people/graph.mjs';
 import { SECTION_KIND, alreadyStored } from './pages.mjs';
+import { sweepJudgments } from './judgments.mjs';
 import { modelPause } from './pause.mjs';
 
 // The sources a person could actually have WRITTEN a message in, past tense
@@ -675,10 +676,29 @@ function maxAuthoredContextIdAnySource(db, personKey) {
   return row?.maxId === null || row?.maxId === undefined ? null : Number(row.maxId);
 }
 
-export async function sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now = Date.now() } = {}) {
+export async function sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now = Date.now(), jev = null, judgments = {} } = {}) {
   const gathered = newRowsFor(db, candidate.personKey, candidate.cursor, {
     maxEpisodes: SWEEP_MAX_EPISODES, maxChars: SWEEP_MAX_CHARS,
   });
+  // SUB-ROLE AND FIRM ARE PICKS, NOT PROSE (design step 5, 2026-09-21): the
+  // judgment engine chooses among the closed sub-role set and among firm
+  // names extracted from the lines, each anchored to a line by id, so
+  // groundSweep's verbatim rule holds by construction. When it answers, the
+  // generative engine's own sub_role/firm proposals are dropped in its favour;
+  // page_lines stay the engine's. A declined judgment changes nothing.
+  let jevKept = [];
+  const hasThem = gathered.excerpts.some((e) => e.speaker === 'THEM');
+  if (hasThem && jev && jev.state === 'ok' && judgments.sweep !== false) {
+    try {
+      jevKept = (await sweepJudgments(db, jev, { personKey: candidate.personKey, excerpts: gathered.excerpts, now })).kept;
+    } catch {
+      jevKept = [];
+    }
+  }
+  const mergeWithJudged = (fromEngine) => [
+    ...jevKept,
+    ...fromEngine.filter((k) => !((k.kind === 'sub_role' || k.kind === 'firm') && jevKept.some((j) => j.kind === k.kind))),
+  ];
   if (gathered.excerpts.filter((e) => e.speaker === 'THEM').length === 0) {
     // A row that yields no excerpt has still been evaluated and found
     // unshowable -- advance past ALL of this person's authored rows (every
@@ -716,7 +736,9 @@ export async function sweepPerson(db, engine, candidate, { sweepRunId, distillRu
     };
   }
 
-  const { kept, dropped } = groundSweep(parsed.proposal, gathered);
+  const grounded = groundSweep(parsed.proposal, gathered);
+  const kept = mergeWithJudged(grounded.kept);
+  const { dropped } = grounded;
   if (kept.length === 0) {
     const status = isEmptyProposal(parsed.proposal) ? 'empty' : 'ungrounded';
     return {
@@ -802,7 +824,7 @@ function insertSkippedRun(db, { now, powerMode, engineName, budget, scopeSize, r
 // see section 5 of the design and sweepPerson's status doc above), paused
 // SWEEP_PAUSE_MS between people. Returns the person_sweep_run row.
 export async function runSweepPass(db, engine, policy, {
-  powerMode = 'trickle', battery = null, onAc = null, thermal = null, budget, now = Date.now(),
+  powerMode = 'trickle', battery = null, onAc = null, thermal = null, budget, now = Date.now(), jev = null, judgments = {},
 } = {}) {
   const effectiveBudget = Number.isInteger(budget) ? budget : (SWEEP_BUDGET[powerMode] ?? SWEEP_BUDGET.trickle);
   const engineName = engine?.name ?? 'unknown';
@@ -896,7 +918,7 @@ export async function runSweepPass(db, engine, policy, {
 
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
-      const result = await sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now });
+      const result = await sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now, jev, judgments });
       proposed += result.proposed;
 
       // proposed/empty/ungrounded ALL advance: the model read those rows, and

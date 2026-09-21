@@ -3788,18 +3788,25 @@ function relationshipJev(policy) {
   if (policy.relationshipJev !== undefined) return policy.relationshipJev;
   const cfg = readOwnerConfig(policy) ?? {};
   const section = cfg.relationshipMemory?.jev ?? {};
-  // THE KEY LIVES IN THE INSTALL THE CONFIG BELONGS TO, never on "this Mac"
-  // (the round-6 rule behind installHomeFor): a route test pointing
-  // ownerConfigPath at a tmpdir must not find the developer's real key and
-  // report `ok`. A config path that names no install gets a path that names no
-  // file, which reads as unconfigured; TYPESAFE_API_KEY still overrides.
-  const configFile = ownerConfigFile(policy);
-  const installHome = installHomeFor(configFile);
+  // THE KEY LIVES IN THE INSTALL THAT OWNS THE DATABASE, never on "this Mac"
+  // (the round-6 rule behind installHomeFor, applied to the corpus). ~~It was
+  // derived from the owner config path~~, and a test that started hermes on
+  // a tmpdir database with no config override resolved the developer's real
+  // config, real home and real key, and asked the live engine about fixture
+  // lines (relationship-sweep, 2026-09-21). The judgment cache is in the
+  // database, so the key that fills it is the one beside that database:
+  // <home>/.hazlie/context/context.db pairs with <home>/.hazlie/secrets/. Any
+  // other database path -- a tmpdir, :memory: -- names no install and gets a
+  // path that names no file, which reads as unconfigured. TYPESAFE_API_KEY
+  // still overrides, for tests that want the client exercised.
+  const CORPUS_SUFFIX = join('.hazlie', 'context', 'context.db');
+  const dbPath = typeof policy.dbPath === 'string' ? policy.dbPath : '';
+  const installHome = dbPath.endsWith(`/${CORPUS_SUFFIX}`) ? dbPath.slice(0, -(CORPUS_SUFFIX.length + 1)) : null;
   const keyPath = typeof section.keyPath === 'string' && section.keyPath
     ? section.keyPath
     : installHome
       ? join(installHome, '.hazlie', 'secrets', 'typesafe-api-key.txt')
-      : join(dirname(configFile), '.no-install-no-judgment-key');
+      : join(dirname(ownerConfigFile(policy)), '.no-install-no-judgment-key');
   const key = JSON.stringify({ ...section, keyPath });
   let client = jevClients.get(key);
   if (!client) {
@@ -3870,13 +3877,13 @@ function pageBuiltRecently(db, personKey, now) {
   return page.builtAt !== null && page.builtAt > now - PAGE_RECENT_BUILD_MS;
 }
 
-async function runPageBuilds(db, engine, rel, batchId, personKeys) {
+async function runPageBuilds(db, engine, rel, batchId, personKeys, extras = {}) {
   const now = Date.now();
   const toBuild = personKeys.filter((personKey) => !pageBuiltRecently(db, personKey, now));
   rel.pagesBuilding = { batchId, done: 0, total: toBuild.length, lastError: null };
   for (let i = 0; i < toBuild.length; i++) {
     try {
-      await buildPersonPage(db, engine, toBuild[i], { now: Date.now() });
+      await buildPersonPage(db, engine, toBuild[i], { now: Date.now(), ...extras });
     } catch (e) {
       // Never throw into the request: this loop runs unawaited, well after
       // the refill/refresh response already went out. Record the failure and
@@ -3918,7 +3925,10 @@ function startPageBuilds(db, policy, rel, batchId, cards) {
   }
   rel.pagesBuildingActive = true;
   const engine = relationshipMemoryEngine(policy);
-  const drain = (id, keys) => runPageBuilds(db, engine, rel, id, keys)
+  // The judgment engine fills the sections the generative page leaves empty
+  // (design step 6); its config flag rides along.
+  const extras = { jev: relationshipJev(policy), judgments: readOwnerConfig(policy)?.relationshipMemory?.jev?.judgments ?? {} };
+  const drain = (id, keys) => runPageBuilds(db, engine, rel, id, keys, extras)
     .catch((e) => { rel.pagesBuilding = { ...(rel.pagesBuilding ?? {}), lastError: String(e?.message ?? e) }; })
     .then(() => {
       const next = rel.pagesPending ?? null;
@@ -5330,7 +5340,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // still wins outright, so a route test's fake engine cannot be bypassed
     // by a body field it did not anticipate.
     const engine = relationshipMemoryEngine(policy, body.engine);
-    const result = await buildPersonPage(db, engine, body.personKey, { now: Date.now() });
+    const result = await buildPersonPage(db, engine, body.personKey, {
+      now: Date.now(), jev: relationshipJev(policy), judgments: readOwnerConfig(policy)?.relationshipMemory?.jev?.judgments ?? {},
+    });
     send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
     return;
   }
@@ -5427,6 +5439,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       onAc: body.onAc ?? null,
       thermal: body.thermal ?? null,
       now: Date.now(),
+      // Sub-role and firm are the judgment engine's picks when it answers.
+      jev: relationshipJev(policy),
+      judgments: readOwnerConfig(policy)?.relationshipMemory?.jev?.judgments ?? {},
     });
     // The pool judgment pass rides the same tick (fire-and-forget; its own
     // guard refuses when a pass is running or the engine is not ok). One
@@ -8325,6 +8340,9 @@ export async function start({
         relationshipCap,
         relationshipProducerConfig,
         ownerConfigPath: ownerConfigPathOverride,
+        // The database this server serves; the judgment engine's key must
+        // belong to the same install (relationshipJev), never to "this Mac".
+        dbPath: resolvedDbPath,
         relationshipMemoryEngine: relationshipMemoryEngineOverride,
         relationshipLookupEngine: relationshipLookupEngineOverride,
         relationshipHolder,

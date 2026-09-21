@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
+import { pageJudgments } from './judgments.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const PROMPT_PATH = join(here, '..', '..', '..', 'prompts', 'person_page.md');
@@ -342,35 +343,60 @@ export function storePage(db, { personKey, engineName, model, kept, now = Date.n
 // the whole page (stores nothing, still records the attempt via the
 // distill_run row only when at least one item survives -- an all-empty page
 // is simply not written) when the model returned nothing usable.
-export async function buildPersonPage(db, engine, personKey, { now = Date.now() } = {}) {
+export async function buildPersonPage(db, engine, personKey, { now = Date.now(), jev = null, judgments = {} } = {}) {
   const person = personInfo(db, personKey);
   const gathered = gatherPersonContext(db, personKey);
   if (gathered.excerpts.filter((e) => e.speaker === 'THEM').length === 0) {
     return { personKey, kept: 0, dropped: 0, skipped: 0, rejected: 0, reason: 'no THEM excerpts' };
   }
 
-  const system = readFileSync(PROMPT_PATH, 'utf8');
-  const user = renderPrompt(person, gathered);
-
-  let raw;
-  try {
-    raw = await engine.complete({ system, user, maxTokens: 1024 });
-  } catch (err) {
-    return { personKey, kept: 0, dropped: 0, skipped: 0, rejected: 0, reason: `engine error: ${err?.message ?? err}` };
+  // THE GENERATIVE PAGE, exactly as before -- and its failure is no longer the
+  // end of the build (design step 6, 2026-09-21): a quote-only pass below can
+  // still fill sections from the person's own lines.
+  let kept = [];
+  let dropped = [];
+  let reason = null;
+  if (engine) {
+    const system = readFileSync(PROMPT_PATH, 'utf8');
+    const user = renderPrompt(person, gathered);
+    let raw = null;
+    try {
+      raw = await engine.complete({ system, user, maxTokens: 1024 });
+    } catch (err) {
+      reason = `engine error: ${err?.message ?? err}`;
+    }
+    if (raw !== null) {
+      const parsed = parsePageJson(raw);
+      if (!parsed.ok) reason = parsed.reason;
+      else ({ kept, dropped } = groundPage(parsed.page, gathered));
+    }
+  } else {
+    reason = 'no engine';
   }
 
-  const parsed = parsePageJson(raw);
-  if (!parsed.ok) {
-    return { personKey, kept: 0, dropped: 0, skipped: 0, rejected: 0, reason: parsed.reason };
+  // QUOTE-ONLY SECTIONS: for every section the engine left empty, the
+  // judgment engine picks the line that best answers it, or none. text and
+  // quote are the same verbatim line, so storePage's live-row check passes by
+  // construction; a quote-only page cannot be ungrounded, only empty.
+  let judged = 0;
+  if (jev && jev.state === 'ok' && judgments.page !== false) {
+    try {
+      const filled = new Set(kept.map((k) => k.section));
+      const picks = (await pageJudgments(db, jev, { personKey, excerpts: gathered.excerpts, now })).kept
+        .filter((p) => !filled.has(p.section));
+      judged = picks.length;
+      kept = [...kept, ...picks];
+    } catch {
+      judged = 0;
+    }
   }
 
-  const { kept, dropped } = groundPage(parsed.page, gathered);
   if (kept.length === 0) {
-    return { personKey, kept: 0, dropped: dropped.length, skipped: 0, rejected: 0, reason: 'no grounded items' };
+    return { personKey, kept: 0, dropped: dropped.length, skipped: 0, rejected: 0, reason: reason ?? 'no grounded items' };
   }
 
-  const result = storePage(db, { personKey, engineName: engine.name, model: engine.model, kept, now });
-  return { personKey, kept: result.stored, dropped: dropped.length, skipped: result.skipped, rejected: result.rejected };
+  const result = storePage(db, { personKey, engineName: judged > 0 && kept.length === judged ? 'jev' : (engine?.name ?? 'jev'), model: engine?.model ?? jev?.model ?? 'jev', kept, now });
+  return { personKey, kept: result.stored, dropped: dropped.length, skipped: result.skipped, rejected: result.rejected, judged, ...(reason ? { engineReason: reason } : {}) };
 }
 
 // Read back the built page: accepted or pending items render, rejected are
