@@ -145,7 +145,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // shows a person's own job title now, and the profile it came from is the
     // obvious next thing to look at.
     "reconnect": ["relCard", "relEvent", "relRefresh", "relMode", "relDraft", "close", "fitContent",
-                  "openProfile"],
+                  "openProfile",
+                  // "Looking for" (2026-09-21): the ask strip on the card panel.
+                  // Five relays to hermes' bearer-only ask routes; the page
+                  // sends an id, a boolean or a short text and nothing else.
+                  "askList", "askCreate", "askActive", "askDelete", "askMatches"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -1842,6 +1846,44 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         peekPath += "&mode=\(mode)"
       }
       relHermes("GET", peekPath, json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    // "LOOKING FOR" (plan step 2). Each case relays exactly one hermes ask
+    // route and forwards only the fields it names, so the page can neither
+    // reach another route nor smuggle a field. The text is bounded here too:
+    // hermes bounds it again, but a 2 MB string should not cross the bridge.
+    case "askList":
+      relHermes("GET", "admin/relationship/ask", json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+    case "askCreate":
+      let askText = String((payload["text"] as? String ?? "").prefix(400))
+      guard !askText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        reply(webView, id, ["state": "error", "error": "empty"]); return
+      }
+      relHermes("POST", "admin/relationship/ask", json: ["text": askText]) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+    case "askActive":
+      guard let askId = payload["id"] as? Int, let active = payload["active"] as? Bool else {
+        reply(webView, id, ["state": "error", "error": "id and active required"]); return
+      }
+      relHermes("POST", "admin/relationship/ask/active", json: ["id": askId, "active": active]) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+    case "askDelete":
+      guard let askId = payload["id"] as? Int else {
+        reply(webView, id, ["state": "error", "error": "id required"]); return
+      }
+      relHermes("POST", "admin/relationship/ask/delete", json: ["id": askId]) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+    case "askMatches":
+      guard let askId = payload["id"] as? Int else {
+        reply(webView, id, ["state": "error", "error": "id required"]); return
+      }
+      relHermes("GET", "admin/relationship/ask/matches?id=\(askId)&limit=20", json: nil) { [weak self] out in
         self?.reply(webView, id, out)
       }
 

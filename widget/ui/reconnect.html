@@ -39,6 +39,20 @@
          about the chips, and outside #rcCard because it is true of the empty
          state too. See reconnect.js showModeFallback. -->
     <p class="rc-fallback" id="rcFallback" hidden></p>
+    <!-- LOOKING FOR (2026-09-21). Where the mode chips sat: one line to type
+         who you are looking for, a chip per ask (tap for its matches, ✕ to
+         drop, ⏸ to pause), and the matches list under the chip you opened. It
+         is an extension of this card, not a window: the daily card serves the
+         best match, this strip is where you browse. -->
+    <div class="rc-ask" id="rcAsk">
+      <form class="rc-ask-form" id="rcAskForm" autocomplete="off">
+        <input class="rc-ask-input" id="rcAskInput" type="text" maxlength="400"
+               placeholder="who are you looking for?" aria-label="who are you looking for">
+        <button class="rc-ask-go" id="rcAskGo" type="submit">find</button>
+      </form>
+      <div class="rc-ask-chips" id="rcAskChips" role="list"></div>
+      <div class="rc-ask-list" id="rcAskList" hidden></div>
+    </div>
     <div id="rcCard">
       <div class="rc-body" id="rcBody">
         <div class="rc-trigger" id="rcTrigger"></div>

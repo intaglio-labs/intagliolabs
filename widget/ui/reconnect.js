@@ -1073,9 +1073,144 @@ const modesReady = hzFeatures()
 // gone. So the pause is redrawn and nothing is fetched. Every other state
 // still refetches, which is what this hook is for.
 window.__hzReconnectShow = () => {
+  loadAsks();
   if (awaitingPull) { fit(); return; }
   // Later re-shows are long past the registry's answer; the first one may not
   // be, and it goes through the same gate for the same reason.
   modesReady.then(pull);
 };
 modesReady.then(pull);
+
+// ---- LOOKING FOR (plan step 2, 2026-09-21) ----------------------------------
+//
+// One line to type who you are looking for; a chip per ask; the matches list
+// under the chip you open. Everything here is read from hermes' ask routes
+// through five bridge verbs and drawn as text: names, a level pill and the
+// "fits because" the judgment engine picked. Nothing on this strip spends the
+// day's card -- browsing is free, the card is the nudge.
+let asks = [];
+let openAskId = null;
+
+function levelWord(level) {
+  if (!Number.isFinite(level)) return '';
+  if (level >= 3.5) return 'exactly';
+  if (level >= 3) return 'close';
+  if (level >= 2.5) return 'partly';
+  return 'weak';
+}
+
+function renderAskChips() {
+  const chips = el('rcAskChips');
+  if (!chips) return;
+  chips.replaceChildren(...asks.map((a) => {
+    const chip = document.createElement('div');
+    chip.className = 'rc-ask-chip' + (a.id === openAskId ? ' rc-ask-chip-open' : '') + (a.active ? '' : ' rc-ask-chip-paused');
+    chip.setAttribute('role', 'listitem');
+    const label = document.createElement('button');
+    label.type = 'button';
+    label.className = 'rc-ask-chip-label';
+    const n = a.status?.matches ?? a.matches ?? 0;
+    const progress = a.running ? ' · looking…' : a.status && a.status.remaining > 0 ? ` · ${a.status.judged}/${a.status.pool}` : '';
+    label.textContent = `${a.text} · ${n} ${n === 1 ? 'match' : 'matches'}${progress}`;
+    label.title = a.active ? 'tap for the matches' : 'paused — tap ▶ to resume';
+    label.addEventListener('click', () => toggleAskList(a.id));
+    const pause = document.createElement('button');
+    pause.type = 'button';
+    pause.className = 'rc-ask-chip-btn';
+    pause.textContent = a.active ? '⏸' : '▶';
+    pause.title = a.active ? 'pause this ask' : 'resume this ask';
+    pause.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await hzPost('askActive', { id: a.id, active: !a.active }).catch(() => {});
+      loadAsks();
+    });
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'rc-ask-chip-btn';
+    drop.textContent = '✕';
+    drop.title = 'drop this ask';
+    drop.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await hzPost('askDelete', { id: a.id }).catch(() => {});
+      if (openAskId === a.id) { openAskId = null; el('rcAskList').hidden = true; }
+      loadAsks();
+    });
+    chip.append(label, pause, drop);
+    return chip;
+  }));
+  fit();
+}
+
+async function toggleAskList(id) {
+  const list = el('rcAskList');
+  if (openAskId === id) { openAskId = null; list.hidden = true; renderAskChips(); return; }
+  openAskId = id;
+  renderAskChips();
+  list.hidden = false;
+  list.replaceChildren(Object.assign(document.createElement('div'), { className: 'rc-ask-note', textContent: 'looking…' }));
+  fit();
+  const out = await hzPost('askMatches', { id }).catch(() => null);
+  if (openAskId !== id) return;
+  const rows = Array.isArray(out?.matches) ? out.matches : [];
+  if (rows.length === 0) {
+    const status = out?.status;
+    const note = status && status.remaining > 0
+      ? `nothing clearly fits yet · ${status.judged} of ${status.pool} looked at`
+      : 'nothing clearly fits — try naming a role, a company or a place';
+    list.replaceChildren(Object.assign(document.createElement('div'), { className: 'rc-ask-note', textContent: note }));
+    fit();
+    return;
+  }
+  list.replaceChildren(...rows.map((m) => {
+    const row = document.createElement('div');
+    row.className = 'rc-ask-row';
+    const head = document.createElement('div');
+    head.className = 'rc-ask-row-head';
+    const name = document.createElement('span');
+    name.className = 'rc-ask-name';
+    name.textContent = asText(m.name) || 'someone';
+    const pill = document.createElement('span');
+    pill.className = 'rc-ask-pill';
+    pill.textContent = levelWord(m.fitLevel);
+    pill.title = `fit ${Number.isFinite(m.fit) ? m.fit.toFixed(2) : '—'} · level ${Number.isFinite(m.fitLevel) ? m.fitLevel.toFixed(1) : '—'} of 4`;
+    head.append(name, pill);
+    row.append(head);
+    const work = [asText(m.title), asText(m.company)].filter(Boolean).join(' · ');
+    if (work) row.append(Object.assign(document.createElement('div'), { className: 'rc-ask-work', textContent: work }));
+    const because = asText(m.fitsBecause);
+    if (because) row.append(Object.assign(document.createElement('div'), { className: 'rc-ask-because', textContent: because }));
+    return row;
+  }));
+  fit();
+}
+
+async function loadAsks() {
+  if (!el('rcAskChips')) return;
+  const out = await hzPost('askList').catch(() => null);
+  if (!out || !Array.isArray(out.asks)) return;
+  asks = out.asks;
+  const engineOff = out.engine && out.engine !== 'ok';
+  el('rcAskForm').hidden = false;
+  el('rcAskInput').placeholder = engineOff ? 'looking for needs the judgment engine (see settings)' : 'who are you looking for?';
+  el('rcAskInput').disabled = Boolean(engineOff);
+  el('rcAskGo').disabled = Boolean(engineOff);
+  renderAskChips();
+  // A pass that is still running: poll the chips while the panel is open so
+  // the count grows in front of the owner.
+  if (asks.some((a) => a.running)) setTimeout(() => { if (!el('rcAsk').hidden) loadAsks(); }, 4000);
+}
+
+el('rcAskForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = el('rcAskInput');
+  const text = asText(input.value);
+  if (text.length < 3) return;
+  input.disabled = true;
+  const out = await hzPost('askCreate', { text }).catch(() => null);
+  input.disabled = false;
+  if (out?.ask?.id) { input.value = ''; openAskId = out.ask.id; }
+  await loadAsks();
+  if (out?.ask?.id) toggleAskList(out.ask.id).then(() => { openAskId = out.ask.id; renderAskChips(); });
+});
+
+loadAsks();
